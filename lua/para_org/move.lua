@@ -5,21 +5,9 @@
 
 local Path = require('plenary.path')
 local config = require('para_org.config').options
+local utils = require('para_org.utils')
 
 local M = {}
-
--- A basic frontmatter parser, similar to the one in the indexer.
--- In a refactor, this could be moved to a shared 'utils' module.
-local function parse_frontmatter(content)
-  local start_delim, end_delim = table.unpack(config.patterns.frontmatter_delimiters)
-  local _, start_pos = content:find(start_delim, 1, true)
-  local fm_end, end_pos = content:find(end_delim, start_pos + 1, true)
-  if not fm_end then return nil, content end
-
-  local fm_content = content:sub(start_pos + 1, end_pos - #end_delim - 1)
-  local body_content = content:sub(end_pos + 1)
-  return fm_content, body_content
-end
 
 -- Safely moves a file to the archive directory.
 -- If a file with the same name exists, it appends a timestamp.
@@ -70,7 +58,7 @@ function M.move_to_dest(original_path, para_dest_path)
   -- 3. Archive the original file
   if M.archive_note(original_path) then
     -- 4. Record the successful move for the learning engine
-    local _, frontmatter = parse_frontmatter(original_p:read())
+    local frontmatter, _ = utils.parse_frontmatter(original_p:read())
     require('para_org.learn').record_move(frontmatter, para_dest_path)
 
     vim.notify('Successfully moved ' .. original_p.name .. ' to ' .. dest_p:shorten(40), vim.log.levels.INFO)
