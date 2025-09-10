@@ -18,7 +18,7 @@ end
 -- Asynchronously builds the index by scanning all notes.
 function M.reindex()
   async.run(function()
-    vim.notify('Starting PARA reindex...', vim.log.levels.INFO, { title = 'PARAOrganize' })
+    vim.notify('Starting PARA reindex...', vim.log.levels.INFO, { title = 'PARA-Organize' })
 
     local root = Path:new(config.root_dir)
     if not root:exists() or not root:is_dir() then
@@ -30,28 +30,26 @@ function M.reindex()
     local scanner = require('plenary.scandir').scan_dir(root:absolute(), {
       hidden = true,
       respect_gitignore = true,
-      glob_pattern = '**/' .. config.patterns.file_glob,
+      glob = '**/' .. config.patterns.file_glob,
     })
 
     for _, file_path in ipairs(scanner) do
       local path = Path:new(file_path)
-      if path:is_file() then
-        local content, err = path:read()
-        if content and not err then
-          local frontmatter, _ = utils.parse_frontmatter(content)
-          table.insert(index, {
-            path = path:absolute(),
-            frontmatter = frontmatter,
-            -- TODO: Add more indexed fields as per spec (tags, sources, etc.)
-          })
-        end
+      local content, err = path:read()
+      if content and not err then
+        local frontmatter, _ = utils.parse_frontmatter(content)
+        table.insert(index, {
+          path = path:absolute(),
+          frontmatter = frontmatter,
+          -- TODO: Add more indexed fields as per spec (tags, sources, etc.)
+        })
       end
     end
 
     local index_file = get_index_file_path()
     index_file:write(vim.fn.json_encode(index), 'w')
 
-    vim.notify('PARA reindex complete. Found ' .. #index .. ' notes.', vim.log.levels.INFO, { title = 'PARAOrganize' })
+    vim.notify('PARA reindex complete. Found ' .. #index .. ' notes.', vim.log.levels.INFO, { title = 'PARA-Organize' })
   end)
 end
 
