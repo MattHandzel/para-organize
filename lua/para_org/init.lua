@@ -35,7 +35,7 @@ function M.execute(opts)
   local handler = commands[subcommand]
   if handler then
     -- Pass remaining arguments to the handler
-    handler(table.unpack(opts.fargs, 2))
+    handler(unpack(opts.fargs, 2))
   else
     vim.notify('Unknown PARAOrganize subcommand: ' .. tostring(subcommand), vim.log.levels.ERROR)
   end

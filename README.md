@@ -18,7 +18,6 @@ Install with your favorite plugin manager. Here is an example using `lazy.nvim`:
 
 ```lua
 {
-  -- NOTE: Replace with the actual repository path when published
   'MattHandzel/para-organize',
   dependencies = {
     'nvim-lua/plenary.nvim',
@@ -40,6 +39,7 @@ Install with your favorite plugin manager. Here is an example using `lazy.nvim`:
 2.  **Start Organizing**: Run `:PARAOrganize start`. A Telescope window will open with a list of your notes.
 3.  **Select a Note**: Choose a note from the list to begin organizing.
 4.  **Process Your Notes**:
+
     - **Single Note**: Press `<CR>` on a single note to open the Organizer UI.
     - **Batch Processing**: Use `<Tab>` to select multiple notes, then press `<C-p>` (Process) to organize them one after another in a session.
 
@@ -61,10 +61,10 @@ require('para_org').setup({
 
   -- Names for the top-level PARA folders.
   folders = {
-    Projects = 'Projects',
-    Areas = 'Areas',
-    Resources = 'Resources',
-    Archives = 'Archives',
+    Projects = 'projects',
+    Areas = 'areas',
+    Resources = 'resources',
+    Archives = 'archives',
   },
 
   -- Path under Archives to store original captures after a move.
