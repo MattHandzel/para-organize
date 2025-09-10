@@ -35,7 +35,7 @@ Install with your favorite plugin manager. Here is an example using `lazy.nvim`:
 
 ## Usage
 
-1.  **Index Your Notes**: Run `:PARAOrganize reindex` to scan your notes directory. This builds the search index that powers the plugin.
+1.  **Index Your Notes**: Run `:PARAOrganize reindex` to scan your `capture/raw_capture` directory. This builds the search index that powers the plugin.
 2.  **Start Organizing**: Run `:PARAOrganize start`. A Telescope window will open with a list of your notes.
 3.  **Select a Note**: Choose a note from the list to begin organizing.
 4.  **Process Your Notes**:

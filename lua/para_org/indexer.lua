@@ -20,9 +20,9 @@ function M.reindex()
   async.run(function()
     vim.notify('Starting PARA reindex...', vim.log.levels.INFO, { title = 'PARA-Organize' })
 
-    local root = Path:new(config.root_dir)
+    local root = Path:new(config.root_dir, 'capture', 'raw_capture')
     if not root:exists() or not root:is_dir() then
-      vim.notify('Root directory not found: ' .. config.root_dir, vim.log.levels.ERROR)
+      vim.notify('Capture directory not found: ' .. root:absolute(), vim.log.levels.ERROR)
       return
     end
 
@@ -35,14 +35,16 @@ function M.reindex()
 
     for _, file_path in ipairs(scanner) do
       local path = Path:new(file_path)
-      local content, err = path:read()
-      if content and not err then
-        local frontmatter, _ = utils.parse_frontmatter(content)
-        table.insert(index, {
-          path = path:absolute(),
-          frontmatter = frontmatter,
-          -- TODO: Add more indexed fields as per spec (tags, sources, etc.)
-        })
+      if path:is_file() then
+        local content, err = path:read()
+        if content and not err then
+          local frontmatter, _ = utils.parse_frontmatter(content)
+          table.insert(index, {
+            path = path:absolute(),
+            frontmatter = frontmatter,
+            -- TODO: Add more indexed fields as per spec (tags, sources, etc.)
+          })
+        end
       end
     end
 

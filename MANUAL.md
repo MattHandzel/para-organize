@@ -6,7 +6,7 @@ This document provides a detailed guide to the features and workflows of `para-o
 
 ### The Index
 
-The plugin's speed and intelligence come from a JSON-based index of your notes. This index stores file paths and parsed frontmatter. To keep it up-to-date, run `:PARAOrganize reindex` whenever you add or modify notes outside of the plugin's workflow. The index is stored in your Neovim data directory (e.g., `~/.local/share/nvim/para_org_index.json`).
+The plugin's speed and intelligence come from a JSON-based index of your notes. This index stores file paths and parsed frontmatter. It is built by scanning the `capture/raw_capture` directory inside your vault. To keep it up-to-date, run `:PARAOrganize reindex` whenever you add new notes. The index is stored in your Neovim data directory (e.g., `~/.local/share/nvim/para_org_index.json`).
 
 ### The Organizer UI
 
