@@ -13,7 +13,7 @@ local M = {}
 -- It extracts key-value pairs from the frontmatter block.
 -- NOTE: This is not a full YAML parser and has limitations.
 local function parse_frontmatter(content)
-  local start_delim, end_delim = table.unpack(config.patterns.frontmatter_delimiters)
+  local start_delim, end_delim = unpack(config.patterns.frontmatter_delimiters)
   local _, start_pos = content:find(start_delim, 1, true)
   if not start_pos then return {}, nil end
 
