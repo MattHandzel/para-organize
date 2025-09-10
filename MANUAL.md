@@ -17,6 +17,8 @@ The main interface is a two-pane layout that appears after you select a note to 
 
 ## Workflows
 
+There are three primary workflows for processing a note.
+
 There are two primary workflows for processing a note.
 
 ### 1. Quick Organize
@@ -29,7 +31,19 @@ This is the fastest way to file a note when the suggestions are accurate.
 4.  Press `<CR>`.
 5.  The original note is copied to the destination folder and the capture is archived. The UI closes.
 
-### 2. Merge Flow
+### 2. Batch Processing
+
+This is the most efficient way to clear a large number of captures.
+
+1.  Run `:PARAOrganize start`.
+2.  In the Telescope picker, navigate to a note you want to include in your batch and press `<Tab>` to select it. The entry will be marked.
+3.  Select as many notes as you like.
+4.  Press `<C-p>` (for "Process") to begin the session.
+5.  The Organizer UI will open with the first note.
+6.  When you action that note (move, merge, or skip), the UI will automatically load the next note in your batch.
+7.  The session ends when the last note is processed.
+
+### 3. Merge Flow
 
 Use this workflow when you want to consolidate a new capture into an existing note.
 
@@ -56,6 +70,12 @@ These keymaps are active only when the organizer UI is open.
 
 - `q`: Close the organizer UI.
 
+### In the Telescope Capture List:
+
+- `<CR>`: Start a session with the single selected note.
+- `<Tab>`: Add/remove a note from the multi-selection.
+- `<C-p>`: Process all selected notes in a batch session.
+
 ### In the Suggestions List:
 
 - `<CR>`: Accept the selected suggestion and move the note.
@@ -64,3 +84,4 @@ These keymaps are active only when the organizer UI is open.
 ### In the Folder Contents List:
 
 - `<CR>`: Select a note to merge into.
+- `<leader>s`: Skip the current note and move to the next one in the batch.

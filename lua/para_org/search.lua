@@ -40,11 +40,26 @@ function M.list_captures(opts)
     },
     sorter = conf.generic_sorter(opts),
     attach_mappings = function(prompt_bufnr, map)
+      -- Mappings for multi-selection
+      map('i', '<Tab>', actions.toggle_selection + actions.move_selection_next)
+      map('n', '<Tab>', actions.toggle_selection + actions.move_selection_next)
+      map('i', '<S-Tab>', actions.toggle_selection + actions.move_selection_previous)
+      map('n', '<S-Tab>', actions.toggle_selection + actions.move_selection_previous)
+
+      -- Mapping to process the selection
+      map('i', '<C-p>', function(bufnr)
+        local selection = action_state.get_multi_selection()
+        actions.close(bufnr)
+        if #selection > 0 then
+          require('para_org.ui').start_session(selection)
+        end
+      end)
+
       actions.select_default:replace(function()
         actions.close(prompt_bufnr)
         local selection = action_state.get_selected_entry()
         if selection then
-                    -- For single selection, start a session with just that one note
+          -- For single selection, start a session with just that one note
           require('para_org.ui').start_session({ selection })
         end
       end)

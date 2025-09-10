@@ -14,6 +14,7 @@ local M = {}
 local state = {
   layout = nil,
   active_note = nil,
+  session_queue = {},
 }
 
 -- Stops and cleans up the organization UI.
@@ -21,7 +22,8 @@ function M.stop()
   if state.layout and state.layout:is_mounted() then
     state.layout:unmount()
     state.layout = nil
-    state.active_note = nil -- Clear the active note
+        state.active_note = nil -- Clear the active note
+    state.session_queue = {} -- Clear the queue
     vim.notify('PARAOrganize session stopped.', vim.log.levels.INFO, { title = 'PARAOrganize' })
   end
 end
@@ -65,11 +67,11 @@ function M.open_organization_view(note)
       local move = require('para_org.move')
       if suggestion.path == 'archive' then
         if move.archive_note(state.active_note.path) then
-          M.stop()
+          M.process_next_in_queue()
         end
       else
         if move.move_to_dest(state.active_note.path, suggestion.path) then
-          M.stop()
+          M.process_next_in_queue()
         end
       end
     end,
@@ -95,8 +97,26 @@ function M.open_organization_view(note)
   vim.api.nvim_buf_set_option(capture_popup.bufnr, 'modifiable', true)
 
   vim.keymap.set('n', 'q', M.stop, { buffer = capture_popup.bufnr, nowait = true, silent = true, desc = 'Close Organizer' })
-    vim.keymap.set('n', 'q', M.stop, { buffer = suggestion_menu.bufnr, nowait = true, silent = true, desc = 'Close Organizer' })
+      vim.keymap.set('n', 'q', M.stop, { buffer = suggestion_menu.bufnr, nowait = true, silent = true, desc = 'Close Organizer' })
+  vim.keymap.set('n', '<leader>s', M.process_next_in_queue, { buffer = suggestion_menu.bufnr, nowait = true, silent = true, desc = 'Skip to Next' })
   vim.keymap.set('n', '/', function() require('para_org.search').find_para_folders() end, { buffer = suggestion_menu.bufnr, nowait = true, silent = true, desc = 'Find PARA Folder' })
+end
+
+-- Processes the next note in the session queue, or stops if the queue is empty.
+function M.process_next_in_queue()
+  if #state.session_queue > 0 then
+    local next_note = table.remove(state.session_queue, 1)
+    M.open_organization_view(next_note.value)
+  else
+    vim.notify('All notes processed!', vim.log.levels.INFO, { title = 'PARAOrganize' })
+    M.stop()
+  end
+end
+
+-- Starts a new organizing session with a queue of notes.
+function M.start_session(notes)
+  state.session_queue = notes
+  M.process_next_in_queue()
 end
 
 -- The main entry point to start an organizing session.

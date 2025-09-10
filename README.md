@@ -19,7 +19,7 @@ Install with your favorite plugin manager. Here is an example using `lazy.nvim`:
 ```lua
 {
   -- NOTE: Replace with the actual repository path when published
-  'your-github-username/para-organize.nvim',
+  'MattHandzel/para-organize',
   dependencies = {
     'nvim-lua/plenary.nvim',
     'nvim-telescope/telescope.nvim',
@@ -39,7 +39,11 @@ Install with your favorite plugin manager. Here is an example using `lazy.nvim`:
 1.  **Index Your Notes**: Run `:PARAOrganize reindex` to scan your notes directory. This builds the search index that powers the plugin.
 2.  **Start Organizing**: Run `:PARAOrganize start`. A Telescope window will open with a list of your notes.
 3.  **Select a Note**: Choose a note from the list to begin organizing.
-4.  **Use the Organizer UI**:
+4.  **Process Your Notes**:
+    - **Single Note**: Press `<CR>` on a single note to open the Organizer UI.
+    - **Batch Processing**: Use `<Tab>` to select multiple notes, then press `<C-p>` (Process) to organize them one after another in a session.
+
+5.  **Use the Organizer UI**:
     - The left pane shows the content of your note. You can edit it freely.
     - The right pane shows a ranked list of suggested destinations.
     - **Accept a suggestion**: Press `<CR>` on a suggestion to move the note to that folder.
