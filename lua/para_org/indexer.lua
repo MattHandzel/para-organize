@@ -58,7 +58,7 @@ function M.reindex()
       glob_pattern = '**/' .. config.patterns.file_glob,
     })
 
-    for file_path in scanner do
+    for _, file_path in ipairs(scanner) do
       local path = Path:new(file_path)
       local content, err = path:read()
       if content and not err then
