@@ -399,8 +399,9 @@ function M.setup_keymaps()
   vim.keymap.set('n', keymaps.merge, M.enter_merge_mode, capture_opts)
   vim.keymap.set('n', keymaps.search, M.search_folders, capture_opts)
   vim.keymap.set('n', keymaps.help, M.show_help, capture_opts)
-  vim.keymap.set('n', 'j', M.next_suggestion, capture_opts)
-  vim.keymap.set('n', 'k', M.prev_suggestion, capture_opts)
+  -- Use Alt+j/k for suggestion navigation instead of overriding j/k
+  vim.keymap.set('n', '<A-j>', M.next_suggestion, capture_opts)
+  vim.keymap.set('n', '<A-k>', M.prev_suggestion, capture_opts)
   -- Add pane switching
   vim.keymap.set('n', '<C-l>', function() vim.api.nvim_set_current_win(ui_state.organize_popup.winid) end, capture_opts)
   
@@ -409,11 +410,17 @@ function M.setup_keymaps()
   
   vim.keymap.set('n', keymaps.accept, M.accept_suggestion, organize_opts)
   vim.keymap.set('n', keymaps.cancel, M.close, organize_opts)
-  vim.keymap.set('n', 'j', M.next_suggestion, organize_opts)
-  vim.keymap.set('n', 'k', M.prev_suggestion, organize_opts)
+  -- Use Alt+j/k for suggestion navigation instead of overriding j/k
+  vim.keymap.set('n', '<A-j>', M.next_suggestion, organize_opts)
+  vim.keymap.set('n', '<A-k>', M.prev_suggestion, organize_opts)
   vim.keymap.set('n', 's', M.change_sort_order, organize_opts)
   vim.keymap.set('n', '/', M.search_folders, organize_opts)
-  vim.keymap.set('n', '<CR>', M.open_item, organize_opts)
+  -- Only map Enter to open_item when not in merge mode
+  vim.keymap.set('n', '<CR>', function()
+    if not ui_state.merge_mode then
+      M.open_item()
+    end
+  end, organize_opts)
   vim.keymap.set('n', '<BS>', M.back_to_parent, organize_opts)
   -- Add pane switching
   vim.keymap.set('n', '<C-h>', function() vim.api.nvim_set_current_win(ui_state.capture_popup.winid) end, organize_opts)
@@ -504,6 +511,8 @@ function M.enter_merge_mode()
   ui_state.capture_popup.border:set_text("top", " Capture (Merge Mode) ")
   ui_state.organize_popup.border:set_text("top", " Select Destination ")
   
+  -- Debug info
+  vim.notify("DEBUG: merge_mode is being set to true", vim.log.levels.DEBUG)
   ui_state.merge_mode = true
   
   -- Open folder picker to select destination
@@ -607,10 +616,11 @@ function M.show_help()
     " PARA Organize - Keyboard Shortcuts",
     "",
     " Navigation:",
-    "   j/k         Move selection up/down",
+    "   j/k         Normal cursor movement",
+    "   <Alt-j/k>   Move selection up/down",
     "   <Tab>       Next capture",
     "   <S-Tab>     Previous capture",
-    "   Up/Down     Move cursor (normal Vim navigation works)",
+    "   Up/Down     Move cursor (all normal Vim navigation works)",
     "   <C-h>/<C-l>  Switch between left/right panes",
     "",
     " Actions:",
@@ -710,10 +720,23 @@ end
 
 -- Open directory or file in right pane
 function M.open_item()
+  -- Output debug info
+  vim.notify("DEBUG: open_item function called", vim.log.levels.DEBUG)
+  
+  -- Get the current line under cursor
   local line = vim.api.nvim_win_get_cursor(ui_state.organize_popup.winid)[1]
   local content = vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, line - 1, line, false)[1]
+  
+  if not content then
+    vim.notify("No content found at current line", vim.log.levels.WARN)
+    return
+  end
+  
+  vim.notify("Line content: " .. content, vim.log.levels.DEBUG)
+  
   if content:match("^%[.%] ") then
     local name = content:match("^%[.%] (.+)")
+    vim.notify("Opening folder: " .. name, vim.log.levels.INFO)
     local dir = indexer.get_directory_by_name(name)
     if dir then
       local sub_items = indexer.get_sub_items(dir.path)
@@ -737,6 +760,7 @@ function M.open_item()
     end
   elseif content:match("^%[F%] ") then
     local name = content:match("^%[F%] (.+)")
+    vim.notify("Selected file for merge: " .. name, vim.log.levels.INFO)
     local file = indexer.get_file_by_alias_or_name(name)
     if file then
       -- Set up merge operation

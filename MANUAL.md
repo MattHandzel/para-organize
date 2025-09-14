@@ -138,13 +138,13 @@ When you start an organizing session, you'll see a two-pane interface:
 
 Navigate the interface with these basic commands:
 
-- **Select a suggestion**: Use `j`/`k` to navigate and `<CR>` to accept
+- **Normal cursor movement**: Use standard Vim movement keys (`j`, `k`, `h`, `l`, etc.)
+- **Select a suggestion**: Use `Alt+j`/`Alt+k` to navigate and `<CR>` to accept
 - **Navigate between captures**: Use `<Tab>` for next and `<S-Tab>` for previous
 - **Skip a capture**: Press `s` to skip the current capture
 - **Archive immediately**: Press `a` to archive without moving
 - **Search for destination**: Press `/` to open a fuzzy finder
 - **Switch between panes**: Use `<C-h>` to focus left pane, `<C-l>` to focus right pane
-- **Normal navigation**: All standard Vim movement keys work in both panes
 
 ## Advanced Features
 

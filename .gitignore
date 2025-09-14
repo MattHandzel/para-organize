@@ -1,0 +1,3 @@
+
+# Ignore the test vault with real notes
+tests/test_vault/

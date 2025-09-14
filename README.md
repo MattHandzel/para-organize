@@ -344,12 +344,13 @@ require("para-organize").setup({
    - `s` - Skip current capture
 
 4. **Organize notes**:
-   - `<CR>` - Accept suggested destination or open folder/file
+   - Normal Vim movement keys (`j`, `k`, etc.) work in both panes for cursor movement
+   - `Alt+j`/`Alt+k` - Navigate through suggestions
+   - `<CR>` - Accept selected suggestion or open folder/file
    - `m` - Merge with existing note
    - `a` - Archive immediately
    - `/` - Search for destination
    - `<C-h>`/`<C-l>` - Switch between left/right panes
-   - Normal Vim movement keys work in both panes
 
 5. **Create new destinations**:
    - `<leader>np` - New project folder
