@@ -4,8 +4,7 @@
 local M = {}
 
 -- Dependencies
-local Layout = require("nui.layout")
-local Popup = require("nui.popup")
+local layout_mod = require("para-organize.ui.layout")
 local Menu = require("nui.menu")
 local Input = require("nui.input")
 local Line = require("nui.line")
@@ -52,92 +51,10 @@ end
 function M.create_layout()
   local config = require("para-organize.config").get()
   local ui_config = config.ui
-
-  -- Create capture pane (left)
-  ui_state.capture_popup = Popup({
-    enter = true,
-    focusable = true,
-    border = {
-      style = ui_config.float_opts.border,
-      text = {
-        top = " Capture ",
-        top_align = "center",
-      },
-    },
-    win_options = {
-      winblend = 0,
-      winhighlight = "Normal:Normal,FloatBorder:FloatBorder",
-      cursorline = true,
-    },
-    buf_options = {
-      modifiable = true,
-      swapfile = false,
-      filetype = "markdown",
-    },
-  })
-
-  -- Create organize pane (right)
-  ui_state.organize_popup = Popup({
-    enter = false,
-    focusable = true,
-    border = {
-      style = ui_config.float_opts.border,
-      text = {
-        top = " Organize ",
-        top_align = "center",
-      },
-    },
-    win_options = {
-      winblend = 0,
-      winhighlight = "Normal:Normal,FloatBorder:FloatBorder",
-      cursorline = true,
-    },
-    buf_options = {
-      modifiable = true,
-      swapfile = false,
-      filetype = "markdown",
-    },
-  })
-
-  -- Create layout based on config
-  if ui_config.layout == "float" then
-    -- Floating layout
-    local width = math.floor(vim.o.columns * ui_config.float_opts.width)
-    local height = math.floor(vim.o.lines * ui_config.float_opts.height)
-
-    local position = ui_config.float_opts.position or "50%"
-    if position == "center" then
-      position = { row = "50%", col = "50%" }
-    elseif type(position) == "string" then
-      position = { row = position, col = position }
-    end
-
-    ui_state.layout = Layout(
-      {
-        position = position,
-        size = {
-          width = width,
-          height = height,
-        },
-      },
-      Layout.Box({
-        Layout.Box(ui_state.capture_popup, { size = "50%" }),
-        Layout.Box(ui_state.organize_popup, { size = "50%" }),
-      }, { dir = "row" })
-    )
-  else
-    -- Split layout
-    ui_state.layout = Layout(
-      {
-        position = "0%",
-        size = "100%",
-      },
-      Layout.Box({
-        Layout.Box(ui_state.capture_popup, { size = "50%" }),
-        Layout.Box(ui_state.organize_popup, { size = "50%" }),
-      }, { dir = ui_config.split_opts.direction == "vertical" and "row" or "col" })
-    )
-  end
+  local layout_objs = layout_mod.create_layout(ui_config)
+  ui_state.layout = layout_objs.layout
+  ui_state.capture_popup = layout_objs.capture_popup
+  ui_state.organize_popup = layout_objs.organize_popup
 end
 
 -- Open the UI
