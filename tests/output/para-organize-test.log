@@ -1466,3 +1466,333 @@
 [2025-09-14 16:38:59] [INFO] Recorded move: nil -> /test/old
 [2025-09-14 16:38:59] [DEBUG] Saved learning data
 [2025-09-14 16:38:59] [ERROR] get_archive_path called with nil filename
+[2025-09-14 16:42:07] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:07] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:07] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:07] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:07] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:07] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:07] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:07] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:07] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:07] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:07] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:42:07] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:07] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:42:07] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:07] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:42:07] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:42:07] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:42:07] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:07] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Loaded learning data with 0 associations
+[2025-09-14 16:42:07] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:07] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:07] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:07] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:07] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:07] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:07] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:07] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/projects/meetings
+[2025-09-14 16:42:07] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:07] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/persistence
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:07] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/dest1
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/dest1
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/dest1
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/dest2
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/dest2
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/dest3
+[2025-09-14 16:42:07] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:42:07] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:42:07] [DEBUG] Loaded learning data with 3 associations
+[2025-09-14 16:42:07] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [INFO] Recorded move: nil -> /test/old
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:42:07] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:42:07] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:42:07] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:42:07] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:42:07] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:42:07] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:42:07] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:42:07] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:07] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:07] [DEBUG] Saved index with 0 entries
+[2025-09-14 16:42:07] [DEBUG] Saved learning data
+[2025-09-14 16:42:07] [ERROR] get_archive_path called with nil filename
+[2025-09-14 16:42:32] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:32] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:32] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:32] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:32] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:32] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:32] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:32] [DEBUG] Loaded learning data with 0 associations
+[2025-09-14 16:42:32] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:42:32] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:32] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:42:32] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:32] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:42:32] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:32] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Loaded learning data with 0 associations
+[2025-09-14 16:42:32] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:32] [DEBUG] Loaded learning data with 0 associations
+[2025-09-14 16:42:32] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:32] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:32] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:32] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:32] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:32] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:32] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:32] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/projects/meetings
+[2025-09-14 16:42:32] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:32] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/persistence
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:32] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/dest1
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/dest1
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/dest1
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/dest2
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/dest2
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/dest3
+[2025-09-14 16:42:32] [DEBUG] Loaded learning data with 3 associations
+[2025-09-14 16:42:32] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [INFO] Recorded move: nil -> /test/old
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Loaded index with 2418 entries
+[2025-09-14 16:42:32] [DEBUG] Indexer initialized with 2418 entries
+[2025-09-14 16:42:32] [DEBUG] Loaded index with 2418 entries
+[2025-09-14 16:42:32] [DEBUG] Indexer initialized with 2418 entries
+[2025-09-14 16:42:32] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:32] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:32] [DEBUG] Saved index with 0 entries
+[2025-09-14 16:42:32] [DEBUG] Saved learning data
+[2025-09-14 16:42:32] [DEBUG] Loaded index with 2418 entries
+[2025-09-14 16:42:32] [DEBUG] Indexer initialized with 2418 entries
+[2025-09-14 16:42:32] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:42:32] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:42:32] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:42:32] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:42:32] [DEBUG] Loaded index with 2418 entries
+[2025-09-14 16:42:32] [DEBUG] Indexer initialized with 2418 entries
+[2025-09-14 16:42:32] [ERROR] get_archive_path called with nil filename
+[2025-09-14 16:42:58] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:58] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:58] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:58] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:58] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:58] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:58] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:42:58] [DEBUG] Loaded learning data with 0 associations
+[2025-09-14 16:42:58] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:42:58] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:58] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:42:58] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:58] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:42:58] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:58] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Loaded learning data with 0 associations
+[2025-09-14 16:42:58] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:58] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:58] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:58] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:58] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:58] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Loaded learning data with 0 associations
+[2025-09-14 16:42:58] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:42:58] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:58] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/projects/meetings
+[2025-09-14 16:42:58] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:58] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/persistence
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:58] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/dest1
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/dest1
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/dest1
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/dest2
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/dest2
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/dest3
+[2025-09-14 16:42:58] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:42:58] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:42:58] [DEBUG] Loaded learning data with 3 associations
+[2025-09-14 16:42:58] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [INFO] Recorded move: nil -> /test/old
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:42:58] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:42:58] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:42:58] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:42:58] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:42:58] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:42:58] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:42:58] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:42:58] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:42:58] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:42:58] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:42:58] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:42:58] [DEBUG] Saved index with 0 entries
+[2025-09-14 16:42:58] [DEBUG] Saved learning data
+[2025-09-14 16:42:58] [ERROR] get_archive_path called with nil filename

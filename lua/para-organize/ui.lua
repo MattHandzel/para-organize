@@ -642,7 +642,9 @@ function M.open_item()
           table.insert(content, "[F] " .. (item.alias or item.name))
         end
       end
+      vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
       vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
+      vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", false)
     end
   elseif content:match("^%[F%] ") then
     local name = content:match("^%[F%] (.+)")
