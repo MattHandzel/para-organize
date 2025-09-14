@@ -397,7 +397,7 @@ function M.setup_keymaps()
   vim.keymap.set('n', keymaps.skip, M.skip_capture, capture_opts)
   vim.keymap.set('n', keymaps.archive, M.archive_capture, capture_opts)
   vim.keymap.set('n', keymaps.merge, M.enter_merge_mode, capture_opts)
-  vim.keymap.set('n', keymaps.search, M.search_folders, capture_opts)
+  vim.keymap.set('n', keymaps.search, M.search_inline, capture_opts)
   vim.keymap.set('n', keymaps.help, M.show_help, capture_opts)
   -- Use Alt+j/k for suggestion navigation instead of overriding j/k
   vim.keymap.set('n', '<A-j>', M.next_suggestion, capture_opts)
@@ -414,12 +414,11 @@ function M.setup_keymaps()
   vim.keymap.set('n', '<A-j>', M.next_suggestion, organize_opts)
   vim.keymap.set('n', '<A-k>', M.prev_suggestion, organize_opts)
   vim.keymap.set('n', 's', M.change_sort_order, organize_opts)
-  vim.keymap.set('n', '/', M.search_folders, organize_opts)
-  -- Only map Enter to open_item when not in merge mode
+  vim.keymap.set('n', '/', M.search_inline, organize_opts)
+  -- Map Enter to open_item for all modes
   vim.keymap.set('n', '<CR>', function()
-    if not ui_state.merge_mode then
-      M.open_item()
-    end
+    vim.notify("Enter key pressed, merge_mode = " .. tostring(ui_state.merge_mode), vim.log.levels.INFO)
+    M.open_item() -- Always call open_item, it will handle different states
   end, organize_opts)
   vim.keymap.set('n', '<BS>', M.back_to_parent, organize_opts)
   -- Add pane switching
@@ -547,6 +546,80 @@ function M.enter_merge_mode()
   end)
 end
 
+-- Search directly in right pane (inline search)
+function M.search_inline()
+  local config = require("para-organize.config").get()
+  local Input = require("nui.input")
+  local indexer = require("para-organize.indexer")
+  
+  -- Create small input field at the top of right pane
+  local input = Input({
+    position = {
+      row = 1,
+      col = math.floor(vim.o.columns / 2) + 5,
+    },
+    size = {
+      width = 30,
+    },
+    border = {
+      style = "rounded",
+      text = {
+        top = " Search ",
+        top_align = "center",
+      },
+    },
+    win_options = {
+      winhighlight = "Normal:Normal,FloatBorder:FloatBorder",
+    },
+  }, {
+    prompt = "🔍 ",
+    default_value = "",
+    on_submit = function(value)
+      if value and value ~= "" then
+        -- Search all directories and files
+        local results = {}
+        local folders = indexer.get_para_directories()
+        for _, dir in ipairs(folders) do
+          if dir.name:lower():find(value:lower()) then
+            table.insert(results, dir)
+          end
+        end
+        
+        -- Show search results in right pane
+        local content = {
+          "# Search Results for: " .. value,
+          "",
+          "Press 'Enter' to open folder or file, 'Backspace' to go back",
+          ""
+        }
+        
+        if #results == 0 then
+          table.insert(content, "No results found.")
+        else
+          for _, item in ipairs(results) do
+            local type_letter = get_type_letter(item.type)
+            table.insert(content, string.format("[%s] %s", type_letter, item.name))
+          end
+        end
+        
+        vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
+        vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
+        vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
+      end
+    end,
+  })
+  
+  input:mount()
+  vim.api.nvim_set_current_win(input.winid)
+  vim.cmd("startinsert")
+  
+  -- Close input when focus lost
+  input:on("BufLeave", function()
+    input:unmount()
+  end)
+end
+
+-- Use Telescope for search (traditional approach)
 function M.search_folders()
   local search = require("para-organize.search")
   
@@ -624,11 +697,11 @@ function M.show_help()
     "   <C-h>/<C-l>  Switch between left/right panes",
     "",
     " Actions:",
-    "   <CR>        Accept selected suggestion or open folder/file",
-    "   m           Enter merge mode",
+    "   <CR>        Open folder, select file for merge, or accept suggestion",
+    "   m           Enter merge mode (via picker)",
     "   a           Archive immediately",
     "   s           Skip current capture",
-    "   /           Search for destination",
+    "   /           Search in right pane (inline search)",
     "",
     " Merge Operations:",
     "   <leader>mc  Complete merge (save changes)",
@@ -734,9 +807,10 @@ function M.open_item()
   
   vim.notify("Line content: " .. content, vim.log.levels.DEBUG)
   
-  if content:match("^%[.%] ") then
+  -- Check if this is a directory entry (P/A/R folder or D for directory)
+  if content:match("^%[P%] ") or content:match("^%[A%] ") or content:match("^%[R%] ") or content:match("^%[D%] ") then
     local name = content:match("^%[.%] (.+)")
-    vim.notify("Opening folder: " .. name, vim.log.levels.INFO)
+    vim.notify("Opening directory: " .. name, vim.log.levels.INFO)
     local dir = indexer.get_directory_by_name(name)
     if dir then
       local sub_items = indexer.get_sub_items(dir.path)
@@ -758,51 +832,20 @@ function M.open_item()
       -- Keep buffer modifiable for cursor movement
       vim.api.nvim_set_current_win(ui_state.organize_popup.winid)
     end
+  -- Check if this is a file entry
   elseif content:match("^%[F%] ") then
     local name = content:match("^%[F%] (.+)")
     vim.notify("Selected file for merge: " .. name, vim.log.levels.INFO)
     local file = indexer.get_file_by_alias_or_name(name)
     if file then
+      vim.notify("Starting merge with file: " .. file.name, vim.log.levels.INFO)
       -- Set up merge operation
       ui_state.merge_mode = true
       ui_state.merge_target = file
       
-      -- Read both source and target file contents
-      local capture_content = utils.read_file(ui_state.current_capture.path) or ""
-      local target_content = utils.read_file(file.path) or ""
-      
-      -- Extract frontmatter and body from both files
-      local config = require("para-organize.config").get()
-      local delimiters = config.patterns.frontmatter_delimiters
-      local _, capture_body = utils.extract_frontmatter(capture_content, delimiters)
-      
-      -- Update border title to indicate merge mode
-      ui_state.organize_popup.border:set_text("top", " Merge: " .. name .. " ")
-      
-      -- Prepare merge view with instructions and content
-      vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
-      local content = {
-        "# Merging: " .. name,
-        "",
-        "## Instructions:",
-        "1. Edit this note to include content from the capture",
-        "2. Press <leader>mc to complete merge",
-        "3. Press <leader>mx to cancel",
-        "",
-        "## Original Content:",
-        ""
-      }
-      vim.list_extend(content, vim.split(target_content, "\n"))
-      content[#content+1] = ""
-      content[#content+1] = "## Capture Content to Merge:"
-      content[#content+1] = ""
-      vim.list_extend(content, vim.split(capture_body, "\n"))
-      
-      -- Display the merged view
-      vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
-      vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
-      vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "filetype", "markdown")
-      vim.api.nvim_win_set_buf(ui_state.organize_popup.winid, ui_state.organize_popup.bufnr)
+      -- Call render_merge_view to show the merge interface
+      -- This will handle reading files and rendering the merge view
+      M.render_merge_view()
       
       -- Add keybindings for merge actions
       local opts = { buffer = ui_state.organize_popup.bufnr, silent = true }

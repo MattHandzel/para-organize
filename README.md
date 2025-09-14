@@ -346,10 +346,10 @@ require("para-organize").setup({
 4. **Organize notes**:
    - Normal Vim movement keys (`j`, `k`, etc.) work in both panes for cursor movement
    - `Alt+j`/`Alt+k` - Navigate through suggestions
-   - `<CR>` - Accept selected suggestion or open folder/file
-   - `m` - Merge with existing note
+   - `<CR>` - Accept selected suggestion, open folder, or select file for merge
+   - `m` - Merge with existing note (via picker)
    - `a` - Archive immediately
-   - `/` - Search for destination
+   - `/` - Search directly in right pane (no popup)
    - `<C-h>`/`<C-l>` - Switch between left/right panes
 
 5. **Create new destinations**:
@@ -384,10 +384,23 @@ When starting a session, you can filter captures:
 
 ### Merge Workflow
 
-When in merge mode:
-1. Navigate and edit the content in the right pane
-2. Use `<leader>mc` to complete the merge (save changes)
-3. Use `<leader>mx` to cancel the merge
+Two ways to merge a file:
+
+**Method 1 - Direct navigation:**
+1. Navigate through folders in the right pane using cursor keys
+2. Press Enter on a folder to open it
+3. Navigate to a file and press Enter to start the merge
+4. Edit the merged content in the right pane
+5. Use `<leader>mc` to complete the merge (save changes)
+6. Use `<leader>mx` to cancel the merge
+
+**Method 2 - Using merge command:**
+1. Press `m` to enter merge mode
+2. Select a destination folder in the picker
+3. Select a note to merge in the picker
+4. Edit the merged content in the right pane
+5. Use `<leader>mc` to complete the merge (save changes)
+6. Use `<leader>mx` to cancel the merge
 
 ### <Plug> Mappings
 
