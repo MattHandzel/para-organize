@@ -434,6 +434,9 @@ function M.parse_yaml_fallback(yaml_str)
     return val
   end
 
+  -- YAML constants
+  local INDENT_STEP = 2
+
   -- Process each line
   for raw_line in yaml_str:gmatch("[^\n]+") do
     -- Ignore comments & blank lines
@@ -464,11 +467,11 @@ function M.parse_yaml_fallback(yaml_str)
     local key, value = line:match("^([%w%-%_]+)%s*:%s*(.*)$")
     if key then
       if value == "" then
-        -- Could be a nested map OR a list; we don't know yet. Create table and push so subsequent lines belong here.
+        -- Could be a nested map OR a list; create child table and push. Assume list/child items indented by INDENT_STEP.
         local tbl = {}
         parent[key] = tbl
         table.insert(stack, tbl)
-        table.insert(indent_stack, indent + 1)
+        table.insert(indent_stack, indent + INDENT_STEP)
       elseif value == "[]" then
         parent[key] = {}
       elseif value:sub(1,1) == "[" and value:sub(-1) == "]" then
