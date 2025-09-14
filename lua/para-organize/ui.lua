@@ -75,9 +75,16 @@ function M.create_layout()
     local width = math.floor(vim.o.columns * ui_config.float_opts.width)
     local height = math.floor(vim.o.lines * ui_config.float_opts.height)
     
+    local position = ui_config.float_opts.position or "50%"
+    if position == "center" then
+      position = { row = "50%", col = "50%" }
+    elseif type(position) == "string" then
+      position = { row = position, col = position }
+    end
+    
     ui_state.layout = Layout(
       {
-        position = ui_config.float_opts.position or "50%",
+        position = position,
         size = {
           width = width,
           height = height,
