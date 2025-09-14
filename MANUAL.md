@@ -131,8 +131,8 @@ You can filter which captures to process:
 
 When you start an organizing session, you'll see a two-pane interface:
 
-- **Left Pane**: Shows the current capture note (editable)
-- **Right Pane**: Shows suggested destinations for the note
+- **Left Pane**: Shows the current capture note (fully editable with normal cursor movement)
+- **Right Pane**: Shows suggested destinations for the note (navigable with normal cursor movement)
 
 ### Processing Notes
 
@@ -143,6 +143,8 @@ Navigate the interface with these basic commands:
 - **Skip a capture**: Press `s` to skip the current capture
 - **Archive immediately**: Press `a` to archive without moving
 - **Search for destination**: Press `/` to open a fuzzy finder
+- **Switch between panes**: Use `<C-h>` to focus left pane, `<C-l>` to focus right pane
+- **Normal navigation**: All standard Vim movement keys work in both panes
 
 ## Advanced Features
 
@@ -153,7 +155,7 @@ To merge a capture into an existing note:
 1. Press `m` to enter merge mode
 2. Select a destination folder
 3. Select a target note
-4. Edit the merged content in the right pane
+4. Edit the merged content in the right pane (fully editable with normal cursor movement)
 5. Press `<leader>mc` to complete the merge or `<leader>mx` to cancel
 
 ### Creating New Folders

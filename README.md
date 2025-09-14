@@ -344,10 +344,12 @@ require("para-organize").setup({
    - `s` - Skip current capture
 
 4. **Organize notes**:
-   - `<CR>` - Accept suggested destination
+   - `<CR>` - Accept suggested destination or open folder/file
    - `m` - Merge with existing note
    - `a` - Archive immediately
    - `/` - Search for destination
+   - `<C-h>`/`<C-l>` - Switch between left/right panes
+   - Normal Vim movement keys work in both panes
 
 5. **Create new destinations**:
    - `<leader>np` - New project folder
@@ -378,6 +380,13 @@ When starting a session, you can filter captures:
 - `since=2024-01-01` - Notes created after date
 - `until_date=2024-12-31` - Notes created before date
 - `status=raw` - Filter by processing status
+
+### Merge Workflow
+
+When in merge mode:
+1. Navigate and edit the content in the right pane
+2. Use `<leader>mc` to complete the merge (save changes)
+3. Use `<leader>mx` to cancel the merge
 
 ### <Plug> Mappings
 
