@@ -29,8 +29,8 @@ local ui_state = {
   session = nil,
   current_sort = 1,
   -- Track navigation state
-  current_directory = nil,  -- Current directory being viewed
-  directory_stack = {},    -- Navigation history for back button
+  current_directory = nil, -- Current directory being viewed
+  directory_stack = {}, -- Navigation history for back button
 }
 
 -- Helper function to get the letter for a PARA type
@@ -52,7 +52,7 @@ end
 function M.create_layout()
   local config = require("para-organize.config").get()
   local ui_config = config.ui
-  
+
   -- Create capture pane (left)
   ui_state.capture_popup = Popup({
     enter = true,
@@ -75,7 +75,7 @@ function M.create_layout()
       filetype = "markdown",
     },
   })
-  
+
   -- Create organize pane (right)
   ui_state.organize_popup = Popup({
     enter = false,
@@ -98,20 +98,20 @@ function M.create_layout()
       filetype = "markdown",
     },
   })
-  
+
   -- Create layout based on config
   if ui_config.layout == "float" then
     -- Floating layout
     local width = math.floor(vim.o.columns * ui_config.float_opts.width)
     local height = math.floor(vim.o.lines * ui_config.float_opts.height)
-    
+
     local position = ui_config.float_opts.position or "50%"
     if position == "center" then
       position = { row = "50%", col = "50%" }
     elseif type(position) == "string" then
       position = { row = position, col = position }
     end
-    
+
     ui_state.layout = Layout(
       {
         position = position,
@@ -143,41 +143,41 @@ end
 -- Open the UI
 function M.open(session)
   local utils = require("para-organize.utils")
-  
+
   ui_state.session = session
-  
+
   -- Create layout if not exists
   if not ui_state.layout then
     M.create_layout()
   end
-  
+
   -- Mount and show layout
   ui_state.layout:mount()
-  
+
   -- Setup keymaps
   M.setup_keymaps()
-  
+
   -- Setup autocmds
   M.setup_autocmds()
-  
+
   utils.log("DEBUG", "UI opened")
 end
 
 -- Close the UI
 function M.close()
   local utils = require("para-organize.utils")
-  
+
   if ui_state.layout then
     ui_state.layout:unmount()
   end
-  
+
   -- Reset state
   ui_state.current_capture = nil
   ui_state.current_suggestions = nil
   ui_state.selected_suggestion_index = 1
   ui_state.merge_mode = false
   ui_state.merge_target = nil
-  
+
   utils.log("DEBUG", "UI closed")
 end
 
@@ -185,17 +185,17 @@ end
 function M.load_capture(capture, suggestions)
   local config = require("para-organize.config").get()
   local utils = require("para-organize.utils")
-  
+
   ui_state.current_capture = capture
   ui_state.current_suggestions = suggestions
   ui_state.selected_suggestion_index = 1
-  
+
   -- Load capture content into left pane
   M.render_capture(capture)
-  
+
   -- Load suggestions into right pane
   M.render_suggestions(suggestions)
-  
+
   -- Focus capture pane
   vim.api.nvim_set_current_win(ui_state.capture_popup.winid)
 end
@@ -205,27 +205,27 @@ function M.render_capture(capture)
   local config = require("para-organize.config").get()
   local utils = require("para-organize.utils")
   local ui_config = config.ui
-  
+
   -- Read capture file content
   local content = utils.read_file(capture.path)
   if not content then
     vim.api.nvim_buf_set_lines(ui_state.capture_popup.bufnr, 0, -1, false, {
-      "Error: Could not read capture file"
+      "Error: Could not read capture file",
     })
     return
   end
-  
+
   -- Parse frontmatter
-  local frontmatter_str, body = utils.extract_frontmatter(content,
-    config.patterns.frontmatter_delimiters)
-  
+  local frontmatter_str, body =
+    utils.extract_frontmatter(content, config.patterns.frontmatter_delimiters)
+
   local metadata = capture.metadata or {}
   local tags = table.concat(metadata.tags or {}, ", ")
   local sources = table.concat(metadata.sources or {}, ", ")
   local aliases = table.concat(metadata.aliases or {}, ", ")
   local timestamp = os.date("%B %d, %H:%M", metadata.timestamp)
   local notes_count = #indexer.get_capture_notes()
-  
+
   local lines = {
     "# Capture Note",
     "",
@@ -236,9 +236,9 @@ function M.render_capture(capture)
     "**Sources:** " .. sources,
     "",
   }
-  
+
   vim.list_extend(lines, vim.split(body, "\n"))
-  
+
   vim.api.nvim_buf_set_option(ui_state.capture_popup.bufnr, "modifiable", true)
   vim.api.nvim_buf_set_lines(ui_state.capture_popup.bufnr, 0, -1, false, lines)
   -- Keep buffer modifiable to allow normal cursor movement and editing
@@ -249,39 +249,42 @@ end
 function M.render_suggestions(suggestions)
   local config = require("para-organize.config").get()
   local ui_config = config.ui
-  
+
   if ui_state.merge_mode then
     M.render_merge_view()
     return
   end
-  
+
   -- Reset directory state when going back to main suggestions view
   if ui_state.current_directory then
-    vim.notify("Resetting directory state, was in: " .. ui_state.current_directory.name, vim.log.levels.DEBUG)
+    vim.notify(
+      "Resetting directory state, was in: " .. ui_state.current_directory.name,
+      vim.log.levels.DEBUG
+    )
   end
   ui_state.current_directory = nil
   ui_state.directory_stack = {}
   vim.notify("Showing main suggestions view", vim.log.levels.DEBUG)
-  
+
   local dirs = indexer.get_para_directories()
   local content = {
     "# Organization Pane",
     "",
     "**Sort Order:** Alphabetical (Press 's' to change sort)",
     "Press '/' to search, 'Enter' to open folder or merge note",
-    ""
+    "",
   }
-  
+
   -- Sort directories alphabetically
   table.sort(dirs, function(a, b)
     return a.name < b.name
   end)
-  
+
   for _, dir in ipairs(dirs) do
     local type_letter = get_type_letter(dir.type)
     table.insert(content, string.format("[%s] %s", type_letter, dir.name))
   end
-  
+
   vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
   vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
   -- Keep buffer modifiable to allow normal cursor movement
@@ -293,28 +296,31 @@ function M.render_merge_view()
   if not ui_state.merge_target then
     return
   end
-  
+
   local utils = require("para-organize.utils")
   local config = require("para-organize.config").get()
-  
+
   -- Read both source and target file contents
   local capture_content = utils.read_file(ui_state.current_capture.path) or ""
   local target_content = utils.read_file(ui_state.merge_target.path) or ""
-  
+
   if not target_content then
     vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, {
-      "Error: Could not read target file"
+      "Error: Could not read target file",
     })
     return
   end
-  
+
   -- Extract frontmatter and body from both files
   local delimiters = config.patterns.frontmatter_delimiters
   local _, capture_body = utils.extract_frontmatter(capture_content, delimiters)
-  
+
   -- Update border title to indicate merge mode
-  ui_state.organize_popup.border:set_text("top", " Merge: " .. (ui_state.merge_target.alias or ui_state.merge_target.name) .. " ")
-  
+  ui_state.organize_popup.border:set_text(
+    "top",
+    " Merge: " .. (ui_state.merge_target.alias or ui_state.merge_target.name) .. " "
+  )
+
   -- Prepare merge view with instructions and content
   local lines = {
     "# Merging: " .. (ui_state.merge_target.alias or ui_state.merge_target.name),
@@ -325,73 +331,44 @@ function M.render_merge_view()
     "3. Press <leader>mx to cancel",
     "",
     "## Original Content:",
-    ""
+    "",
   }
-  
+
   vim.list_extend(lines, vim.split(target_content, "\n"))
-  lines[#lines+1] = ""
-  lines[#lines+1] = "## Capture Content to Merge:"
-  lines[#lines+1] = ""
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "## Capture Content to Merge:"
+  lines[#lines + 1] = ""
   vim.list_extend(lines, vim.split(capture_body, "\n"))
-  
+
   vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
   vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, lines)
-  
+
   -- Make buffer modifiable for editing
   vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
   vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "filetype", "markdown")
-  
+
   -- Add keybindings for merge actions if they don't exist
   local opts = { buffer = ui_state.organize_popup.bufnr, silent = true }
-  vim.keymap.set('n', '<leader>mc', function()
+  vim.keymap.set("n", "<leader>mc", function()
     -- Complete merge
     local utils = require("para-organize.utils") -- Get utils inside this scope
     local move = require("para-organize.move") -- Get move inside this scope
-    
-    -- Check if merge target is valid
-    if not ui_state.merge_target or not ui_state.merge_target.path then
-      vim.notify("ERROR: Cannot complete merge - invalid merge target", vim.log.levels.ERROR)
-      return
-    end
-    
-    -- Additional debug information
-    vim.notify("DEBUG: Render merge view - target path: " .. ui_state.merge_target.path, vim.log.levels.INFO)
-    vim.notify("DEBUG: Render merge view - target exists: " .. tostring(vim.fn.filereadable(ui_state.merge_target.path) == 1), vim.log.levels.INFO)
-    
-    -- Get content from buffer safely
-    local ok, lines = pcall(vim.api.nvim_buf_get_lines, ui_state.organize_popup.bufnr, 0, -1, false)
-    if not ok or not lines then
-      vim.notify("ERROR: Failed to get buffer content", vim.log.levels.ERROR)
-      return
-    end
-    
-    local edited_content = table.concat(lines, "\n")
-    
-    vim.notify("DEBUG: Render merge view - about to write " .. #edited_content .. " bytes to file", vim.log.levels.INFO)
-    
-    -- Try to write the file
-    local success = utils.write_file(ui_state.merge_target.path, edited_content)
-    if success then
-      vim.notify("Successfully merged content to " .. ui_state.merge_target.name, vim.log.levels.INFO)
-      
-      -- Check if current_capture exists before archiving
-      if ui_state.current_capture then
-        -- Pass the entire capture object, not just the path
-        move.archive_capture(ui_state.current_capture)
-      else
-        vim.notify("WARNING: No current capture to archive", vim.log.levels.WARN)
-      end
-      
-      -- Reset UI state
+    local edited_content =
+      table.concat(vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, 0, -1, false), "\n")
+    if utils.write_file_atomic(ui_state.merge_target.path, edited_content) then
+      vim.notify(
+        "Successfully merged content to " .. ui_state.merge_target.name,
+        vim.log.levels.INFO
+      )
+      -- Pass the entire capture object, not just the path
+      move.archive_capture(ui_state.current_capture)
       M.render_suggestions(ui_state.current_suggestions)
       ui_state.merge_mode = false
       ui_state.merge_target = nil
-    else
-      vim.notify("ERROR: Failed to write merged content to " .. ui_state.merge_target.path, vim.log.levels.ERROR)
     end
   end, opts)
-  
-  vim.keymap.set('n', '<leader>mx', function()
+
+  vim.keymap.set("n", "<leader>mx", function()
     -- Cancel merge
     ui_state.merge_mode = false
     ui_state.merge_target = nil
@@ -403,10 +380,10 @@ end
 -- Highlight selected suggestion
 function M.highlight_selection()
   local ns_id = vim.api.nvim_create_namespace("para_organize_selection")
-  
+
   -- Clear existing highlights
   vim.api.nvim_buf_clear_namespace(ui_state.organize_popup.bufnr, ns_id, 0, -1)
-  
+
   -- Calculate line number (accounting for header)
   local line_num = 2 -- Header offset
   for i = 1, ui_state.selected_suggestion_index - 1 do
@@ -416,70 +393,70 @@ function M.highlight_selection()
     end
     line_num = line_num + 1 -- Empty line
   end
-  
+
   -- Apply highlight
-  vim.api.nvim_buf_add_highlight(
-    ui_state.organize_popup.bufnr,
-    ns_id,
-    "Visual",
-    line_num,
-    0,
-    -1
-  )
+  vim.api.nvim_buf_add_highlight(ui_state.organize_popup.bufnr, ns_id, "Visual", line_num, 0, -1)
 end
 
 -- Setup keymaps
 function M.setup_keymaps()
   local config = require("para-organize.config").get()
   local keymaps = config.keymaps.buffer
-  
+
   -- Capture pane keymaps
   local capture_opts = { buffer = ui_state.capture_popup.bufnr, silent = true }
-  
-  vim.keymap.set('n', keymaps.accept, M.accept_suggestion, capture_opts)
-  vim.keymap.set('n', keymaps.cancel, M.close, capture_opts)
-  vim.keymap.set('n', keymaps.next, M.next_capture, capture_opts)
-  vim.keymap.set('n', keymaps.prev, M.prev_capture, capture_opts)
-  vim.keymap.set('n', keymaps.skip, M.skip_capture, capture_opts)
-  vim.keymap.set('n', keymaps.archive, M.archive_capture, capture_opts)
-  vim.keymap.set('n', keymaps.merge, M.enter_merge_mode, capture_opts)
-  vim.keymap.set('n', keymaps.search, M.search_inline, capture_opts)
-  vim.keymap.set('n', keymaps.help, M.show_help, capture_opts)
+
+  vim.keymap.set("n", keymaps.accept, M.accept_suggestion, capture_opts)
+  vim.keymap.set("n", keymaps.cancel, M.close, capture_opts)
+  vim.keymap.set("n", keymaps.next, M.next_capture, capture_opts)
+  vim.keymap.set("n", keymaps.prev, M.prev_capture, capture_opts)
+  vim.keymap.set("n", keymaps.skip, M.skip_capture, capture_opts)
+  vim.keymap.set("n", keymaps.archive, M.archive_capture, capture_opts)
+  vim.keymap.set("n", keymaps.merge, M.enter_merge_mode, capture_opts)
+  vim.keymap.set("n", keymaps.search, M.search_inline, capture_opts)
+  vim.keymap.set("n", keymaps.help, M.show_help, capture_opts)
   -- Use Alt+j/k for suggestion navigation instead of overriding j/k
-  vim.keymap.set('n', '<A-j>', M.next_suggestion, capture_opts)
-  vim.keymap.set('n', '<A-k>', M.prev_suggestion, capture_opts)
+  vim.keymap.set("n", "<A-j>", M.next_suggestion, capture_opts)
+  vim.keymap.set("n", "<A-k>", M.prev_suggestion, capture_opts)
   -- Add pane switching
-  vim.keymap.set('n', '<C-l>', function() vim.api.nvim_set_current_win(ui_state.organize_popup.winid) end, capture_opts)
-  
-  -- Organize pane keymaps  
+  vim.keymap.set("n", "<C-l>", function()
+    vim.api.nvim_set_current_win(ui_state.organize_popup.winid)
+  end, capture_opts)
+
+  -- Organize pane keymaps
   local organize_opts = { buffer = ui_state.organize_popup.bufnr, silent = true }
-  
-  vim.keymap.set('n', keymaps.accept, M.accept_suggestion, organize_opts)
-  vim.keymap.set('n', keymaps.cancel, M.close, organize_opts)
+
+  vim.keymap.set("n", keymaps.accept, M.accept_suggestion, organize_opts)
+  vim.keymap.set("n", keymaps.cancel, M.close, organize_opts)
   -- Use Alt+j/k for suggestion navigation instead of overriding j/k
-  vim.keymap.set('n', '<A-j>', M.next_suggestion, organize_opts)
-  vim.keymap.set('n', '<A-k>', M.prev_suggestion, organize_opts)
-  vim.keymap.set('n', 's', M.change_sort_order, organize_opts)
-  vim.keymap.set('n', '/', M.search_inline, organize_opts)
+  vim.keymap.set("n", "<A-j>", M.next_suggestion, organize_opts)
+  vim.keymap.set("n", "<A-k>", M.prev_suggestion, organize_opts)
+  vim.keymap.set("n", "s", M.change_sort_order, organize_opts)
+  vim.keymap.set("n", "/", M.search_inline, organize_opts)
   -- Map Enter to open_item for all modes
-  vim.keymap.set('n', '<CR>', function()
-    vim.notify("Enter key pressed, merge_mode = " .. tostring(ui_state.merge_mode), vim.log.levels.INFO)
+  vim.keymap.set("n", "<CR>", function()
+    vim.notify(
+      "Enter key pressed, merge_mode = " .. tostring(ui_state.merge_mode),
+      vim.log.levels.INFO
+    )
     M.open_item() -- Always call open_item, it will handle different states
   end, organize_opts)
-  vim.keymap.set('n', '<BS>', M.back_to_parent, organize_opts)
+  vim.keymap.set("n", "<BS>", M.back_to_parent, organize_opts)
   -- Add pane switching
-  vim.keymap.set('n', '<C-h>', function() vim.api.nvim_set_current_win(ui_state.capture_popup.winid) end, organize_opts)
-  
+  vim.keymap.set("n", "<C-h>", function()
+    vim.api.nvim_set_current_win(ui_state.capture_popup.winid)
+  end, organize_opts)
+
   -- Quick folder creation
-  vim.keymap.set('n', keymaps.new_project, function()
+  vim.keymap.set("n", keymaps.new_project, function()
     M.create_new_folder("projects")
   end, capture_opts)
-  
-  vim.keymap.set('n', keymaps.new_area, function()
+
+  vim.keymap.set("n", keymaps.new_area, function()
     M.create_new_folder("areas")
   end, capture_opts)
-  
-  vim.keymap.set('n', keymaps.new_resource, function()
+
+  vim.keymap.set("n", keymaps.new_resource, function()
     M.create_new_folder("resources")
   end, capture_opts)
 end
@@ -487,12 +464,13 @@ end
 -- Setup autocmds
 function M.setup_autocmds()
   local group = vim.api.nvim_create_augroup("ParaOrganizeUI", { clear = true })
-  
+
   -- Clean up on window close
   vim.api.nvim_create_autocmd("WinClosed", {
     group = group,
-    pattern = tostring(ui_state.capture_popup.winid) .. "," .. 
-              tostring(ui_state.organize_popup.winid),
+    pattern = tostring(ui_state.capture_popup.winid) .. "," .. tostring(
+      ui_state.organize_popup.winid
+    ),
     callback = function()
       M.close()
     end,
@@ -501,8 +479,10 @@ end
 
 -- Navigation functions
 function M.next_suggestion()
-  if ui_state.current_suggestions and 
-     ui_state.selected_suggestion_index < #ui_state.current_suggestions then
+  if
+    ui_state.current_suggestions
+    and ui_state.selected_suggestion_index < #ui_state.current_suggestions
+  then
     ui_state.selected_suggestion_index = ui_state.selected_suggestion_index + 1
     M.render_suggestions(ui_state.current_suggestions)
   end
@@ -517,14 +497,16 @@ end
 
 -- Action functions
 function M.accept_suggestion()
-  if not ui_state.current_suggestions or 
-     not ui_state.current_suggestions[ui_state.selected_suggestion_index] then
+  if
+    not ui_state.current_suggestions
+    or not ui_state.current_suggestions[ui_state.selected_suggestion_index]
+  then
     return
   end
-  
+
   local suggestion = ui_state.current_suggestions[ui_state.selected_suggestion_index]
   local para = require("para-organize")
-  
+
   para.move(suggestion.path)
 end
 
@@ -550,16 +532,16 @@ end
 
 function M.enter_merge_mode()
   local search = require("para-organize.search")
-  
+
   -- Show visual indicator that we're entering merge mode
   vim.notify("Entering merge mode - select a destination folder", vim.log.levels.INFO)
   ui_state.capture_popup.border:set_text("top", " Capture (Merge Mode) ")
   ui_state.organize_popup.border:set_text("top", " Select Destination ")
-  
+
   -- Debug info
   vim.notify("DEBUG: merge_mode is being set to true", vim.log.levels.DEBUG)
   ui_state.merge_mode = true
-  
+
   -- Open folder picker to select destination
   search.open_folder_picker(function(folder)
     if not folder then
@@ -570,11 +552,11 @@ function M.enter_merge_mode()
       vim.notify("Merge mode cancelled", vim.log.levels.INFO)
       return
     end
-    
+
     -- Show visual indicator for selecting a note
     ui_state.organize_popup.border:set_text("top", " Select Note to Merge ")
     vim.notify("Select a note to merge into", vim.log.levels.INFO)
-    
+
     -- Open notes picker for selected folder
     search.open_folder_notes_picker(folder.path, function(note)
       if not note then
@@ -585,7 +567,7 @@ function M.enter_merge_mode()
         vim.notify("Merge mode cancelled", vim.log.levels.INFO)
         return
       end
-      
+
       ui_state.merge_target = note
       M.render_merge_view()
     end)
@@ -597,7 +579,7 @@ function M.search_inline()
   local config = require("para-organize.config").get()
   local Input = require("nui.input")
   local indexer = require("para-organize.indexer")
-  
+
   -- Create small input field at the top of right pane
   local input = Input({
     position = {
@@ -624,41 +606,47 @@ function M.search_inline()
       if value and value ~= "" then
         local results = {}
         local search_header = ""
-        
+
         -- Check if we're in a directory - search within that directory
         if ui_state.current_directory then
-          vim.notify("Searching within directory: " .. ui_state.current_directory.name, vim.log.levels.INFO)
+          vim.notify(
+            "Searching within directory: " .. ui_state.current_directory.name,
+            vim.log.levels.INFO
+          )
           local sub_items = indexer.get_sub_items(ui_state.current_directory.path)
-          
+
           for _, item in ipairs(sub_items) do
             if item.name:lower():find(value:lower()) then
               table.insert(results, item)
             end
           end
-          
-          search_header = "# Search Results in '" .. ui_state.current_directory.name .. "' for: " .. value
+
+          search_header = "# Search Results in '"
+            .. ui_state.current_directory.name
+            .. "' for: "
+            .. value
         else
           -- Otherwise search all top-level directories
           vim.notify("Searching all directories", vim.log.levels.INFO)
           local folders = indexer.get_para_directories()
-          
+
           for _, dir in ipairs(folders) do
             if dir.name:lower():find(value:lower()) then
               table.insert(results, dir)
             end
           end
-          
+
           search_header = "# Search Results for: " .. value
         end
-        
+
         -- Show search results in right pane
         local content = {
           search_header,
           "",
           "Press 'Enter' to open folder or file, 'Backspace' to go back",
-          ""
+          "",
         }
-        
+
         if #results == 0 then
           table.insert(content, "No results found.")
         else
@@ -675,18 +663,18 @@ function M.search_inline()
             table.insert(content, string.format("[%s] %s", type_letter, item.name))
           end
         end
-        
+
         vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
         vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
         vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
       end
     end,
   })
-  
+
   input:mount()
   vim.api.nvim_set_current_win(input.winid)
   vim.cmd("startinsert")
-  
+
   -- Close input when focus lost
   input:on("BufLeave", function()
     input:unmount()
@@ -696,7 +684,7 @@ end
 -- Use Telescope for search (traditional approach)
 function M.search_folders()
   local search = require("para-organize.search")
-  
+
   search.open_folder_picker(function(folder)
     local para = require("para-organize")
     para.move(folder.path)
@@ -706,7 +694,7 @@ end
 function M.create_new_folder(folder_type)
   local Input = require("nui.input")
   local para = require("para-organize")
-  
+
   local input = Input({
     position = "50%",
     size = {
@@ -731,7 +719,7 @@ function M.create_new_folder(folder_type)
       end
     end,
   })
-  
+
   input:mount()
   input:on("BufLeave", function()
     input:unmount()
@@ -741,7 +729,7 @@ end
 -- Show help overlay
 function M.show_help()
   local Popup = require("nui.popup")
-  
+
   local help_popup = Popup({
     position = "50%",
     size = {
@@ -758,7 +746,7 @@ function M.show_help()
       },
     },
   })
-  
+
   local help_text = {
     " PARA Organize - Keyboard Shortcuts",
     "",
@@ -793,15 +781,15 @@ function M.show_help()
     "",
     " Press any key to close this help...",
   }
-  
+
   help_popup:mount()
   vim.api.nvim_buf_set_lines(help_popup.bufnr, 0, -1, false, help_text)
-  
-  vim.keymap.set('n', '<Esc>', function()
+
+  vim.keymap.set("n", "<Esc>", function()
     help_popup:unmount()
   end, { buffer = help_popup.bufnr })
-  
-  vim.keymap.set('n', 'q', function()
+
+  vim.keymap.set("n", "q", function()
     help_popup:unmount()
   end, { buffer = help_popup.bufnr })
 end
@@ -834,35 +822,41 @@ end
 -- Change sort order in right pane
 function M.change_sort_order()
   ui_state.current_sort = ui_state.current_sort + 1
-  if ui_state.current_sort > 3 then ui_state.current_sort = 1 end
-  
+  if ui_state.current_sort > 3 then
+    ui_state.current_sort = 1
+  end
+
   local sort_label = {
     "Alphabetical",
     "Last Modified",
-    "Intelligent Suggestions"
+    "Intelligent Suggestions",
   }
-  
+
   local dirs = indexer.get_para_directories()
   if ui_state.current_sort == 1 then
-    table.sort(dirs, function(a, b) return a.name < b.name end)
+    table.sort(dirs, function(a, b)
+      return a.name < b.name
+    end)
   elseif ui_state.current_sort == 2 then
-    table.sort(dirs, function(a, b) return a.modified > b.modified end)
+    table.sort(dirs, function(a, b)
+      return a.modified > b.modified
+    end)
   else
     dirs = suggest.get_suggestions(ui_state.current_capture)
   end
-  
+
   local content = {
     "# Organization Pane",
     "",
     "**Sort Order:** " .. sort_label[ui_state.current_sort] .. " (Press 's' to change sort)",
     "Press '/' to search, 'Enter' to open folder or merge note",
-    ""
+    "",
   }
   for _, dir in ipairs(dirs) do
     local type_letter = get_type_letter(dir.type)
     table.insert(content, string.format("[%s] %s", type_letter, dir.name))
   end
-  
+
   vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
 end
 
@@ -870,20 +864,26 @@ end
 function M.open_item()
   -- Output debug info
   vim.notify("DEBUG: open_item function called", vim.log.levels.DEBUG)
-  
+
   -- Get the current line under cursor
   local line = vim.api.nvim_win_get_cursor(ui_state.organize_popup.winid)[1]
-  local content = vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, line - 1, line, false)[1]
-  
+  local content =
+    vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, line - 1, line, false)[1]
+
   if not content then
     vim.notify("No content found at current line", vim.log.levels.WARN)
     return
   end
-  
+
   vim.notify("Line content: " .. content, vim.log.levels.DEBUG)
-  
+
   -- Check if this is a directory entry (P/A/R folder or D for directory)
-  if content:match("^%[P%] ") or content:match("^%[A%] ") or content:match("^%[R%] ") or content:match("^%[D%] ") then
+  if
+    content:match("^%[P%] ")
+    or content:match("^%[A%] ")
+    or content:match("^%[R%] ")
+    or content:match("^%[D%] ")
+  then
     local name = content:match("^%[.%] (.+)")
     vim.notify("Opening directory: " .. name, vim.log.levels.INFO)
     local dir = indexer.get_directory_by_name(name)
@@ -892,17 +892,17 @@ function M.open_item()
       if ui_state.current_directory then
         table.insert(ui_state.directory_stack, ui_state.current_directory)
       end
-      
+
       -- Set current directory
       ui_state.current_directory = dir
       vim.notify("Current directory set to: " .. dir.path, vim.log.levels.DEBUG)
-      
+
       local sub_items = indexer.get_sub_items(dir.path)
       local content = {
         "# " .. name,
         "",
         "Press 'Enter' on a note to merge, 'Backspace' to go back",
-        ""
+        "",
       }
       for _, item in ipairs(sub_items) do
         if item.type == "directory" then
@@ -926,71 +926,39 @@ function M.open_item()
       -- Set up merge operation
       ui_state.merge_mode = true
       ui_state.merge_target = file
-      
+
       -- Call render_merge_view to show the merge interface
       -- This will handle reading files and rendering the merge view
       M.render_merge_view()
-      
+
       -- Add keybindings for merge actions
       local opts = { buffer = ui_state.organize_popup.bufnr, silent = true }
-      vim.keymap.set('n', '<leader>mc', function()
+      vim.keymap.set("n", "<leader>mc", function()
         -- Complete merge
         local utils = require("para-organize.utils") -- Get utils inside this scope
         local move = require("para-organize.move") -- Get move inside this scope
-        
-        -- Check if file is valid
-        if not file or not file.path then
-          vim.notify("ERROR: Cannot complete merge - invalid file target", vim.log.levels.ERROR)
-          return
-        end
-        
-        -- Additional debug information
-        vim.notify("DEBUG: Merge target file path: " .. file.path, vim.log.levels.INFO)
-        vim.notify("DEBUG: Merge target file exists: " .. tostring(vim.fn.filereadable(file.path) == 1), vim.log.levels.INFO)
-        
-        -- Get content from buffer
-        local ok, lines = pcall(vim.api.nvim_buf_get_lines, ui_state.organize_popup.bufnr, 0, -1, false)
-        if not ok or not lines then
-          vim.notify("ERROR: Failed to get buffer content", vim.log.levels.ERROR)
-          return
-        end
-        
-        local edited_content = table.concat(lines, "\n")
-        
-        vim.notify("DEBUG: About to write " .. #edited_content .. " bytes to file", vim.log.levels.INFO)
-        
-        -- Try to write the file
-        local success = utils.write_file(file.path, edited_content)
-        if success then
+        local edited_content = table.concat(
+          vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, 0, -1, false),
+          "\n"
+        )
+        if utils.write_file_atomic(file.path, edited_content) then
           vim.notify("Successfully merged content to " .. file.name, vim.log.levels.INFO)
-          
-          -- Check if current_capture exists before archiving
-          if ui_state.current_capture then
-            -- Pass the entire capture object, not just the path
-            move.archive_capture(ui_state.current_capture)
-          else
-            vim.notify("WARNING: No current capture to archive", vim.log.levels.WARN)
-          end
-        else
-          vim.notify("ERROR: Failed to write merged content to " .. file.path, vim.log.levels.ERROR)
-          return
-        end
-        
-        -- Reset UI state
-        M.render_suggestions(ui_state.current_suggestions)
-        ui_state.merge_mode = false
-        ui_state.merge_target = nil
+          -- Pass the entire capture object, not just the path
+          move.archive_capture(ui_state.current_capture)
+          M.render_suggestions(ui_state.current_suggestions)
+          ui_state.merge_mode = false
+          ui_state.merge_target = nil
         end
       end, opts)
-      
-      vim.keymap.set('n', '<leader>mx', function()
+
+      vim.keymap.set("n", "<leader>mx", function()
         -- Cancel merge
         ui_state.merge_mode = false
         ui_state.merge_target = nil
         M.render_suggestions(ui_state.current_suggestions)
         vim.notify("Merge canceled", vim.log.levels.INFO)
       end, opts)
-      
+
       -- Focus the organize pane
       vim.api.nvim_set_current_win(ui_state.organize_popup.winid)
     end
@@ -1000,35 +968,38 @@ end
 -- Back to parent directory
 function M.back_to_parent()
   vim.notify("Going back from directory", vim.log.levels.DEBUG)
-  
+
   -- Initialize directory stack if it doesn't exist
   if ui_state.directory_stack == nil then
     ui_state.directory_stack = {}
   end
-  
+
   -- If we're in a directory, go back to the previous one
   if #ui_state.directory_stack > 0 then
     -- Pop the previous directory
     ui_state.current_directory = table.remove(ui_state.directory_stack)
-    
+
     -- If we're back at the root level, display main suggestions
     if #ui_state.directory_stack == 0 and ui_state.current_directory == nil then
       vim.notify("Returning to root level", vim.log.levels.DEBUG)
       M.render_suggestions(ui_state.current_suggestions)
       return
     end
-    
+
     -- Otherwise show the contents of the previous directory
     if ui_state.current_directory then
-      vim.notify("Going back to directory: " .. ui_state.current_directory.path, vim.log.levels.DEBUG)
+      vim.notify(
+        "Going back to directory: " .. ui_state.current_directory.path,
+        vim.log.levels.DEBUG
+      )
       local sub_items = indexer.get_sub_items(ui_state.current_directory.path)
       local content = {
         "# " .. ui_state.current_directory.name,
         "",
         "Press 'Enter' on a note to merge, 'Backspace' to go back",
-        ""
+        "",
       }
-      
+
       for _, item in ipairs(sub_items) do
         if item.type == "directory" then
           table.insert(content, "[D] " .. item.name)
@@ -1036,7 +1007,7 @@ function M.back_to_parent()
           table.insert(content, "[F] " .. (item.alias or item.name))
         end
       end
-      
+
       vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
       vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
       vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)

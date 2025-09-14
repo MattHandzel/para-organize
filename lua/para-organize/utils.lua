@@ -287,35 +287,6 @@ function M.read_file(path)
   return content
 end
 
--- Simple write file function (non-atomic)
-function M.write_file(path, content)
-  -- Safety check for nil path
-  if not path then
-    M.log("ERROR", "Cannot write file: path is nil")
-    return false
-  end
-  
-  -- Safety check for content
-  content = content or ""
-  
-  -- Make sure directory exists
-  local dir = vim.fn.fnamemodify(path, ":h")
-  if vim.fn.isdirectory(dir) == 0 then
-    vim.fn.mkdir(dir, "p")
-  end
-  
-  local file = io.open(path, "w")
-  if not file then
-    M.log("ERROR", "Failed to open file for writing: %s", path)
-    return false
-  end
-  
-  file:write(content)
-  file:close()
-  M.log("DEBUG", "Successfully wrote %d bytes to %s", #content, path)
-  return true
-end
-
 -- Write file contents atomically
 function M.write_file_atomic(path, content)
   -- Write to temporary file first
