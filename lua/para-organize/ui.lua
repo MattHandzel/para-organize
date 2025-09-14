@@ -32,20 +32,7 @@ local ui_state = {
   directory_stack = {}, -- Navigation history for back button
 }
 
--- Helper function to get the letter for a PARA type
-local function get_type_letter(type)
-  if type == "projects" then
-    return "P"
-  elseif type == "areas" then
-    return "A"
-  elseif type == "resources" then
-    return "R"
-  elseif type == "archives" then
-    return "🗑️"
-  else
-    return "?"
-  end
-end
+local render_mod = require("para-organize.ui.render")
 
 -- Create the two-pane layout
 function M.create_layout()
@@ -108,10 +95,10 @@ function M.load_capture(capture, suggestions)
   ui_state.selected_suggestion_index = 1
 
   -- Load capture content into left pane
-  M.render_capture(capture)
+  render_mod.render_capture(ui_state, capture)
 
   -- Load suggestions into right pane
-  M.render_suggestions(suggestions)
+  render_mod.render_suggestions(ui_state, suggestions)
 
   -- Focus capture pane
   vim.api.nvim_set_current_win(ui_state.capture_popup.winid)
@@ -187,132 +174,21 @@ function M.render_suggestions(suggestions)
   local content = {
     "# Organization Pane",
     "",
-    "**Sort Order:** Alphabetical (Press 's' to change sort)",
-    "Press '/' to search, 'Enter' to open folder or merge note",
-    "",
-  }
-
-  -- Sort directories alphabetically
-  table.sort(dirs, function(a, b)
-    return a.name < b.name
-  end)
-
-  for _, dir in ipairs(dirs) do
-    local type_letter = get_type_letter(dir.type)
-    table.insert(content, string.format("[%s] %s", type_letter, dir.name))
-  end
-
-  vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
-  vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
-  -- Keep buffer modifiable to allow normal cursor movement
-  vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "filetype", "markdown")
 end
 
--- Render merge view
+-- Render merge view (delegated)
 function M.render_merge_view()
-  if not ui_state.merge_target then
-    return
-  end
-
-  local utils = require("para-organize.utils")
-  local config = require("para-organize.config").get()
-
-  -- Read both source and target file contents
-  local capture_content = utils.read_file(ui_state.current_capture.path) or ""
-  local target_content = utils.read_file(ui_state.merge_target.path) or ""
-
-  if not target_content then
-    vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, {
-      "Error: Could not read target file",
-    })
-    return
-  end
-
-  -- Extract frontmatter and body from both files
-  local delimiters = config.patterns.frontmatter_delimiters
-  local _, capture_body = utils.extract_frontmatter(capture_content, delimiters)
-
-  -- Update border title to indicate merge mode
-  ui_state.organize_popup.border:set_text(
-    "top",
-    " Merge: " .. (ui_state.merge_target.alias or ui_state.merge_target.name) .. " "
-  )
-
-  -- Prepare merge view with instructions and content
-  local lines = {
-    "# Merging: " .. (ui_state.merge_target.alias or ui_state.merge_target.name),
-    "",
-    "## Instructions:",
-    "1. Edit this note to include content from the capture",
-    "2. Press <leader>mc to complete merge",
-    "3. Press <leader>mx to cancel",
-    "",
-    "## Original Content:",
-    "",
-  }
-
-  vim.list_extend(lines, vim.split(target_content, "\n"))
-  lines[#lines + 1] = ""
-  lines[#lines + 1] = "## Capture Content to Merge:"
-  lines[#lines + 1] = ""
-  vim.list_extend(lines, vim.split(capture_body, "\n"))
-
-  vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
-  vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, lines)
-
-  -- Make buffer modifiable for editing
-  vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
-  vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "filetype", "markdown")
-
-  -- Add keybindings for merge actions if they don't exist
-  local opts = { buffer = ui_state.organize_popup.bufnr, silent = true }
-  vim.keymap.set("n", "<leader>mc", function()
-    -- Complete merge
-    local utils = require("para-organize.utils") -- Get utils inside this scope
-    local move = require("para-organize.move") -- Get move inside this scope
-    local edited_content =
-      table.concat(vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, 0, -1, false), "\n")
-    if utils.write_file_atomic(ui_state.merge_target.path, edited_content) then
-      vim.notify(
-        "Successfully merged content to " .. ui_state.merge_target.name,
-        vim.log.levels.INFO
-      )
-      -- Pass the entire capture object, not just the path
-      move.archive_capture(ui_state.current_capture)
-      M.render_suggestions(ui_state.current_suggestions)
-      ui_state.merge_mode = false
-      ui_state.merge_target = nil
-    end
-  end, opts)
-
-  vim.keymap.set("n", "<leader>mx", function()
-    -- Cancel merge
-    ui_state.merge_mode = false
-    ui_state.merge_target = nil
-    M.render_suggestions(ui_state.current_suggestions)
-    vim.notify("Merge canceled", vim.log.levels.INFO)
-  end, opts)
+  render_mod.render_merge_view(ui_state)
 end
 
--- Highlight selected suggestion
+-- Highlight selected suggestion (delegated)
 function M.highlight_selection()
-  local ns_id = vim.api.nvim_create_namespace("para_organize_selection")
+  render_mod.highlight_selection(ui_state)
+end
 
-  -- Clear existing highlights
-  vim.api.nvim_buf_clear_namespace(ui_state.organize_popup.bufnr, ns_id, 0, -1)
-
-  -- Calculate line number (accounting for header)
-  local line_num = 2 -- Header offset
-  for i = 1, ui_state.selected_suggestion_index - 1 do
-    line_num = line_num + 1 -- Suggestion line
-    if ui_state.current_suggestions[i].reasons then
-      line_num = line_num + #ui_state.current_suggestions[i].reasons
-    end
-    line_num = line_num + 1 -- Empty line
-  end
-
-  -- Apply highlight
-  vim.api.nvim_buf_add_highlight(ui_state.organize_popup.bufnr, ns_id, "Visual", line_num, 0, -1)
+-- Render directories
+function M.render_directories(dirs)
+  render_mod.render_directories(ui_state, dirs)
 end
 
 -- Setup keymaps
@@ -769,11 +645,7 @@ function M.change_sort_order()
     "Press '/' to search, 'Enter' to open folder or merge note",
     "",
   }
-  for _, dir in ipairs(dirs) do
-    local type_letter = get_type_letter(dir.type)
-    table.insert(content, string.format("[%s] %s", type_letter, dir.name))
-  end
-
+  M.render_directories(dirs)
   vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
 end
 
@@ -821,14 +693,7 @@ function M.open_item()
         "Press 'Enter' on a note to merge, 'Backspace' to go back",
         "",
       }
-      for _, item in ipairs(sub_items) do
-        if item.type == "directory" then
-          table.insert(content, "[D] " .. item.name)
-        else
-          table.insert(content, "[F] " .. (item.alias or item.name))
-        end
-      end
-      vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
+      M.render_directories(sub_items)
       vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
       -- Keep buffer modifiable for cursor movement
       vim.api.nvim_set_current_win(ui_state.organize_popup.winid)
@@ -917,17 +782,8 @@ function M.back_to_parent()
         "",
       }
 
-      for _, item in ipairs(sub_items) do
-        if item.type == "directory" then
-          table.insert(content, "[D] " .. item.name)
-        else
-          table.insert(content, "[F] " .. (item.alias or item.name))
-        end
-      end
-
-      vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
+      M.render_directories(sub_items)
       vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
-      vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
       return
     end
   else
