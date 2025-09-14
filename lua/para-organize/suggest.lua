@@ -1,17 +1,19 @@
 -- para-organize/suggest.lua
 -- Suggestion engine for destination recommendations
 
+local config_mod = require("para-organize.config")
+
 local M = {}
 
 -- Generate suggestions for a capture
 function M.generate_suggestions(capture)
-  local config = require("para-organize.config").get()
+  local config = config_mod.get()
   local utils = require("para-organize.utils")
   local learn = require("para-organize.learn")
   local indexer = require("para-organize.indexer")
   
   local suggestions = {}
-  local para_folders = config.get_para_folders()
+  local para_folders = config_mod.get_para_folders()
   
   -- Score each potential destination
   for folder_type, folder_path in pairs(para_folders) do
@@ -38,7 +40,7 @@ function M.generate_suggestions(capture)
   
   -- Add archive option if configured
   if config.suggestions.always_show_archive then
-    local archive_path = config.get_archive_path(capture.filename)
+    local archive_path = config_mod.get_archive_path(capture.filename)
     table.insert(suggestions, {
       path = vim.fn.fnamemodify(archive_path, ":h"),
       name = "Archive Now",
