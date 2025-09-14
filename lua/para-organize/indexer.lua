@@ -145,6 +145,22 @@ function M.extract_metadata(filepath)
     indexed_at = os.time(),
   }
 
+  -- Ensure list fields are tables even if YAML provided scalar strings
+  local function ensure_list(value)
+    if type(value) == "table" then
+      return value
+    elseif value == nil then
+      return {}
+    else
+      return { value }
+    end
+  end
+
+  metadata.tags = ensure_list(metadata.tags)
+  metadata.aliases = ensure_list(metadata.aliases)
+  metadata.sources = ensure_list(metadata.sources)
+  metadata.modalities = ensure_list(metadata.modalities)
+
   -- Normalize tags
   if config.patterns.tag_normalization then
     local normalized_tags = {}
