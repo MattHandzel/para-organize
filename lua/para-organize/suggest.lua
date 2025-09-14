@@ -160,7 +160,7 @@ function M.calculate_score(capture, destination, folder_type)
   if capture.aliases then
     for _, alias in ipairs(capture.aliases) do
       -- Skip capture_id aliases
-      if not alias:match("^capture_") then
+      if type(alias) == "string" and not alias:match("^capture_") then
         local similarity = utils.string_similarity(
           alias:lower(),
           destination.name:lower()
@@ -175,13 +175,20 @@ function M.calculate_score(capture, destination, folder_type)
   
   -- 6. Context match
   if capture.context then
-    local context_lower = capture.context:lower()
-    local name_lower = destination.name:lower()
-    
-    if context_lower:find(name_lower, 1, true) or
-       name_lower:find(context_lower, 1, true) then
-      score = score + weights.context_match
-      table.insert(reasons, "Context matches folder")
+    local context_str = ""
+    if type(capture.context) == "table" then
+      context_str = table.concat(capture.context, " ")
+    elseif type(capture.context) == "string" then
+      context_str = capture.context
+    end
+    if context_str ~= "" then
+      local context_lower = context_str:lower()
+      local name_lower = destination.name:lower()
+      if context_lower:find(name_lower, 1, true) or
+         name_lower:find(context_lower, 1, true) then
+        score = score + weights.context_match
+        table.insert(reasons, "Context matches folder")
+      end
     end
   end
   
