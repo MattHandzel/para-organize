@@ -199,7 +199,8 @@ A Neovim plugin for organizing notes using the PARA (Projects, Areas, Resources,
 - [x] flake.nix for NixOS development environment
 - [x] Makefile with development commands
 - [x] config.lua - Configuration management with validation and debug info
-- [x] utils.lua - Comprehensive utility functions (logging, paths, YAML parsing, async)
+- [x] utils.lua - Comprehensive utility functions (logging, paths, YAML parsing, async)  
+  - **2025-09-14**: Fixed bug where YAML front-matter parser returned `nil` for valid notes; added robust delimiter handling and nested map/list support
 - [x] health.lua - Health checks for dependencies and configuration
 - [x] init.lua - Main entry point with commands, plugin setup, and debug command
 - [x] indexer.lua - Note indexing with metadata extraction and search
@@ -226,16 +227,9 @@ A Neovim plugin for organizing notes using the PARA (Projects, Areas, Resources,
 - [x] Debug mode with comprehensive diagnostics
 
 ### In Progress
+- [ ] Fixing capture path detection issue
 - [ ] Enhanced keyboard shortcuts
 - [ ] Performance optimizations
-
-### Recently Fixed
-- [x] Fixed frontmatter parser to correctly handle complex YAML structures (2025-09-14)
-  - Improved nested structure handling with proper indentation support
-  - Added support for keys with dashes and underscores
-  - Fixed end delimiter detection for frontmatter
-  - Enhanced list item parsing for complex nested structures
-- [x] Fixing capture path detection issue
 
 ### Next Steps
 1. Polish UI and keybindings
