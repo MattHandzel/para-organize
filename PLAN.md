@@ -508,6 +508,19 @@ This document outlines the plan for implementing and updating the `para-organize
   - Prepare release notes for the updated version in `CHANGELOG.md`.
   - Ensure all tests pass and perform a final code review.
 
+## Automated Feedback Loop
+
+To improve development speed and reduce errors, an automated feedback loop has been established. This allows for immediate testing of the plugin's stability after any code change.
+
+### Process
+
+1.  **Make Code Changes**: Implement new features or fix bugs in the codebase.
+2.  **Run Automated Test**: Execute `make test-run` from the terminal.
+3.  **Analyze Results**: This command runs the plugin in a headless Neovim instance using a minimal configuration (`tests/minimal_init.lua`) and executes `tests/run_plugin.lua`. Any errors during the plugin's startup are printed to the console.
+4.  **Iterate**: If an error is detected, it is fixed, and the test is run again. This cycle continues until the plugin starts without any errors.
+
+This process ensures that changes are validated for basic stability before being pushed, leading to a more reliable plugin.
+
 ## Version Control Strategy
 
 - Create a new branch for UI refactoring: `feature/ui-refactor`.

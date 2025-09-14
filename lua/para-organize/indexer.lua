@@ -584,9 +584,10 @@ end
 
 -- Function to get all PARA directories
 function M.get_para_directories()
+  local config = require("para-organize.config").get()
   local dirs = {}
   for _, type in ipairs({"projects", "areas", "resources", "archives"}) do
-    local path = config.vault_path .. "/" .. type
+    local path = config.paths.vault_dir .. "/" .. type
     local handle = io.popen("find " .. path .. " -maxdepth 1 -type d")
     if handle then
       for line in handle:lines() do

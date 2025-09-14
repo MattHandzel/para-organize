@@ -20,6 +20,9 @@ test:
 	@echo "Running tests..."
 	@nvim --headless -u tests/minimal_init.lua -c "PlenaryBustedDirectory tests/ { minimal_init = 'tests/minimal_init.lua' }"
 
+test-run:
+	@nvim --headless -u tests/minimal_init.lua -c "luafile tests/run_plugin.lua"
+
 # Run specific test file
 test-file:
 	@echo "Running test file: $(FILE)"

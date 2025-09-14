@@ -30,6 +30,21 @@ local ui_state = {
   current_sort = 1,
 }
 
+-- Helper function to get the letter for a PARA type
+local function get_type_letter(type)
+  if type == "projects" then
+    return "P"
+  elseif type == "areas" then
+    return "A"
+  elseif type == "resources" then
+    return "R"
+  elseif type == "archives" then
+    return "🗑️"
+  else
+    return "?"
+  end
+end
+
 -- Create the two-pane layout
 function M.create_layout()
   local config = require("para-organize.config").get()
@@ -210,8 +225,9 @@ function M.render_capture(capture)
     "**Tags:** " .. tags,
     "**Sources:** " .. sources,
     "",
-    body
   }
+  
+  vim.list_extend(lines, vim.split(body, "\n"))
   
   vim.api.nvim_buf_set_lines(ui_state.capture_popup.bufnr, 0, -1, false, lines)
   vim.api.nvim_buf_set_option(ui_state.capture_popup.bufnr, "modifiable", true)
