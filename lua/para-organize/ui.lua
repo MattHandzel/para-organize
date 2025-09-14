@@ -191,83 +191,14 @@ function M.render_directories(dirs)
   render_mod.render_directories(ui_state, dirs)
 end
 
--- Setup keymaps
+local keymaps_mod = require("para-organize.ui.keymaps")
+
 function M.setup_keymaps()
-  local config = require("para-organize.config").get()
-  local keymaps = config.keymaps.buffer
-
-  -- Capture pane keymaps
-  local capture_opts = { buffer = ui_state.capture_popup.bufnr, silent = true }
-
-  vim.keymap.set("n", keymaps.accept, M.accept_suggestion, capture_opts)
-  vim.keymap.set("n", keymaps.cancel, M.close, capture_opts)
-  vim.keymap.set("n", keymaps.next, M.next_capture, capture_opts)
-  vim.keymap.set("n", keymaps.prev, M.prev_capture, capture_opts)
-  vim.keymap.set("n", keymaps.skip, M.skip_capture, capture_opts)
-  vim.keymap.set("n", keymaps.archive, M.archive_capture, capture_opts)
-  vim.keymap.set("n", keymaps.merge, M.enter_merge_mode, capture_opts)
-  vim.keymap.set("n", keymaps.search, M.search_inline, capture_opts)
-  vim.keymap.set("n", keymaps.help, M.show_help, capture_opts)
-  -- Use Alt+j/k for suggestion navigation instead of overriding j/k
-  vim.keymap.set("n", "<A-j>", M.next_suggestion, capture_opts)
-  vim.keymap.set("n", "<A-k>", M.prev_suggestion, capture_opts)
-  -- Add pane switching
-  vim.keymap.set("n", "<C-l>", function()
-    vim.api.nvim_set_current_win(ui_state.organize_popup.winid)
-  end, capture_opts)
-
-  -- Organize pane keymaps
-  local organize_opts = { buffer = ui_state.organize_popup.bufnr, silent = true }
-
-  vim.keymap.set("n", keymaps.accept, M.accept_suggestion, organize_opts)
-  vim.keymap.set("n", keymaps.cancel, M.close, organize_opts)
-  -- Use Alt+j/k for suggestion navigation instead of overriding j/k
-  vim.keymap.set("n", "<A-j>", M.next_suggestion, organize_opts)
-  vim.keymap.set("n", "<A-k>", M.prev_suggestion, organize_opts)
-  vim.keymap.set("n", "s", M.change_sort_order, organize_opts)
-  vim.keymap.set("n", "/", M.search_inline, organize_opts)
-  -- Map Enter to open_item for all modes
-  vim.keymap.set("n", "<CR>", function()
-    vim.notify(
-      "Enter key pressed, merge_mode = " .. tostring(ui_state.merge_mode),
-      vim.log.levels.INFO
-    )
-    M.open_item() -- Always call open_item, it will handle different states
-  end, organize_opts)
-  vim.keymap.set("n", "<BS>", M.back_to_parent, organize_opts)
-  -- Add pane switching
-  vim.keymap.set("n", "<C-h>", function()
-    vim.api.nvim_set_current_win(ui_state.capture_popup.winid)
-  end, organize_opts)
-
-  -- Quick folder creation
-  vim.keymap.set("n", keymaps.new_project, function()
-    M.create_new_folder("projects")
-  end, capture_opts)
-
-  vim.keymap.set("n", keymaps.new_area, function()
-    M.create_new_folder("areas")
-  end, capture_opts)
-
-  vim.keymap.set("n", keymaps.new_resource, function()
-    M.create_new_folder("resources")
-  end, capture_opts)
+  keymaps_mod.setup_keymaps(ui_state, M)
 end
 
--- Setup autocmds
 function M.setup_autocmds()
-  local group = vim.api.nvim_create_augroup("ParaOrganizeUI", { clear = true })
-
-  -- Clean up on window close
-  vim.api.nvim_create_autocmd("WinClosed", {
-    group = group,
-    pattern = tostring(ui_state.capture_popup.winid) .. "," .. tostring(
-      ui_state.organize_popup.winid
-    ),
-    callback = function()
-      M.close()
-    end,
-  })
+  keymaps_mod.setup_autocmds(ui_state, M.close)
 end
 
 -- Navigation functions
