@@ -382,10 +382,32 @@ function M.extract_frontmatter(content, delimiters)
   return frontmatter, body
 end
 
--- Parse YAML frontmatter (still *simple* but now supports nested maps and lists)
--- NOTE: This is **NOT** a full YAML parser – it supports the subset of YAML we
--- need for note front-matter (scalars, nested maps, and lists indicated by "-").
-function M.parse_yaml_simple(yaml_str)
+-- [[
+-- YAML parsing helpers
+-- We try to use a real YAML parser (lyaml) if present for maximum correctness.
+-- If lyaml is unavailable, we fall back to a reasonably complete Lua parser that
+-- supports the YAML subset typically found in note front-matter.
+-- ]]
+
+-- public entry point
+function M.parse_yaml(yaml_str)
+  if not yaml_str or yaml_str == "" then return {} end
+
+  -- First, attempt to use lyaml (if the user has it installed via luarocks).
+  local ok, lyaml = pcall(require, "lyaml")
+  if ok and lyaml and type(lyaml.load) == "function" then
+    local success, result = pcall(function() return lyaml.load(yaml_str) end)
+    if success and type(result) == "table" then
+      return result
+    end
+  end
+
+  -- Fall back to internal parser
+  return M.parse_yaml_fallback(yaml_str)
+end
+
+-- Internal YAML subset parser (previously named parse_yaml_simple)
+function M.parse_yaml_fallback(yaml_str)
   if not yaml_str or yaml_str == "" then
     return {}
   end
@@ -402,6 +424,7 @@ function M.parse_yaml_simple(yaml_str)
     end
     if val == "true" then return true end
     if val == "false" then return false end
+    -- allow negative / decimal numbers
     local num = tonumber(val)
     if num then return num end
     -- Strip surrounding quotes
@@ -449,7 +472,19 @@ function M.parse_yaml_simple(yaml_str)
       elseif value == "[]" then
         parent[key] = {}
       elseif value:sub(1,1) == "[" and value:sub(-1) == "]" then
+        -- Inline list e.g. [a, b, c]
         parent[key] = M.map(M.split(value:sub(2,-2), ","), to_scalar)
+      elseif value:sub(1,1) == "{" and value:sub(-1) == "}" then
+        -- Inline map e.g. {city: SF, country: US}
+        local map_tbl = {}
+        local inner = value:sub(2,-2)
+        for pair in inner:gmatch("[^,]+") do
+          local pk, pv = pair:match("^%s*([%w%-%_]+)%s*:%s*(.-)%s*$")
+          if pk then
+            map_tbl[pk] = to_scalar(pv)
+          end
+        end
+        parent[key] = map_tbl
       else
         parent[key] = to_scalar(value)
       end
@@ -460,6 +495,9 @@ function M.parse_yaml_simple(yaml_str)
 
   return root
 end
+
+-- Backwards-compatibility: keep old function name
+M.parse_yaml_simple = M.parse_yaml
 
 -- Table utilities
 
