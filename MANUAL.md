@@ -150,13 +150,27 @@ Navigate the interface with these basic commands:
 
 ### Merge Mode
 
-To merge a capture into an existing note:
+There are two ways to merge a capture into an existing note:
 
-1. Press `m` to enter merge mode
-2. Select a destination folder
-3. Select a target note
-4. Edit the merged content in the right pane (fully editable with normal cursor movement)
+**Method 1 - Direct navigation:**
+1. In the Organization Pane, navigate to a PARA folder using cursor keys
+2. Press `Enter` to open that folder
+3. Navigate to the target note and press `Enter` to start merge
+4. Edit the merged content in the right pane (both original and capture content will be shown)
 5. Press `<leader>mc` to complete the merge or `<leader>mx` to cancel
+
+**Method 2 - Using merge command:**
+1. Press `m` to enter merge mode
+2. Select a destination folder from the picker
+3. Select a target note from the picker
+4. Edit the merged content in the right pane
+5. Press `<leader>mc` to complete the merge or `<leader>mx` to cancel
+
+**What happens during merge:**
+- The right pane shows both the original note content and the capture content
+- You can edit this content to merge them together however you want
+- The original capture will be archived after merging
+- Tags and metadata will be combined automatically
 
 ### Creating New Folders
 

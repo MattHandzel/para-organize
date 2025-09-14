@@ -284,31 +284,74 @@ function M.render_merge_view()
   end
   
   local utils = require("para-organize.utils")
+  local config = require("para-organize.config").get()
   
-  -- Read target file content
-  local content = utils.read_file(ui_state.merge_target.path)
-  if not content then
+  -- Read both source and target file contents
+  local capture_content = utils.read_file(ui_state.current_capture.path) or ""
+  local target_content = utils.read_file(ui_state.merge_target.path) or ""
+  
+  if not target_content then
     vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, {
       "Error: Could not read target file"
     })
     return
   end
   
-  -- Show target file content
+  -- Extract frontmatter and body from both files
+  local delimiters = config.patterns.frontmatter_delimiters
+  local _, capture_body = utils.extract_frontmatter(capture_content, delimiters)
+  
+  -- Update border title to indicate merge mode
+  ui_state.organize_popup.border:set_text("top", " Merge: " .. (ui_state.merge_target.alias or ui_state.merge_target.name) .. " ")
+  
+  -- Prepare merge view with instructions and content
   local lines = {
-    "# Merge Target: " .. ui_state.merge_target.title,
-    " Path: " .. ui_state.merge_target.path,
+    "# Merging: " .. (ui_state.merge_target.alias or ui_state.merge_target.name),
     "",
-    "─────────────────────────",
+    "## Instructions:",
+    "1. Edit this note to include content from the capture",
+    "2. Press <leader>mc to complete merge",
+    "3. Press <leader>mx to cancel",
     "",
-    content
+    "## Original Content:",
+    ""
   }
   
+  vim.list_extend(lines, vim.split(target_content, "\n"))
+  lines[#lines+1] = ""
+  lines[#lines+1] = "## Capture Content to Merge:"
+  lines[#lines+1] = ""
+  vim.list_extend(lines, vim.split(capture_body, "\n"))
+  
+  vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
   vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, lines)
   
   -- Make buffer modifiable for editing
   vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
   vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "filetype", "markdown")
+  
+  -- Add keybindings for merge actions if they don't exist
+  local opts = { buffer = ui_state.organize_popup.bufnr, silent = true }
+  vim.keymap.set('n', '<leader>mc', function()
+    -- Complete merge
+    local edited_content = table.concat(vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, 0, -1, false), "\n")
+    if utils.write_file(ui_state.merge_target.path, edited_content) then
+      vim.notify("Successfully merged content to " .. ui_state.merge_target.name, vim.log.levels.INFO)
+      -- Pass the entire capture object, not just the path
+      move.archive_capture(ui_state.current_capture)
+      M.render_suggestions(ui_state.current_suggestions)
+      ui_state.merge_mode = false
+      ui_state.merge_target = nil
+    end
+  end, opts)
+  
+  vim.keymap.set('n', '<leader>mx', function()
+    -- Cancel merge
+    ui_state.merge_mode = false
+    ui_state.merge_target = nil
+    M.render_suggestions(ui_state.current_suggestions)
+    vim.notify("Merge canceled", vim.log.levels.INFO)
+  end, opts)
 end
 
 -- Highlight selected suggestion
@@ -456,12 +499,39 @@ end
 function M.enter_merge_mode()
   local search = require("para-organize.search")
   
+  -- Show visual indicator that we're entering merge mode
+  vim.notify("Entering merge mode - select a destination folder", vim.log.levels.INFO)
+  ui_state.capture_popup.border:set_text("top", " Capture (Merge Mode) ")
+  ui_state.organize_popup.border:set_text("top", " Select Destination ")
+  
   ui_state.merge_mode = true
   
   -- Open folder picker to select destination
   search.open_folder_picker(function(folder)
+    if not folder then
+      -- User cancelled folder selection
+      ui_state.merge_mode = false
+      ui_state.capture_popup.border:set_text("top", " Capture ")
+      ui_state.organize_popup.border:set_text("top", " Organize ")
+      vim.notify("Merge mode cancelled", vim.log.levels.INFO)
+      return
+    end
+    
+    -- Show visual indicator for selecting a note
+    ui_state.organize_popup.border:set_text("top", " Select Note to Merge ")
+    vim.notify("Select a note to merge into", vim.log.levels.INFO)
+    
     -- Open notes picker for selected folder
     search.open_folder_notes_picker(folder.path, function(note)
+      if not note then
+        -- User cancelled note selection
+        ui_state.merge_mode = false
+        ui_state.capture_popup.border:set_text("top", " Capture ")
+        ui_state.organize_popup.border:set_text("top", " Organize ")
+        vim.notify("Merge mode cancelled", vim.log.levels.INFO)
+        return
+      end
+      
       ui_state.merge_target = note
       M.render_merge_view()
     end)
@@ -669,23 +739,46 @@ function M.open_item()
     local name = content:match("^%[F%] (.+)")
     local file = indexer.get_file_by_alias_or_name(name)
     if file then
+      -- Set up merge operation
+      ui_state.merge_mode = true
+      ui_state.merge_target = file
+      
+      -- Read both source and target file contents
+      local capture_content = utils.read_file(ui_state.current_capture.path) or ""
+      local target_content = utils.read_file(file.path) or ""
+      
+      -- Extract frontmatter and body from both files
+      local config = require("para-organize.config").get()
+      local delimiters = config.patterns.frontmatter_delimiters
+      local _, capture_body = utils.extract_frontmatter(capture_content, delimiters)
+      
+      -- Update border title to indicate merge mode
+      ui_state.organize_popup.border:set_text("top", " Merge: " .. name .. " ")
+      
+      -- Prepare merge view with instructions and content
       vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
       local content = {
-        "# Merging to: " .. name,
+        "# Merging: " .. name,
         "",
-        "Edit this note to merge content from the capture note.",
-        "Close the buffer to complete merging.",
+        "## Instructions:",
+        "1. Edit this note to include content from the capture",
+        "2. Press <leader>mc to complete merge",
+        "3. Press <leader>mx to cancel",
+        "",
+        "## Original Content:",
         ""
       }
-      local file_content = utils.read_file(file.path) or ""
-      vim.list_extend(content, vim.split(file_content, "\n"))
+      vim.list_extend(content, vim.split(target_content, "\n"))
+      content[#content+1] = ""
+      content[#content+1] = "## Capture Content to Merge:"
+      content[#content+1] = ""
+      vim.list_extend(content, vim.split(capture_body, "\n"))
+      
+      -- Display the merged view
       vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
       vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
       vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "filetype", "markdown")
       vim.api.nvim_win_set_buf(ui_state.organize_popup.winid, ui_state.organize_popup.bufnr)
-      -- Set merge mode and target
-      ui_state.merge_mode = true
-      ui_state.merge_target = file
       
       -- Add keybindings for merge actions
       local opts = { buffer = ui_state.organize_popup.bufnr, silent = true }
