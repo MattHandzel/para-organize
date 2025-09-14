@@ -347,14 +347,47 @@ function M.render_merge_view()
     -- Complete merge
     local utils = require("para-organize.utils") -- Get utils inside this scope
     local move = require("para-organize.move") -- Get move inside this scope
-    local edited_content = table.concat(vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, 0, -1, false), "\n")
-    if utils.write_file(ui_state.merge_target.path, edited_content) then
+    
+    -- Check if merge target is valid
+    if not ui_state.merge_target or not ui_state.merge_target.path then
+      vim.notify("ERROR: Cannot complete merge - invalid merge target", vim.log.levels.ERROR)
+      return
+    end
+    
+    -- Additional debug information
+    vim.notify("DEBUG: Render merge view - target path: " .. ui_state.merge_target.path, vim.log.levels.INFO)
+    vim.notify("DEBUG: Render merge view - target exists: " .. tostring(vim.fn.filereadable(ui_state.merge_target.path) == 1), vim.log.levels.INFO)
+    
+    -- Get content from buffer safely
+    local ok, lines = pcall(vim.api.nvim_buf_get_lines, ui_state.organize_popup.bufnr, 0, -1, false)
+    if not ok or not lines then
+      vim.notify("ERROR: Failed to get buffer content", vim.log.levels.ERROR)
+      return
+    end
+    
+    local edited_content = table.concat(lines, "\n")
+    
+    vim.notify("DEBUG: Render merge view - about to write " .. #edited_content .. " bytes to file", vim.log.levels.INFO)
+    
+    -- Try to write the file
+    local success = utils.write_file(ui_state.merge_target.path, edited_content)
+    if success then
       vim.notify("Successfully merged content to " .. ui_state.merge_target.name, vim.log.levels.INFO)
-      -- Pass the entire capture object, not just the path
-      move.archive_capture(ui_state.current_capture)
+      
+      -- Check if current_capture exists before archiving
+      if ui_state.current_capture then
+        -- Pass the entire capture object, not just the path
+        move.archive_capture(ui_state.current_capture)
+      else
+        vim.notify("WARNING: No current capture to archive", vim.log.levels.WARN)
+      end
+      
+      -- Reset UI state
       M.render_suggestions(ui_state.current_suggestions)
       ui_state.merge_mode = false
       ui_state.merge_target = nil
+    else
+      vim.notify("ERROR: Failed to write merged content to " .. ui_state.merge_target.path, vim.log.levels.ERROR)
     end
   end, opts)
   
@@ -904,14 +937,49 @@ function M.open_item()
         -- Complete merge
         local utils = require("para-organize.utils") -- Get utils inside this scope
         local move = require("para-organize.move") -- Get move inside this scope
-        local edited_content = table.concat(vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, 0, -1, false), "\n")
-        if utils.write_file(file.path, edited_content) then
+        
+        -- Check if file is valid
+        if not file or not file.path then
+          vim.notify("ERROR: Cannot complete merge - invalid file target", vim.log.levels.ERROR)
+          return
+        end
+        
+        -- Additional debug information
+        vim.notify("DEBUG: Merge target file path: " .. file.path, vim.log.levels.INFO)
+        vim.notify("DEBUG: Merge target file exists: " .. tostring(vim.fn.filereadable(file.path) == 1), vim.log.levels.INFO)
+        
+        -- Get content from buffer
+        local ok, lines = pcall(vim.api.nvim_buf_get_lines, ui_state.organize_popup.bufnr, 0, -1, false)
+        if not ok or not lines then
+          vim.notify("ERROR: Failed to get buffer content", vim.log.levels.ERROR)
+          return
+        end
+        
+        local edited_content = table.concat(lines, "\n")
+        
+        vim.notify("DEBUG: About to write " .. #edited_content .. " bytes to file", vim.log.levels.INFO)
+        
+        -- Try to write the file
+        local success = utils.write_file(file.path, edited_content)
+        if success then
           vim.notify("Successfully merged content to " .. file.name, vim.log.levels.INFO)
-          -- Pass the entire capture object, not just the path
-          move.archive_capture(ui_state.current_capture)
-          M.render_suggestions(ui_state.current_suggestions)
-          ui_state.merge_mode = false
-          ui_state.merge_target = nil
+          
+          -- Check if current_capture exists before archiving
+          if ui_state.current_capture then
+            -- Pass the entire capture object, not just the path
+            move.archive_capture(ui_state.current_capture)
+          else
+            vim.notify("WARNING: No current capture to archive", vim.log.levels.WARN)
+          end
+        else
+          vim.notify("ERROR: Failed to write merged content to " .. file.path, vim.log.levels.ERROR)
+          return
+        end
+        
+        -- Reset UI state
+        M.render_suggestions(ui_state.current_suggestions)
+        ui_state.merge_mode = false
+        ui_state.merge_target = nil
         end
       end, opts)
       
