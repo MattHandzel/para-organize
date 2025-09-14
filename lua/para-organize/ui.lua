@@ -263,6 +263,7 @@ function M.render_suggestions(suggestions)
     table.insert(content, string.format("[%s] %s", type_letter, dir.name))
   end
   
+  vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
   vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
   vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", false)
   vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "filetype", "markdown")

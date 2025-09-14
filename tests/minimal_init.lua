@@ -73,37 +73,12 @@ if vim.fn.isdirectory(test_data_dir) == 0 then
   vim.fn.mkdir(test_data_dir, "p")
 end
 
--- Define test vault directory
-local test_vault_dir = test_dir .. "/fixtures/vault"
+-- Define test vault directory to use the real notes
+local test_vault_dir = test_dir .. "/test_vault/notes"
+
+-- Ensure the test vault exists
 if vim.fn.isdirectory(test_vault_dir) == 0 then
-  vim.fn.mkdir(test_vault_dir .. "/projects", "p")
-  vim.fn.mkdir(test_vault_dir .. "/areas", "p")
-  vim.fn.mkdir(test_vault_dir .. "/resources", "p")
-  vim.fn.mkdir(test_vault_dir .. "/archives", "p")
-  vim.fn.mkdir(test_vault_dir .. "/capture/raw_capture", "p")
-  
-  -- Create a test capture file
-  local test_capture = test_vault_dir .. "/capture/raw_capture/test_capture.md"
-  local file = io.open(test_capture, "w")
-  if file then
-    file:write([[---
-timestamp: 2024-01-01T12:00:00Z
-tags:
-  - test
-  - example
-sources:
-  - test_source
-modalities:
-  - text
-processing_status: raw
----
-
-# Test Capture
-
-This is a test capture file for testing the para-organize plugin.
-]])
-    file:close()
-  end
+  error("Test vault not found at: " .. test_vault_dir .. ". Please run 'make setup-tests' or copy notes manually.")
 end
 
 -- Basic Neovim configuration for tests
