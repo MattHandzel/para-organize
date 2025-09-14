@@ -82,17 +82,29 @@ function M.extract_metadata(filepath)
     return nil
   end
 
-  -- Extract frontmatter
-  local frontmatter_str, body =
-    utils.extract_frontmatter(content, config.patterns.frontmatter_delimiters)
+  local ok, result = pcall(function()
+    -- Extract frontmatter
+    local frontmatter_str, body =
+      utils.extract_frontmatter(content, config.patterns.frontmatter_delimiters)
 
-  utils.log("TRACE", "Frontmatter for %s: %s", filepath, frontmatter_str or "none")
+    utils.log("TRACE", "Frontmatter for %s: %s", filepath, frontmatter_str or "none")
 
-  -- Parse frontmatter
-  local frontmatter = {}
-  if frontmatter_str then
-    frontmatter = utils.parse_yaml_simple(frontmatter_str)
+    -- Parse frontmatter
+    local frontmatter = {}
+    if frontmatter_str then
+      frontmatter = utils.parse_yaml_simple(frontmatter_str)
+    end
+
+    return { frontmatter = frontmatter, body = body }
+  end)
+
+  if not ok then
+    utils.log("ERROR", "Failed to extract metadata for %s: %s", filepath, result)
+    return nil
   end
+
+  local frontmatter = result.frontmatter or {}
+  local body = result.body
 
   utils.log("TRACE", "Parsed frontmatter for %s: %s", filepath, vim.inspect(frontmatter))
 
@@ -507,6 +519,11 @@ function M.get_folder_notes(folder_path)
 end
 
 -- Get statistics about the index
+-- Get a single note from the index
+function M.get_note(filepath)
+  return index[filepath]
+end
+
 function M.get_statistics()
   local stats = {
     total = vim.tbl_count(index),
@@ -639,7 +656,10 @@ end
 -- Function to extract alias from file content (simplified for example)
 function extract_alias(file_path)
   local content = utils.read_file(file_path) or ""
-  local frontmatter = parse_frontmatter(content)
+      local frontmatter_str, _ = utils.extract_frontmatter(content)
+    if not frontmatter_str then return nil end
+
+    local frontmatter = utils.parse_yaml_simple(frontmatter_str)
   if frontmatter.aliases and #frontmatter.aliases > 0 then
     return frontmatter.aliases[1]
   end

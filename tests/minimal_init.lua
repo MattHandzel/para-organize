@@ -8,6 +8,9 @@ local plugin_root = vim.fn.fnamemodify(test_dir, ':h')
 -- Add plugin root to rtp
 vim.opt.rtp:prepend(plugin_root)
 
+-- Add tests directory to package path so we can require test helpers
+package.path = package.path .. ';' .. test_dir .. '/?.lua'
+
 -- Ensure plenary is in path
 local status_ok, _ = pcall(require, "plenary")
 if not status_ok then

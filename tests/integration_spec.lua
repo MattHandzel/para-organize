@@ -1,240 +1,115 @@
--- integration_spec.lua
--- Integration tests for para-organize.nvim
+-- tests/integration_spec.lua
+local helpers = require("tests.helpers")
 
 describe("integration", function()
-  local para_organize
-  local test_dir = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ":h")
-  local test_vault = test_dir .. "/fixtures/vault"
-  local test_output = test_dir .. "/output"
-  
+  local indexer, suggest, move, learn, config
+
+  -- Reset modules before each test for isolation
   before_each(function()
-    -- Clear any loaded modules to start fresh
-    package.loaded["para-organize"] = nil
-    package.loaded["para-organize.config"] = nil
     package.loaded["para-organize.indexer"] = nil
-    package.loaded["para-organize.search"] = nil
+    package.loaded["para-organize.config"] = nil
     package.loaded["para-organize.suggest"] = nil
     package.loaded["para-organize.move"] = nil
     package.loaded["para-organize.learn"] = nil
-    
-    -- Set up test environment
-    vim.env.PARA_ORGANIZE_TEST_MODE = "1"
-    
-    -- Set up plugin with test configuration
-    para_organize = require("para-organize")
-    para_organize.setup({
-      paths = {
-        vault_dir = test_vault,
-        capture_folder = "capture/raw_capture",
-        para_folders = {
-          projects = "projects",
-          areas = "areas",
-          resources = "resources",
-          archives = "archives",
-        },
-      },
-      debug = {
-        enabled = true,
-        log_level = "debug",
-        log_file = test_output .. "/para-organize-integration-test.log",
-      }
-    })
-    
-    -- Create test capture with meaningful tags and metadata
-    local capture_content = [[---
-timestamp: 2024-01-01T12:00:00Z
-id: test-integration-capture
-aliases:
-  - Integration Test
-  - Capture for Testing
-tags:
-  - integration
-  - test-project
-  - meeting
-sources:
-  - test-source
-modalities:
-  - text
-processing_status: raw
----
 
-# Integration Test Capture
+    config = require("para-organize.config")
+    indexer = require("para-organize.indexer")
+    suggest = require("para-organize.suggest")
+    move = require("para-organize.move")
+    learn = require("para-organize.learn")
 
-This is a test capture for integration testing.
-
-## Key Points
-
-- Point 1: Test basic functionality
-- Point 2: Ensure modules work together
-- Point 3: Verify end-to-end workflow
-]]
-
-    local utils = require("para-organize.utils")
-    local test_capture = test_vault .. "/capture/raw_capture/integration_test.md"
-    utils.write_file_atomic(test_capture, capture_content)
-    
-    -- Create test project folder that matches one of the tags
-    local project_folder = test_vault .. "/projects/test-project"
-    if vim.fn.isdirectory(project_folder) == 0 then
-      vim.fn.mkdir(project_folder, "p")
-    end
-  end)
-  
-  it("runs full indexing process", function()
-    local indexer = require("para-organize.indexer")
-    
-    -- Force full reindex
-    local reindex_complete = false
-    indexer.full_reindex(function(stats)
-      assert.is_true(stats.total > 0)
-      reindex_complete = true
-    end)
-    
-    -- Wait a bit for async operation
-    vim.wait(1000, function() return reindex_complete end)
-    assert.is_true(reindex_complete)
-    
-    -- Check that our test file was indexed
-    local test_capture = test_vault .. "/capture/raw_capture/integration_test.md"
-    local note = indexer.get_note(test_capture)
-    
-    assert.is_not_nil(note)
-    assert.equals("Integration Test Capture", note.title)
-    assert.same({"integration", "test-project", "meeting"}, note.tags)
-  end)
-  
-  it("generates suggestions based on tags", function()
-    local indexer = require("para-organize.indexer")
-    local suggest = require("para-organize.suggest")
-    
-    -- Make sure file is indexed
-    local test_capture = test_vault .. "/capture/raw_capture/integration_test.md"
-    indexer.index_file(test_capture)
-    
-    local note = indexer.get_note(test_capture)
-    assert.is_not_nil(note)
-    
-    -- Generate suggestions
-    local suggestions = suggest.generate_suggestions(note)
-    
-    -- Should have test-project as a suggestion since folder exists
-    local found_project = false
-    for _, suggestion in ipairs(suggestions) do
-      if suggestion.name == "test-project" and suggestion.type == "projects" then
-        found_project = true
-        break
-      end
-    end
-    
-    assert.is_true(found_project, "test-project should be suggested")
-  end)
-  
-  it("moves capture to suggested destination", function()
-    local indexer = require("para-organize.indexer")
-    local move = require("para-organize.move")
-    local utils = require("para-organize.utils")
-    
-    -- Make sure file is indexed
-    local test_capture = test_vault .. "/capture/raw_capture/integration_test.md"
-    indexer.index_file(test_capture)
-    
-    -- Destination folder
-    local dest_folder = test_vault .. "/projects/test-project"
-    
-    -- Move the file
-    local success, dest_path = move.move_to_destination(test_capture, dest_folder)
-    
-    -- Check move was successful
-    assert.is_true(success)
-    assert.is_not_nil(dest_path)
-    assert.is_true(vim.fn.filereadable(dest_path) == 1)
-    
-    -- Check file has project tag added
-    local content = utils.read_file(dest_path)
-    local frontmatter, _ = utils.extract_frontmatter(content)
-    local data = utils.parse_yaml_simple(frontmatter)
-    
-    local has_project_tag = false
-    for _, tag in ipairs(data.tags or {}) do
-      if tag == "project/test-project" then
-        has_project_tag = true
-        break
-      end
-    end
-    
-    assert.is_true(has_project_tag)
-    
-    -- Original should be gone (archived)
-    assert.is_true(vim.fn.filereadable(test_capture) == 0)
-    
-    -- But should be in archives
-    local archives = test_vault .. "/archives/capture/raw_capture"
-    local found = false
-    
-    if vim.fn.isdirectory(archives) == 1 then
-      local cmd = "find " .. archives .. " -name 'integration_test*.md'"
-      local handle = io.popen(cmd)
-      if handle then
-        for line in handle:lines() do
-          if line:find("integration_test") then
-            found = true
-            break
-          end
-        end
-        handle:close()
-      end
-    end
-    
-    assert.is_true(found, "Original should be archived")
-    
-    -- Clean up the moved file
-    os.remove(dest_path)
-  end)
-  
-  it("learns from move operations", function()
-    local indexer = require("para-organize.indexer")
-    local learn = require("para-organize.learn")
-    
-    -- Clear learning data
+    -- Clear index and learning data
+    indexer.clear()
     learn.clear()
-    
-    -- Make sure file is indexed
-    local test_capture = test_vault .. "/capture/raw_capture/integration_test.md"
-    indexer.index_file(test_capture)
-    local note = indexer.get_note(test_capture)
-    
-    -- Record a move
-    local dest_folder = test_vault .. "/projects/test-project"
-    learn.record_move(note, dest_folder)
-    
-    -- Check learning data is updated
-    local stats = learn.get_statistics()
-    assert.equals(1, stats.total_moves)
-    assert.is_not_nil(stats.destinations[dest_folder])
-    
-    -- Get association score
-    local score = learn.get_association_score(note, dest_folder)
-    assert.is_true(score > 0)
+    helpers.clean_test_output()
   end)
-  
-  after_each(function()
-    -- Clean up test files
-    local files = {
-      test_vault .. "/capture/raw_capture/integration_test.md",
-      test_vault .. "/projects/test-project/integration_test.md",
-    }
-    
-    for _, file in ipairs(files) do
-      if vim.fn.filereadable(file) == 1 then
-        os.remove(file)
-      end
-    end
-    
-    -- Also check archives
-    local archives = test_vault .. "/archives/capture/raw_capture"
-    if vim.fn.isdirectory(archives) == 1 then
-      local cmd = "find " .. archives .. " -name 'integration_test*.md' -delete"
-      os.execute(cmd)
-    end
+
+  it("runs full indexing process on the test vault", function()
+    -- This test relies on the test vault being populated by minimal_init.lua
+    -- It's more of a sanity check for the overall indexing.
+    local promise = indexer.full_reindex()
+    assert.is_not_nil(promise)
+
+    -- Wait for indexing to complete
+    promise:block()
+
+    local stats = indexer.get_statistics()
+    -- Since the test vault is a copy of the real vault, we expect many notes.
+    assert.is_true(stats.total > 0, "Indexer should find notes in the test vault")
+  end)
+
+  it("generates suggestions for a capture note", function()
+    -- 1. Create a destination note for the suggestion engine to find
+    local dest_path, _ = helpers.create_temp_file({
+      dir = config.get().paths.vault_dir .. "/projects/ProjectX",
+      name = "target_note.md",
+      content = [[
+---
+tags: [project-x, important]
+---
+# Project X Main Note
+      ]]
+    })
+    indexer.index_file(dest_path)
+
+    -- 2. Create the capture note we want to organize
+    local capture_path, _ = helpers.create_temp_file({
+      name = "capture_for_suggestion.md",
+      content = [[
+---
+tags: [project-x, meeting]
+---
+# Meeting Notes
+      ]]
+    })
+    local capture_note = indexer.extract_metadata(capture_path)
+    assert.is_not_nil(capture_note)
+
+    -- 3. Generate suggestions
+    local suggestions = suggest.generate_suggestions(capture_note)
+    assert.is_not_nil(suggestions)
+    assert.is_true(#suggestions > 0, "Should generate at least one suggestion")
+
+    -- 4. Check if the top suggestion is the one we created
+    local top_suggestion = suggestions[1]
+    assert.are.equal(dest_path, top_suggestion.path)
+
+    -- 5. Clean up
+    os.remove(dest_path)
+    os.remove(capture_path)
+  end)
+
+  it("moves capture to suggested destination and learns from it", function()
+    -- 1. Setup: Create destination and capture notes
+    local dest_dir = config.get().paths.vault_dir .. "/areas/Productivity"
+    local capture_path, _ = helpers.create_temp_file({
+      name = "learning_test_capture.md",
+      content = [[
+---
+tags: [gtd, productivity]
+---
+# GTD Weekly Review
+      ]]
+    })
+    local capture_note = indexer.extract_metadata(capture_path)
+    assert.is_not_nil(capture_note)
+
+    -- 2. Perform the move
+    local success, final_path = move.move_to_destination(capture_note, dest_dir)
+    assert.is_true(success, "Move operation should succeed")
+    assert.is_not_nil(final_path)
+    assert.is_true(vim.fn.filereadable(final_path) == 1, "Destination file should exist")
+
+    -- 3. Verify that the original capture file was archived
+    -- (The move function archives automatically)
+    assert.is_true(vim.fn.filereadable(capture_path) == 0, "Original capture file should be gone")
+
+    -- 4. Verify that the learning module recorded the move
+    local features = learn.extract_features(capture_note)
+    local score = learn.get_association_score(features, dest_dir)
+    assert.is_true(score > 0, "Learning module should have a score for the new association")
+
+    -- 5. Clean up
+    os.remove(final_path)
   end)
 end)

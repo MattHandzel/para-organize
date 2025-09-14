@@ -325,6 +325,11 @@ end
 
 -- Function to archive a capture note without moving to destination
 function M.archive_capture(capture_note)
+  if not capture_note.id then
+    capture_note.id = capture_note.filename .. "_" .. os.date("%Y%m%d%H%M%S")
+    require("para-organize.utils").log("WARN", "Capture note missing ID. Generated a new one: " .. capture_note.id)
+  end
+
   local config = config_mod.get()
   local utils = require("para-organize.utils")
   local archive_path = config.paths.vault_dir .. "/archives/capture/raw_capture/" .. capture_note.id .. ".md"

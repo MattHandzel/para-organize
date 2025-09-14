@@ -344,6 +344,11 @@ end
 
 -- Get archive path for a capture
 function M.get_archive_path(filename)
+  if not filename then
+    require("para-organize.utils").log("ERROR", "get_archive_path called with nil filename")
+    return nil
+  end
+
   local vault = M.get_vault_dir()
   local archives = M.get_value("paths.para_folders.archives")
   local archive_capture = M.get_value("paths.archive_capture_path")
