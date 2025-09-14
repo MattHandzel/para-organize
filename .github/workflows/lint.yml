@@ -1,0 +1,37 @@
+name: Lint
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Lua
+      uses: leafo/gh-actions-lua@v10
+      with:
+        luaVersion: "5.1"
+    
+    - name: Setup Luarocks
+      uses: leafo/gh-actions-luarocks@v4
+    
+    - name: Install Luacheck
+      run: luarocks install luacheck
+    
+    - name: Install StyLua
+      uses: JohnnyMorganz/stylua-action@v3
+      with:
+        version: latest
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Run Luacheck
+      run: luacheck lua/ --std lua51 --globals vim --no-unused-args
+    
+    - name: Check formatting
+      run: stylua --check lua/ tests/

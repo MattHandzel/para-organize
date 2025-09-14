@@ -1,0 +1,341 @@
+*para-organize.txt*    Organize notes using the PARA method
+
+==============================================================================
+CONTENTS                                                *para-organize-contents*
+
+    1. Introduction ........................... |para-organize-introduction|
+    2. Requirements ........................... |para-organize-requirements|
+    3. Installation ........................... |para-organize-installation|
+    4. Configuration .......................... |para-organize-configuration|
+    5. Usage .................................. |para-organize-usage|
+    6. Commands ............................... |para-organize-commands|
+    7. Mappings ............................... |para-organize-mappings|
+    8. PARA Method ............................ |para-organize-para|
+    9. Troubleshooting ........................ |para-organize-troubleshooting|
+
+==============================================================================
+1. INTRODUCTION                                     *para-organize-introduction*
+
+para-organize.nvim is a Neovim plugin for organizing captured notes using the
+PARA method (Projects, Areas, Resources, Archives). It provides intelligent
+suggestions for where to file your notes, learns from your organization
+patterns, and ensures you never lose data with safe file operations.
+
+Features:
+  • Intelligent destination suggestions based on tags, sources, and patterns
+  • Two-pane interface for efficient note processing
+  • Learning system that improves suggestions over time
+  • Safe file operations - never deletes, always archives
+  • Telescope integration for powerful search and navigation
+  • Beautiful UI built with nui.nvim
+
+==============================================================================
+2. REQUIREMENTS                                     *para-organize-requirements*
+
+Required:
+  • Neovim >= 0.9.0
+  • plenary.nvim
+  • telescope.nvim
+
+Recommended:
+  • nui.nvim (for the two-pane UI)
+
+Optional:
+  • which-key.nvim (for keybinding hints)
+  • nvim-web-devicons (for file icons)
+
+==============================================================================
+3. INSTALLATION                                     *para-organize-installation*
+
+Using lazy.nvim:
+>lua
+    {
+      "para-organize.nvim",
+      dependencies = {
+        "nvim-lua/plenary.nvim",
+        "nvim-telescope/telescope.nvim",
+        "MunifTanjim/nui.nvim",
+      },
+      config = function()
+        require("para-organize").setup({
+          -- your configuration
+        })
+      end,
+    }
+<
+
+Using packer.nvim:
+>lua
+    use {
+      "para-organize.nvim",
+      requires = {
+        "nvim-lua/plenary.nvim",
+        "nvim-telescope/telescope.nvim",
+        "MunifTanjim/nui.nvim",
+      },
+      config = function()
+        require("para-organize").setup({
+          -- your configuration
+        })
+      end,
+    }
+<
+
+==============================================================================
+4. CONFIGURATION                                   *para-organize-configuration*
+
+Setup function: >lua
+    require("para-organize").setup({
+      -- Configuration options
+    })
+<
+
+Configuration structure: >lua
+    {
+      paths = {
+        vault_dir = "~/notes",                    -- Your notes vault
+        capture_folder = "capture/raw_capture",   -- Where captures are stored
+        para_folders = {                          -- PARA folder names
+          projects = "projects",
+          areas = "areas",
+          resources = "resources",
+          archives = "archives",
+        },
+        archive_capture_path = "capture/raw_capture", -- Archive location
+      },
+      
+      patterns = {
+        file_glob = "**/*.md",                    -- File pattern for notes
+        frontmatter_delimiters = { "---", "---" }, -- YAML frontmatter
+        case_sensitive = false,                   -- Case sensitivity
+      },
+      
+      indexing = {
+        ignore_patterns = { "*.tmp", ".git" },    -- Patterns to ignore
+        max_file_size = 1048576,                  -- Max file size (1MB)
+        incremental_debounce = 500,               -- Debounce ms
+        backend = "json",                          -- "json" or "sqlite"
+        auto_reindex = true,                      -- Auto-reindex on save
+      },
+      
+      suggestions = {
+        weights = {                                -- Scoring weights
+          exact_tag_match = 2.0,
+          normalized_tag_match = 1.5,
+          learned_association = 1.8,
+          source_match = 1.3,
+          alias_similarity = 1.1,
+          context_match = 1.0,
+        },
+        learning = {
+          recency_decay = 0.9,                    -- How fast old patterns decay
+          frequency_boost = 1.2,                  -- Boost for frequent patterns
+          min_confidence = 0.3,                   -- Min confidence threshold
+          max_history = 1000,                     -- Max learning records
+        },
+        max_suggestions = 10,                     -- Max suggestions shown
+        always_show_archive = true,              -- Always show archive option
+      },
+      
+      ui = {
+        layout = "float",                         -- "float" or "split"
+        float_opts = {
+          width = 0.9,                            -- % of editor width
+          height = 0.8,                           -- % of editor height
+          border = "rounded",                     -- Border style
+        },
+        icons = {
+          enabled = true,
+          project = "",
+          area = "",
+          resource = "",
+          archive = "🗑",
+        },
+        display = {
+          show_scores = true,                     -- Show confidence scores
+          show_timestamps = true,                 -- Show note timestamps
+          timestamp_format = "%b %d, %I:%M %p",   -- Time format
+        },
+      },
+      
+      keymaps = {
+        buffer = {                                -- Buffer-local mappings
+          accept = "<CR>",
+          cancel = "<Esc>",
+          next = "<Tab>",
+          prev = "<S-Tab>",
+          skip = "s",
+          archive = "a",
+          merge = "m",
+          search = "/",
+          help = "?",
+        },
+      },
+    }
+<
+
+==============================================================================
+5. USAGE                                                   *para-organize-usage*
+
+Basic workflow:
+
+1. Start an organizing session:
+   `:ParaOrganize start`
+
+2. The two-pane interface opens:
+   - Left pane: Shows the current capture note (editable)
+   - Right pane: Shows suggested destinations
+
+3. Process captures:
+   - `<CR>` to accept the selected suggestion
+   - `j/k` to navigate suggestions
+   - `<Tab>/<S-Tab>` to navigate between captures
+   - `s` to skip the current capture
+   - `a` to archive immediately
+   - `m` to enter merge mode
+   - `/` to search for a destination
+
+4. Create new destinations on the fly:
+   - `<leader>np` to create a new project
+   - `<leader>na` to create a new area
+   - `<leader>nr` to create a new resource
+
+==============================================================================
+6. COMMANDS                                             *para-organize-commands*
+
+                                                           *:ParaOrganize*
+:ParaOrganize {subcommand} [args]
+    Main command with subcommands:
+
+    start [filters]     Start organizing session
+                       Filters: tags=tag1,tag2 sources=source1
+                               since=2024-01-01 until=2024-12-31
+                               status=raw modalities=text,audio
+
+    stop               Stop current session
+
+    next               Go to next capture
+    prev               Go to previous capture
+    skip               Skip current capture
+
+    move {dest}        Move to specific destination
+    merge              Enter merge mode
+    archive            Archive current capture
+
+    reindex            Rebuild the note index
+    search [query]     Search notes
+
+    new-project {name} Create new project folder
+    new-area {name}    Create new area folder
+    new-resource {name} Create new resource folder
+
+    help               Show help
+
+                                                    *:ParaOrganizeHealth*
+:ParaOrganizeHealth
+    Run health checks for para-organize.nvim
+
+==============================================================================
+7. MAPPINGS                                             *para-organize-mappings*
+
+Global <Plug> mappings:                              *para-organize-plug*
+
+    <Plug>(ParaOrganizeStart)      Start organizing session
+    <Plug>(ParaOrganizeStop)       Stop session
+    <Plug>(ParaOrganizeNext)       Next capture
+    <Plug>(ParaOrganizePrev)       Previous capture
+    <Plug>(ParaOrganizeSkip)       Skip capture
+    <Plug>(ParaOrganizeAccept)     Accept suggestion
+    <Plug>(ParaOrganizeMerge)      Enter merge mode
+    <Plug>(ParaOrganizeArchive)    Archive capture
+    <Plug>(ParaOrganizeSearch)     Search for destination
+    <Plug>(ParaOrganizeNewProject) Create new project
+    <Plug>(ParaOrganizeNewArea)    Create new area
+    <Plug>(ParaOrganizeNewResource) Create new resource
+
+Example custom mappings: >lua
+    vim.keymap.set('n', '<leader>os', '<Plug>(ParaOrganizeStart)')
+    vim.keymap.set('n', '<leader>oa', '<Plug>(ParaOrganizeAccept)')
+<
+
+Buffer-local mappings (active in UI):
+
+    <CR>        Accept selected suggestion
+    <Esc>       Cancel and close
+    <Tab>       Next capture
+    <S-Tab>     Previous capture
+    j/k         Navigate suggestions
+    s           Skip current capture
+    a           Archive immediately
+    m           Enter merge mode
+    /           Search for destination
+    ?           Show help
+
+==============================================================================
+8. PARA METHOD                                             *para-organize-para*
+
+The PARA method organizes information into four categories:
+
+Projects ~
+    Things you're actively working on with a deadline and specific outcome.
+    Examples: "Launch website", "Q1 planning", "Birthday party"
+
+Areas ~
+    Ongoing responsibilities you want to maintain over time.
+    Examples: "Health", "Finances", "Home", "Career"
+
+Resources ~
+    Topics or themes of ongoing interest for future reference.
+    Examples: "Web design", "Recipes", "Travel destinations"
+
+Archives ~
+    Inactive items from the other categories.
+    Preserves history without cluttering active areas.
+
+The plugin automatically suggests the most appropriate category based on:
+  • Tags matching folder names
+  • Previous filing patterns
+  • Content analysis
+  • Learned associations
+
+==============================================================================
+9. TROUBLESHOOTING                             *para-organize-troubleshooting*
+
+Health Check ~
+Run `:checkhealth para-organize` to verify:
+  • Required dependencies are installed
+  • Vault directory exists and is accessible
+  • PARA folders are properly configured
+  • Index can be created and accessed
+
+Common Issues ~
+
+Issue: No suggestions appearing
+  • Ensure PARA folders exist in your vault
+  • Check that captures have tags or metadata
+  • Run `:ParaOrganize reindex` to rebuild index
+
+Issue: UI not opening
+  • Verify nui.nvim is installed
+  • Check for conflicting keymaps
+  • Review error messages with `:messages`
+
+Issue: Files not moving
+  • Check file permissions in vault directory
+  • Ensure destination folders exist
+  • Review operation log in data directory
+
+Debug Mode ~
+Enable debug logging: >lua
+    require("para-organize").setup({
+      debug = {
+        enabled = true,
+        log_level = "debug",
+      }
+    })
+<
+
+Log file location: `~/.local/share/nvim/para-organize/para-organize.log`
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:
