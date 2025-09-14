@@ -340,7 +340,10 @@ function M.archive_capture(capture_note)
     .. "/archives/capture/raw_capture/"
     .. capture_note.id
     .. ".md"
-  utils.ensure_dir(archive_path:match("(.+)/"))
+  local dest_dir = archive_path:match("(.+)/")
+  if vim.fn.isdirectory(dest_dir) == 0 then
+    vim.fn.mkdir(dest_dir, "p")
+  end
 
   os.rename(capture_note.path, archive_path)
   vim.notify("Capture note archived: " .. capture_note.id, vim.log.levels.INFO)
