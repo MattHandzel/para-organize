@@ -551,9 +551,29 @@ function M.get_statistics()
   return stats
 end
 
--- Get a note by path
-function M.get_note(filepath)
+-- Get a note by its path
+function M.get_note_by_path(filepath)
   return index[filepath]
+end
+
+-- Get all capture notes from the capture directory
+function M.get_capture_notes()
+  local config = require("para-organize.config").get()
+  local utils = require("para-organize.utils")
+  local capture_dir = config.paths.capture_dir
+  local files = utils.scan_dir(capture_dir)
+  local notes = {}
+
+  for _, file in ipairs(files) do
+    if not index[file] or not index[file].moved_to then
+      local note = M.get_note_by_path(file)
+      if note then
+        table.insert(notes, note)
+      end
+    end
+  end
+
+  return notes
 end
 
 -- Clear the index
