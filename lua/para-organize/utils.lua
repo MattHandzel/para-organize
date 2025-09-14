@@ -354,8 +354,17 @@ function M.extract_frontmatter(content, delimiters)
   local _, start_pos = content:find("^" .. start_delim .. "\n")
   if not start_pos then return nil, content end
   
+  -- Find the end delimiter, ensuring it's at the beginning of a line
   local end_pos = content:find("\n" .. end_delim .. "\n", start_pos + 1)
-  if not end_pos then return nil, content end
+  if not end_pos then 
+    -- Try again with end of file
+    end_pos = content:find("\n" .. end_delim .. "$", start_pos + 1)
+    if not end_pos then return nil, content end
+    
+    local frontmatter = content:sub(start_pos + 1, end_pos - 1)
+    local body = ""
+    return frontmatter, body
+  end
   
   local frontmatter = content:sub(start_pos + 1, end_pos - 1)
   local body = content:sub(end_pos + #end_delim + 2)
@@ -369,6 +378,8 @@ function M.parse_yaml_simple(yaml_str)
   
   local data = {}
   local current_key = nil
+  local current_indent = 0
+  local stack = {{data = data, indent = -1}}
   local in_list = false
   
   for line in yaml_str:gmatch("[^\n]+") do
@@ -377,51 +388,155 @@ function M.parse_yaml_simple(yaml_str)
       goto continue
     end
     
+    -- Calculate indentation
+    local indent = line:match("^(%s*)") and #(line:match("^(%s*)")) or 0
+    local content = line:sub(indent + 1)
+    
     -- Check for key-value pairs
-    local key, value = line:match("^(%w+):%s*(.*)$")
+    local key, value = content:match("^([%w%-_]+):%s*(.*)$")
+    
     if key then
+      -- Find the appropriate parent based on indentation
+      while #stack > 1 and indent <= stack[#stack].indent do
+        table.remove(stack)
+      end
+      
+      local parent = stack[#stack].data
       current_key = key
       value = M.trim(value)
       
       if value == "" or value == "[]" then
-        data[current_key] = {}
+        -- Empty object or array
+        parent[current_key] = {}
+        table.insert(stack, {data = parent[current_key], indent = indent, key = current_key})
         in_list = true
       elseif value:match("^%[.*%]$") then
         -- Inline list
         local list_str = value:sub(2, -2)
-        data[current_key] = M.split(list_str, ",")
+        parent[current_key] = M.split(list_str, ",")
         in_list = false
       else
         -- Simple value
         -- Try to parse as number
         local num = tonumber(value)
         if num then
-          data[current_key] = num
+          parent[current_key] = num
         elseif value == "true" then
-          data[current_key] = true
+          parent[current_key] = true
         elseif value == "false" then
-          data[current_key] = false
+          parent[current_key] = false
+        elseif value == "null" or value == "~" then
+          parent[current_key] = nil
         else
           -- Remove quotes if present
           if value:match("^[\"'].*[\"']$") then
             value = value:sub(2, -2)
           end
-          data[current_key] = value
+          parent[current_key] = value
         end
         in_list = false
       end
-    elseif in_list and current_key then
+    elseif content:match("^%-%s") then
       -- List item
-      local item = line:match("^%s*%-%s*(.+)$")
-      if item then
-        if type(data[current_key]) ~= "table" then
-          data[current_key] = {}
-        end
+      local item = content:match("^%-%s*(.*)$")
+      
+      -- Find the appropriate parent based on indentation
+      while #stack > 1 and indent <= stack[#stack].indent do
+        table.remove(stack)
+      end
+      
+      local parent = stack[#stack].data
+      local key = stack[#stack].key
+      
+      if not key then
+        -- This is a top-level list item with no key, skip it
+        goto continue
+      end
+      
+      if type(parent[key]) ~= "table" then
+        parent[key] = {}
+      end
+      
+      if item and #item > 0 then
         -- Remove quotes if present
         if item:match("^[\"'].*[\"']$") then
           item = item:sub(2, -2)
         end
-        table.insert(data[current_key], M.trim(item))
+        
+        -- Check if this is a key-value pair in a list item
+        local subkey, subvalue = item:match("^([%w%-_]+):%s*(.*)$")
+        if subkey then
+          -- This is a nested object in a list
+          local new_obj = {}
+          table.insert(parent[key], new_obj)
+          
+          subvalue = M.trim(subvalue)
+          if subvalue == "" then
+            -- Empty nested object
+            new_obj[subkey] = {}
+            table.insert(stack, {data = new_obj, indent = indent, key = key})
+          else
+            -- Simple value in nested object
+            local num = tonumber(subvalue)
+            if num then
+              new_obj[subkey] = num
+            elseif subvalue == "true" then
+              new_obj[subkey] = true
+            elseif subvalue == "false" then
+              new_obj[subkey] = false
+            else
+              -- Remove quotes if present
+              if subvalue:match("^[\"'].*[\"']$") then
+                subvalue = subvalue:sub(2, -2)
+              end
+              new_obj[subkey] = subvalue
+            end
+          end
+        else
+          -- Simple list item
+          table.insert(parent[key], M.trim(item))
+        end
+      else
+        -- Empty list item
+        local new_obj = {}
+        table.insert(parent[key], new_obj)
+        table.insert(stack, {data = new_obj, indent = indent + 2, key = nil})
+      end
+    elseif indent > 0 and #stack > 1 then
+      -- This is a continuation of a nested structure
+      -- Try to handle it as a key-value pair under the current parent
+      local subkey, subvalue = content:match("^([%w%-_]+):%s*(.*)$")
+      
+      if subkey then
+        -- Find the appropriate parent based on indentation
+        while #stack > 1 and indent <= stack[#stack].indent do
+          table.remove(stack)
+        end
+        
+        local parent = stack[#stack].data
+        
+        subvalue = M.trim(subvalue)
+        if subvalue == "" then
+          -- Empty nested object
+          parent[subkey] = {}
+          table.insert(stack, {data = parent[subkey], indent = indent, key = subkey})
+        else
+          -- Simple value in nested object
+          local num = tonumber(subvalue)
+          if num then
+            parent[subkey] = num
+          elseif subvalue == "true" then
+            parent[subkey] = true
+          elseif subvalue == "false" then
+            parent[subkey] = false
+          else
+            -- Remove quotes if present
+            if subvalue:match("^[\"'].*[\"']$") then
+              subvalue = subvalue:sub(2, -2)
+            end
+            parent[subkey] = subvalue
+          end
+        end
       end
     end
     

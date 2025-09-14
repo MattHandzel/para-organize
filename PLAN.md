@@ -226,9 +226,16 @@ A Neovim plugin for organizing notes using the PARA (Projects, Areas, Resources,
 - [x] Debug mode with comprehensive diagnostics
 
 ### In Progress
-- [ ] Fixing capture path detection issue
 - [ ] Enhanced keyboard shortcuts
 - [ ] Performance optimizations
+
+### Recently Fixed
+- [x] Fixed frontmatter parser to correctly handle complex YAML structures (2025-09-14)
+  - Improved nested structure handling with proper indentation support
+  - Added support for keys with dashes and underscores
+  - Fixed end delimiter detection for frontmatter
+  - Enhanced list item parsing for complex nested structures
+- [x] Fixing capture path detection issue
 
 ### Next Steps
 1. Polish UI and keybindings

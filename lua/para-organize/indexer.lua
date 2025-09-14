@@ -89,11 +89,15 @@ function M.extract_metadata(filepath)
   local frontmatter_str, body =
     utils.extract_frontmatter(content, config.patterns.frontmatter_delimiters)
 
+  utils.log("TRACE", "Frontmatter for %s: %s", filepath, frontmatter_str or "none")
+
   -- Parse frontmatter
   local frontmatter = {}
   if frontmatter_str then
     frontmatter = utils.parse_yaml_simple(frontmatter_str)
   end
+
+  utils.log("TRACE", "Parsed frontmatter for %s: %s", filepath, vim.inspect(frontmatter))
 
   -- Extract title from first header or filename
   local title = nil
