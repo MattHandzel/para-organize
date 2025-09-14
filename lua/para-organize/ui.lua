@@ -933,7 +933,7 @@ function M.open_item()
 
       -- Add keybindings for merge actions
       local opts = { buffer = ui_state.organize_popup.bufnr, silent = true }
-      vim.keymap.set("n", "<leader>mc", function()
+      vim.keymap.set("n", "<C-s>", function()
         -- Complete merge
         local utils = require("para-organize.utils") -- Get utils inside this scope
         local move = require("para-organize.move") -- Get move inside this scope
