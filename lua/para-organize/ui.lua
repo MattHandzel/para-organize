@@ -10,6 +10,10 @@ local Menu = require("nui.menu")
 local Input = require("nui.input")
 local Line = require("nui.line")
 local Text = require("nui.text")
+local indexer = require("para-organize.indexer")
+local suggest = require("para-organize.suggest")
+local move = require("para-organize.move")
+local utils = require("para-organize.utils")
 
 -- Module state
 local ui_state = {
