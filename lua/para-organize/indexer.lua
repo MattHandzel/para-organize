@@ -561,7 +561,7 @@ function M.get_capture_notes()
   local config = require("para-organize.config").get()
   local utils = require("para-organize.utils")
   local capture_dir = config.paths.capture_dir
-  local files = utils.scan_dir(capture_dir)
+  local files = utils.glob_files("*", capture_dir)
   local notes = {}
 
   for _, file in ipairs(files) do
