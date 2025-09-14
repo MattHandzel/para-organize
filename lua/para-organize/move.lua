@@ -323,28 +323,15 @@ function M.move_to_destination(source_path, destination_folder)
   return true, destination_path
 end
 
--- Archive a capture
-function M.archive_capture(source_path)
+-- Function to archive a capture note without moving to destination
+function M.archive_capture(capture_note)
   local config = config_mod.get()
   local utils = require("para-organize.utils")
-
-  utils.log("INFO", "Archiving: %s", source_path)
-
-  -- Get archive path
-  local filename = vim.fn.fnamemodify(source_path, ":t")
-  local archive_path = config_mod.get_archive_path(filename)
-
-  -- Move file to archive
-  if utils.move_file(source_path, archive_path) then
-    M.log_operation("archive", source_path, archive_path, true, nil)
-    utils.log("INFO", "Archived to: %s", archive_path)
-    return archive_path
-  else
-    local error_msg = "Failed to archive file"
-    M.log_operation("archive", source_path, archive_path, false, error_msg)
-    utils.log("ERROR", error_msg)
-    return nil
-  end
+  local archive_path = config.paths.vault_dir .. "/archives/capture/raw_capture/" .. capture_note.id .. ".md"
+  utils.ensure_dir(archive_path:match("(.+)/"))
+  os.rename(capture_note.path, archive_path)
+  vim.notify("Capture note archived: " .. capture_note.id, vim.log.levels.INFO)
+  return archive_path
 end
 
 -- Merge content into existing note

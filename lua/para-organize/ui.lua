@@ -23,6 +23,7 @@ local ui_state = {
   merge_mode = false,
   merge_target = nil,
   session = nil,
+  current_sort = 1,
 }
 
 -- Create the two-pane layout
@@ -189,63 +190,28 @@ function M.render_capture(capture)
   local frontmatter_str, body = utils.extract_frontmatter(content,
     config.patterns.frontmatter_delimiters)
   
-  local lines = {}
+  local metadata = capture.metadata or {}
+  local tags = table.concat(metadata.tags or {}, ", ")
+  local sources = table.concat(metadata.sources or {}, ", ")
+  local aliases = table.concat(metadata.aliases or {}, ", ")
+  local timestamp = os.date("%B %d, %H:%M", metadata.timestamp)
+  local notes_count = #indexer.get_capture_notes()
   
-  -- Add metadata header
-  table.insert(lines, "")
+  local lines = {
+    "# Capture Note",
+    "",
+    "**Notes to Organize:** " .. notes_count,
+    "**Timestamp:** " .. timestamp,
+    "**Aliases:** " .. aliases,
+    "**Tags:** " .. tags,
+    "**Sources:** " .. sources,
+    "",
+    body
+  }
   
-  -- Show timestamp
-  if ui_config.display.show_timestamps and capture.timestamp then
-    local formatted_time = utils.format_datetime(capture.timestamp,
-      ui_config.display.timestamp_format)
-    table.insert(lines, "📅 " .. formatted_time)
-  end
-  
-  -- Show aliases (excluding capture_id)
-  if capture.aliases and #capture.aliases > 0 then
-    local display_aliases = {}
-    for _, alias in ipairs(capture.aliases) do
-      if not (ui_config.display.hide_capture_id and alias:match("^capture_")) then
-        table.insert(display_aliases, alias)
-      end
-    end
-    
-    if #display_aliases > 0 then
-      table.insert(lines, "📝 " .. table.concat(display_aliases, ", "))
-    end
-  end
-  
-  -- Show tags
-  if capture.tags and #capture.tags > 0 then
-    local tag_str = ""
-    for _, tag in ipairs(capture.tags) do
-      tag_str = tag_str .. " #" .. tag
-    end
-    table.insert(lines, "🏷️" .. tag_str)
-  end
-  
-  -- Show sources
-  if capture.sources and #capture.sources > 0 and 
-     not ui_config.display.hide_location then
-    table.insert(lines, "📍 " .. table.concat(capture.sources, ", "))
-  end
-  
-  -- Add separator
-  table.insert(lines, "")
-  table.insert(lines, "---")
-  table.insert(lines, "")
-  
-  -- Add body content
-  for line in body:gmatch("[^\n]*") do
-    table.insert(lines, line)
-  end
-  
-  -- Set buffer content
   vim.api.nvim_buf_set_lines(ui_state.capture_popup.bufnr, 0, -1, false, lines)
-  
-  -- Set buffer as modifiable
   vim.api.nvim_buf_set_option(ui_state.capture_popup.bufnr, "modifiable", true)
-  vim.api.nvim_buf_set_option(ui_state.capture_popup.bufnr, "readonly", false)
+  vim.api.nvim_buf_set_option(ui_state.capture_popup.bufnr, "filetype", "markdown")
 end
 
 -- Render suggestions in right pane
@@ -258,80 +224,28 @@ function M.render_suggestions(suggestions)
     return
   end
   
-  local lines = {}
+  local dirs = indexer.get_para_directories()
+  local content = {
+    "# Organization Pane",
+    "",
+    "**Sort Order:** Alphabetical (Press 's' to change sort)",
+    "Press '/' to search, 'Enter' to open folder or merge note",
+    ""
+  }
   
-  -- Header
-  table.insert(lines, " Suggested Destinations:")
-  table.insert(lines, "")
+  -- Sort directories alphabetically
+  table.sort(dirs, function(a, b)
+    return a.name < b.name
+  end)
   
-  -- Render each suggestion
-  for i, suggestion in ipairs(suggestions) do
-    local line = ""
-    
-    -- Selection indicator
-    if i == ui_state.selected_suggestion_index then
-      line = "▶ "
-    else
-      line = "  "
-    end
-    
-    -- Type icon
-    if ui_config.icons.enabled then
-      local icon = ""
-      if suggestion.type == "projects" then
-        icon = ui_config.icons.project
-      elseif suggestion.type == "areas" then
-        icon = ui_config.icons.area
-      elseif suggestion.type == "resources" then
-        icon = ui_config.icons.resource
-      elseif suggestion.type == "archives" then
-        icon = ui_config.icons.archive
-      end
-      line = line .. icon .. " "
-    end
-    
-    -- Type letter
-    local type_letter = suggestion.type:sub(1, 1):upper()
-    line = line .. "[" .. type_letter .. "] "
-    
-    -- Folder name
-    line = line .. suggestion.name
-    
-    -- Score (if enabled)
-    if ui_config.display.show_scores then
-      local score_str = string.format(" (%.2f)", suggestion.score)
-      line = line .. score_str
-    end
-    
-    table.insert(lines, line)
-    
-    -- Reasons (indented)
-    if suggestion.reasons and #suggestion.reasons > 0 then
-      for _, reason in ipairs(suggestion.reasons) do
-        table.insert(lines, "      • " .. reason)
-      end
-    end
-    
-    table.insert(lines, "")
+  for _, dir in ipairs(dirs) do
+    local type_letter = get_type_letter(dir.type)
+    table.insert(content, string.format("[%s] %s", type_letter, dir.name))
   end
   
-  -- Add help text
-  table.insert(lines, "")
-  table.insert(lines, "─────────────────────────")
-  table.insert(lines, " Commands:")
-  table.insert(lines, "  <CR>    Accept suggestion")
-  table.insert(lines, "  /       Search for folder")
-  table.insert(lines, "  m       Merge mode")
-  table.insert(lines, "  a       Archive now")
-  table.insert(lines, "  s       Skip")
-  table.insert(lines, "  <Tab>   Next capture")
-  table.insert(lines, "  ?       Help")
-  
-  -- Set buffer content
-  vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, lines)
-  
-  -- Highlight selected line
-  M.highlight_selection()
+  vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
+  vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", false)
+  vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "filetype", "markdown")
 end
 
 -- Render merge view
@@ -352,16 +266,14 @@ function M.render_merge_view()
   end
   
   -- Show target file content
-  local lines = {}
-  table.insert(lines, " Merge Target: " .. ui_state.merge_target.title)
-  table.insert(lines, " Path: " .. ui_state.merge_target.path)
-  table.insert(lines, "")
-  table.insert(lines, "─────────────────────────")
-  table.insert(lines, "")
-  
-  for line in content:gmatch("[^\n]*") do
-    table.insert(lines, line)
-  end
+  local lines = {
+    "# Merge Target: " .. ui_state.merge_target.title,
+    " Path: " .. ui_state.merge_target.path,
+    "",
+    "─────────────────────────",
+    "",
+    content
+  }
   
   vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, lines)
   
@@ -425,6 +337,10 @@ function M.setup_keymaps()
   vim.keymap.set('n', keymaps.cancel, M.close, organize_opts)
   vim.keymap.set('n', 'j', M.next_suggestion, organize_opts)
   vim.keymap.set('n', 'k', M.prev_suggestion, organize_opts)
+  vim.keymap.set('n', 's', M.change_sort_order, organize_opts)
+  vim.keymap.set('n', '/', M.search_folders, organize_opts)
+  vim.keymap.set('n', '<CR>', M.open_item, organize_opts)
+  vim.keymap.set('n', '<BS>', M.back_to_parent, organize_opts)
   
   -- Quick folder creation
   vim.keymap.set('n', keymaps.new_project, function()
@@ -646,6 +562,99 @@ function M.set_status(message)
   if ui_state.capture_popup then
     ui_state.capture_popup.border:set_text("top", " Capture - " .. message .. " ")
   end
+end
+
+-- Change sort order in right pane
+function M.change_sort_order()
+  ui_state.current_sort = ui_state.current_sort + 1
+  if ui_state.current_sort > 3 then ui_state.current_sort = 1 end
+  
+  local sort_label = {
+    "Alphabetical",
+    "Last Modified",
+    "Intelligent Suggestions"
+  }
+  
+  local dirs = indexer.get_para_directories()
+  if ui_state.current_sort == 1 then
+    table.sort(dirs, function(a, b) return a.name < b.name end)
+  elseif ui_state.current_sort == 2 then
+    table.sort(dirs, function(a, b) return a.modified > b.modified end)
+  else
+    dirs = suggest.get_suggestions(ui_state.current_capture)
+  end
+  
+  local content = {
+    "# Organization Pane",
+    "",
+    "**Sort Order:** " .. sort_label[ui_state.current_sort] .. " (Press 's' to change sort)",
+    "Press '/' to search, 'Enter' to open folder or merge note",
+    ""
+  }
+  for _, dir in ipairs(dirs) do
+    local type_letter = get_type_letter(dir.type)
+    table.insert(content, string.format("[%s] %s", type_letter, dir.name))
+  end
+  
+  vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
+end
+
+-- Open directory or file in right pane
+function M.open_item()
+  local line = vim.api.nvim_win_get_cursor(ui_state.organize_popup.winid)[1]
+  local content = vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, line - 1, line, false)[1]
+  if content:match("^%[.%] ") then
+    local name = content:match("^%[.%] (.+)")
+    local dir = indexer.get_directory_by_name(name)
+    if dir then
+      local sub_items = indexer.get_sub_items(dir.path)
+      local content = {
+        "# " .. name,
+        "",
+        "Press 'Enter' on a note to merge, 'Backspace' to go back",
+        ""
+      }
+      for _, item in ipairs(sub_items) do
+        if item.type == "directory" then
+          table.insert(content, "[D] " .. item.name)
+        else
+          table.insert(content, "[F] " .. (item.alias or item.name))
+        end
+      end
+      vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
+    end
+  elseif content:match("^%[F%] ") then
+    local name = content:match("^%[F%] (.+)")
+    local file = indexer.get_file_by_alias_or_name(name)
+    if file then
+      local content = {
+        "# Merging to: " .. name,
+        "",
+        "Edit this note to merge content from the capture note.",
+        "Close the buffer to complete merging.",
+        ""
+      }
+      local file_content = utils.read_file(file.path) or ""
+      vim.list_extend(content, vim.split(file_content, "\n"))
+      vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
+      vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
+      vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "filetype", "markdown")
+      vim.api.nvim_win_set_buf(ui_state.organize_popup.winid, ui_state.organize_popup.bufnr)
+      vim.api.nvim_buf_attach(ui_state.organize_popup.bufnr, false, {
+        on_detach = function()
+          local edited_content = table.concat(vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, 0, -1, false), "\n")
+          utils.write_file(file.path, edited_content)
+          move.archive_capture(ui_state.current_capture)
+          load_next_capture()
+        end
+      })
+    end
+  end
+end
+
+-- Back to parent directory
+function M.back_to_parent()
+  M.render_suggestions(ui_state.current_suggestions)
 end
 
 return M
