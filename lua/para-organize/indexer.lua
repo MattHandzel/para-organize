@@ -404,11 +404,11 @@ function M.search(criteria)
       end
     end
     
-    if match and criteria.until then
+    if match and criteria.until_date then
       local note_date = metadata.created_date or metadata.timestamp
       if note_date then
         local note_time = utils.parse_iso_datetime(note_date)
-        local until_time = utils.parse_iso_datetime(criteria.until)
+        local until_time = utils.parse_iso_datetime(criteria.until_date)
         if note_time and until_time then
           if os.time(note_time) > os.time(until_time) then
             match = false

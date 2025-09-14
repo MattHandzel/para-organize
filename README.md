@@ -375,7 +375,7 @@ When starting a session, you can filter captures:
 - `sources=source1,source2` - Filter by sources
 - `modalities=text,audio` - Filter by modalities
 - `since=2024-01-01` - Notes created after date
-- `until=2024-12-31` - Notes created before date
+- `until_date=2024-12-31` - Notes created before date
 - `status=raw` - Filter by processing status
 
 ### <Plug> Mappings
