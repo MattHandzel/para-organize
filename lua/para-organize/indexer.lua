@@ -17,25 +17,25 @@ local is_indexing = false
 function M.init()
   local config = require("para-organize.config").get()
   local utils = require("para-organize.utils")
-  
+
   -- Set index file path
   index_file = vim.fn.stdpath("data") .. "/para-organize/index.json"
-  
+
   -- Load existing index
   M.load_index()
-  
+
   utils.log("DEBUG", "Indexer initialized with %d entries", vim.tbl_count(index))
 end
 
 -- Load index from disk
 function M.load_index()
   local utils = require("para-organize.utils")
-  
+
   if not utils.path_exists(index_file) then
     index = {}
     return
   end
-  
+
   local content = utils.read_file(index_file)
   if content then
     local ok, data = pcall(vim.json.decode, content)
@@ -52,13 +52,13 @@ end
 -- Save index to disk
 function M.save_index()
   local utils = require("para-organize.utils")
-  
+
   -- Ensure directory exists
   local index_dir = vim.fn.fnamemodify(index_file, ":h")
   if vim.fn.isdirectory(index_dir) == 0 then
     vim.fn.mkdir(index_dir, "p")
   end
-  
+
   -- Save index
   local content = vim.json.encode(index)
   if utils.write_file_atomic(index_file, content) then
@@ -72,29 +72,29 @@ end
 function M.extract_metadata(filepath)
   local config = require("para-organize.config").get()
   local utils = require("para-organize.utils")
-  
+
   -- Read file content
   local content = utils.read_file(filepath)
   if not content then
     return nil
   end
-  
+
   -- Check file size
   if #content > config.indexing.max_file_size then
     utils.log("WARN", "File too large, skipping: %s", filepath)
     return nil
   end
-  
+
   -- Extract frontmatter
-  local frontmatter_str, body = utils.extract_frontmatter(content, 
-    config.patterns.frontmatter_delimiters)
-  
+  local frontmatter_str, body =
+    utils.extract_frontmatter(content, config.patterns.frontmatter_delimiters)
+
   -- Parse frontmatter
   local frontmatter = {}
   if frontmatter_str then
     frontmatter = utils.parse_yaml_simple(frontmatter_str)
   end
-  
+
   -- Extract title from first header or filename
   local title = nil
   if body then
@@ -103,13 +103,13 @@ function M.extract_metadata(filepath)
   if not title then
     title = vim.fn.fnamemodify(filepath, ":t:r")
   end
-  
+
   -- Determine PARA type from path
   local para_type = M.get_para_type(filepath)
-  
+
   -- Get file stats
   local stat = vim.loop.fs_stat(filepath)
-  
+
   -- Build metadata
   local metadata = {
     path = filepath,
@@ -117,7 +117,7 @@ function M.extract_metadata(filepath)
     title = title,
     para_type = para_type,
     folder = vim.fn.fnamemodify(filepath, ":h:t"),
-    
+
     -- From frontmatter
     timestamp = frontmatter.timestamp,
     id = frontmatter.id,
@@ -132,15 +132,15 @@ function M.extract_metadata(filepath)
     processing_status = frontmatter.processing_status,
     created_date = frontmatter.created_date,
     last_edited_date = frontmatter.last_edited_date,
-    
+
     -- File stats
     size = stat and stat.size or 0,
     modified = stat and stat.mtime.sec or 0,
-    
+
     -- Indexing metadata
     indexed_at = os.time(),
   }
-  
+
   -- Normalize tags
   if config.patterns.tag_normalization then
     local normalized_tags = {}
@@ -156,7 +156,7 @@ function M.extract_metadata(filepath)
     end
     metadata.normalized_tags = normalized_tags
   end
-  
+
   return metadata
 end
 
@@ -165,44 +165,44 @@ function M.get_para_type(filepath)
   local config = require("para-organize.config").get()
   local vault_dir = config.paths.vault_dir
   local para_folders = config.paths.para_folders
-  
+
   -- Get relative path from vault
   local rel_path = filepath:sub(#vault_dir + 2)
-  
+
   -- Check each PARA folder
   for para_type, folder_name in pairs(para_folders) do
     if rel_path:find("^" .. folder_name .. "/") then
       return para_type
     end
   end
-  
+
   -- Check if in capture folder
   if rel_path:find("^" .. config.paths.capture_folder .. "/") then
     return "capture"
   end
-  
+
   return "other"
 end
 
 -- Index a single file
 function M.index_file(filepath)
   local utils = require("para-organize.utils")
-  
+
   utils.log("DEBUG", "Indexing file: %s", filepath)
-  
+
   local metadata = M.extract_metadata(filepath)
   if metadata then
     index[filepath] = metadata
     return true
   end
-  
+
   return false
 end
 
 -- Update index for a single file
 function M.update_file(filepath)
   local utils = require("para-organize.utils")
-  
+
   -- Check if file still exists
   if not utils.path_exists(filepath) then
     -- Remove from index
@@ -213,7 +213,7 @@ function M.update_file(filepath)
     end
     return
   end
-  
+
   -- Re-index the file
   if M.index_file(filepath) then
     M.save_index()
@@ -224,15 +224,15 @@ end
 function M.scan_directory(dir_path, on_complete)
   local config = require("para-organize.config").get()
   local utils = require("para-organize.utils")
-  
+
   utils.log("INFO", "Scanning directory: %s", dir_path)
-  
+
   -- Build ignore patterns
   local ignore_patterns = {}
   for _, pattern in ipairs(config.indexing.ignore_patterns) do
     table.insert(ignore_patterns, pattern)
   end
-  
+
   -- Scan for markdown files
   scan.scan_dir_async(dir_path, {
     respect_gitignore = true,
@@ -249,16 +249,16 @@ function M.scan_directory(dir_path, on_complete)
             break
           end
         end
-        
+
         if not should_ignore then
           if M.index_file(filepath) then
             count = count + 1
           end
         end
       end
-      
+
       utils.log("INFO", "Indexed %d files from %s", count, dir_path)
-      
+
       if on_complete then
         on_complete(count)
       end
@@ -273,36 +273,36 @@ function M.full_reindex(on_complete)
     utils.log("WARN", "Indexing already in progress")
     return
   end
-  
+
   is_indexing = true
-  
+
   local config = require("para-organize.config").get()
   local utils = require("para-organize.utils")
-  
+
   utils.log("INFO", "Starting full reindex")
-  
+
   -- Clear existing index
   index = {}
-  
+
   local start_time = vim.loop.now()
   local total_count = 0
   local dirs_to_scan = {}
-  
+
   -- Add vault directory
   table.insert(dirs_to_scan, config.paths.vault_dir)
-  
+
   local dirs_completed = 0
   local function check_complete()
     dirs_completed = dirs_completed + 1
     if dirs_completed >= #dirs_to_scan then
       -- Save index
       M.save_index()
-      
+
       -- Calculate duration
       local duration = (vim.loop.now() - start_time) / 1000
-      
+
       is_indexing = false
-      
+
       if on_complete then
         on_complete({
           total = total_count,
@@ -311,7 +311,7 @@ function M.full_reindex(on_complete)
       end
     end
   end
-  
+
   -- Scan each directory
   for _, dir in ipairs(dirs_to_scan) do
     M.scan_directory(dir, function(count)
@@ -326,42 +326,48 @@ function M.search(criteria)
   local utils = require("para-organize.utils")
   local config = require("para-organize.config")
   local results = {}
-  
+
   -- Diagnostic logging
   utils.log("TRACE", "Search criteria: %s", vim.inspect(criteria))
   utils.log("TRACE", "Total entries in index: %d", vim.tbl_count(index))
   utils.log("TRACE", "Vault directory: %s", config.get_vault_dir())
   utils.log("TRACE", "Capture folder: %s", config.get_capture_folder())
-  
+
   for filepath, metadata in pairs(index) do
     local match = true
-    
+
     -- Check para_type
     if criteria.para_type then
       if metadata.para_type ~= criteria.para_type then
         match = false
       end
     end
-    
+
     -- Check tags
     if match and criteria.tags then
       local has_tag = false
       for _, required_tag in ipairs(criteria.tags) do
         for _, note_tag in ipairs(metadata.tags or {}) do
-          if note_tag == required_tag or 
-             (metadata.normalized_tags and 
-              vim.tbl_contains(metadata.normalized_tags, required_tag)) then
+          if
+            note_tag == required_tag
+            or (
+              metadata.normalized_tags
+              and vim.tbl_contains(metadata.normalized_tags, required_tag)
+            )
+          then
             has_tag = true
             break
           end
         end
-        if has_tag then break end
+        if has_tag then
+          break
+        end
       end
       if not has_tag then
         match = false
       end
     end
-    
+
     -- Check sources
     if match and criteria.sources then
       local has_source = false
@@ -375,7 +381,7 @@ function M.search(criteria)
         match = false
       end
     end
-    
+
     -- Check modalities
     if match and criteria.modalities then
       local has_modality = false
@@ -389,14 +395,14 @@ function M.search(criteria)
         match = false
       end
     end
-    
+
     -- Check processing status
     if match and criteria.status then
       if metadata.processing_status ~= criteria.status then
         match = false
       end
     end
-    
+
     -- Check date range
     if match and criteria.since then
       local note_date = metadata.created_date or metadata.timestamp
@@ -410,7 +416,7 @@ function M.search(criteria)
         end
       end
     end
-    
+
     if match and criteria.until_date then
       local note_date = metadata.created_date or metadata.timestamp
       if note_date then
@@ -423,17 +429,17 @@ function M.search(criteria)
         end
       end
     end
-    
+
     -- Check text search
     if match and criteria.query then
       local query_lower = criteria.query:lower()
       local text_match = false
-      
+
       -- Search in title
       if metadata.title and metadata.title:lower():find(query_lower, 1, true) then
         text_match = true
       end
-      
+
       -- Search in aliases
       if not text_match then
         for _, alias in ipairs(metadata.aliases or {}) do
@@ -443,51 +449,54 @@ function M.search(criteria)
           end
         end
       end
-      
+
       -- Search in context
-      if not text_match and metadata.context and 
-         metadata.context:lower():find(query_lower, 1, true) then
+      if
+        not text_match
+        and metadata.context
+        and metadata.context:lower():find(query_lower, 1, true)
+      then
         text_match = true
       end
-      
+
       if not text_match then
         match = false
       end
     end
-    
+
     if match then
       table.insert(results, metadata)
     end
   end
-  
+
   -- Sort results by modified time (newest first)
   table.sort(results, function(a, b)
     return (a.modified or 0) > (b.modified or 0)
   end)
-  
+
   return results
 end
 
 -- Get all notes in a folder
 function M.get_folder_notes(folder_path)
   local results = {}
-  
+
   for filepath, metadata in pairs(index) do
     if filepath:find("^" .. vim.pesc(folder_path) .. "/") then
       table.insert(results, metadata)
     end
   end
-  
+
   -- Sort by title
   table.sort(results, function(a, b)
     return (a.title or "") < (b.title or "")
   end)
-  
+
   return results
 end
 
 -- Get statistics about the index
-function M.get_stats()
+function M.get_statistics()
   local stats = {
     total = vim.tbl_count(index),
     by_type = {},
@@ -495,29 +504,30 @@ function M.get_stats()
     with_tags = 0,
     with_sources = 0,
   }
-  
+
   for _, metadata in pairs(index) do
     -- Count by PARA type
     local para_type = metadata.para_type or "other"
     stats.by_type[para_type] = (stats.by_type[para_type] or 0) + 1
-    
+
     -- Count by processing status
     if metadata.processing_status then
-      stats.by_status[metadata.processing_status] = 
-        (stats.by_status[metadata.processing_status] or 0) + 1
+      stats.by_status[metadata.processing_status] = (
+        stats.by_status[metadata.processing_status] or 0
+      ) + 1
     end
-    
+
     -- Count with tags
     if metadata.tags and #metadata.tags > 0 then
       stats.with_tags = stats.with_tags + 1
     end
-    
+
     -- Count with sources
     if metadata.sources and #metadata.sources > 0 then
       stats.with_sources = stats.with_sources + 1
     end
   end
-  
+
   return stats
 end
 
