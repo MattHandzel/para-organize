@@ -345,6 +345,8 @@ function M.render_merge_view()
   local opts = { buffer = ui_state.organize_popup.bufnr, silent = true }
   vim.keymap.set('n', '<leader>mc', function()
     -- Complete merge
+    local utils = require("para-organize.utils") -- Get utils inside this scope
+    local move = require("para-organize.move") -- Get move inside this scope
     local edited_content = table.concat(vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, 0, -1, false), "\n")
     if utils.write_file(ui_state.merge_target.path, edited_content) then
       vim.notify("Successfully merged content to " .. ui_state.merge_target.name, vim.log.levels.INFO)
@@ -900,6 +902,8 @@ function M.open_item()
       local opts = { buffer = ui_state.organize_popup.bufnr, silent = true }
       vim.keymap.set('n', '<leader>mc', function()
         -- Complete merge
+        local utils = require("para-organize.utils") -- Get utils inside this scope
+        local move = require("para-organize.move") -- Get move inside this scope
         local edited_content = table.concat(vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, 0, -1, false), "\n")
         if utils.write_file(file.path, edited_content) then
           vim.notify("Successfully merged content to " .. file.name, vim.log.levels.INFO)
@@ -928,6 +932,11 @@ end
 -- Back to parent directory
 function M.back_to_parent()
   vim.notify("Going back from directory", vim.log.levels.DEBUG)
+  
+  -- Initialize directory stack if it doesn't exist
+  if ui_state.directory_stack == nil then
+    ui_state.directory_stack = {}
+  end
   
   -- If we're in a directory, go back to the previous one
   if #ui_state.directory_stack > 0 then

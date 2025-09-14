@@ -155,16 +155,22 @@ There are two ways to merge a capture into an existing note:
 **Method 1 - Direct navigation:**
 1. In the Organization Pane, navigate to a PARA folder using cursor keys
 2. Press `Enter` to open that folder
-3. Navigate to the target note and press `Enter` to start merge
+3. Navigate to a target note and press `Enter` to start merge
 4. Edit the merged content in the right pane (both original and capture content will be shown)
-5. Press `<leader>mc` to complete the merge or `<leader>mx` to cancel
+5. Press `<leader>mc` to complete the merge (save changes)
+6. Press `<leader>mx` to cancel the merge
+
+**Note:** The `<leader>` key is typically the backslash (`\`) by default in Neovim, so you would press `\mc` to complete the merge
 
 **Method 2 - Using merge command:**
 1. Press `m` to enter merge mode
 2. Select a destination folder from the picker
 3. Select a target note from the picker
 4. Edit the merged content in the right pane
-5. Press `<leader>mc` to complete the merge or `<leader>mx` to cancel
+5. Press `<leader>mc` to complete the merge (save changes)
+6. Press `<leader>mx` to cancel the merge
+
+**Note:** The `<leader>` key is typically the backslash (`\`) by default in Neovim, so you would press `\mc` to complete the merge
 
 **What happens during merge:**
 - The right pane shows both the original note content and the capture content
