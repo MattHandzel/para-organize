@@ -13,6 +13,33 @@ local action_state = require("telescope.actions.state")
 local previewers = require("telescope.previewers")
 local config_mod = require("para-organize.config")
 local entry_display = require("telescope.pickers.entry_display")
+local uv = vim.loop
+
+-- Simple cache for subfolder listings keyed by root folder path
+local folder_cache = {}
+-- Fetch subfolders with caching based on directory mtime
+local function get_subfolders_cached(root)
+  local stat = uv.fs_stat(root)
+  local mtime = stat and stat.mtime.sec or 0
+  local cached = folder_cache[root]
+  if cached and cached.mtime == mtime then
+    return cached.subfolders
+  end
+  -- Re-scan
+  local subfolders = {}
+  local find_cmd = string.format("find '%s' -type d -maxdepth 2 2>/dev/null", root)
+  local handle = io.popen(find_cmd)
+  if handle then
+    for line in handle:lines() do
+      if line ~= root then
+        table.insert(subfolders, line)
+      end
+    end
+    handle:close()
+  end
+  folder_cache[root] = { mtime = mtime, subfolders = subfolders }
+  return subfolders
+end
 
 -- Find captures matching filters
 function M.find_captures(filters)
@@ -198,26 +225,16 @@ function M.open_folder_picker(on_select)
   local folders = {}
   
   for folder_type, folder_path in pairs(config_mod.get_para_folders()) do
-    -- Get subfolders
-    local find_cmd = string.format("find '%s' -type d -maxdepth 2 2>/dev/null", folder_path)
-    local handle = io.popen(find_cmd)
-    
-    if handle then
-      for line in handle:lines() do
-        -- Skip the root folder itself
-        if line ~= folder_path then
-          local folder_name = vim.fn.fnamemodify(line, ":t")
-          local note_count = #indexer.get_folder_notes(line)
-          
-          table.insert(folders, {
-            path = line,
-            name = folder_name,
-            type = folder_type,
-            count = note_count,
-          })
-        end
-      end
-      handle:close()
+    -- Get subfolders (cached)
+    for _, line in ipairs(get_subfolders_cached(folder_path)) do
+      local folder_name = vim.fn.fnamemodify(line, ":t")
+      local note_count = #indexer.get_folder_notes(line)
+      table.insert(folders, {
+        path = line,
+        name = folder_name,
+        type = folder_type,
+        count = note_count,
+      })
     end
   end
   
