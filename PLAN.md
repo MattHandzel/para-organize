@@ -219,15 +219,15 @@ A Neovim plugin for organizing notes using the PARA (Projects, Areas, Resources,
 
 ### In Progress
 - [x] Additional tests for all modules
-- [ ] GitHub Actions CI integration
+- [x] GitHub Actions CI integration
 - [ ] Enhanced keyboard shortcuts
 
 ### Next Steps
-1. Set up continuous integration with GitHub Actions
-2. Polish UI and keybindings
-3. Create example configurations for different workflows
-4. Add additional telescope pickers for tag/metadata search
-5. Create user documentation with examples and screenshots
+1. Polish UI and keybindings
+2. Create example configurations for different workflows
+3. Add additional telescope pickers for tag/metadata search
+4. Create user documentation with examples and screenshots
+5. Add performance optimizations for larger note collections
 
 ## Technical Specifications
 

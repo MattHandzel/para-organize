@@ -50,8 +50,8 @@ function M.find_captures(filters)
       criteria.since = filters.since
     end
     
-    if filters.until then
-      criteria.until = filters.until
+    if filters.until_date then
+      criteria.until_date = filters.until_date
     end
   end
   
