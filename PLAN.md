@@ -417,3 +417,101 @@ All fields are optional to ensure resilience:
 - [nui.nvim Documentation](https://github.com/MunifTanjim/nui.nvim)
 - [Telescope.nvim API](https://github.com/nvim-telescope/telescope.nvim)
 - [PARA Method](https://fortelabs.co/blog/para/)
+
+## Project Plan for para-organize.nvim
+
+## Overview
+This document outlines the plan for implementing and updating the `para-organize.nvim` Neovim plugin for PARA-based note organization. It includes the steps taken, current progress, and future tasks.
+
+## Completed Tasks
+
+- **Core Modules Implementation**
+  - `config.lua`: Configuration management with validation.
+  - `utils.lua`: Utility functions for path handling, frontmatter parsing, etc.
+  - `indexer.lua`: Note indexing and metadata extraction.
+  - `search.lua`: Telescope integration for searching notes.
+  - `suggest.lua`: Suggestion engine for destinations.
+  - `learn.lua`: Learning system to improve suggestions over time.
+  - `move.lua`: Safe file operations ensuring no deletion, only archiving.
+  - `ui.lua`: Two-pane interface using `nui.nvim`.
+  - `health.lua`: Health checks for dependencies and configuration.
+
+- **Documentation**
+  - `README.md`: Comprehensive project documentation with configuration examples.
+  - `MANUAL.md`: Detailed user guide.
+  - `doc/para-organize.txt`: Vimdoc help documentation.
+  - `PLAN.md`: Implementation plan and progress tracking.
+  - `CONTRIBUTING.md`: Guidelines for contributors.
+  - `CHANGELOG.md`: Version history.
+
+- **Test Infrastructure**
+  - `tests/minimal_init.lua`: Test environment setup.
+  - `tests/utils_spec.lua`: Unit tests for the utils module.
+
+- **Development Environment**
+  - `flake.nix`: NixOS development environment setup.
+  - `Makefile`: Development commands for testing and building.
+  - `.stylua.toml`: Lua formatting configuration.
+  - `.luacheckrc`: Lua linting configuration.
+
+## Current Task: UI Refactoring
+
+- **Objective**: Update the UI to meet new specifications for both left and right panes.
+
+- **Left Pane (Capture Pane) Updates**
+  - Display the number of notes that need to be organized.
+  - Allow full editing capabilities in the left pane as a normal Neovim buffer.
+  - Improve timestamp readability to show month, day, and time.
+  - Display aliases (excluding capture_id), tags, and sources.
+  - Exclude modalities and location from display.
+
+- **Right Pane (Organization Pane) Updates**
+  - Refactor to show a list of directories and files instead of just suggestions.
+  - Implement sorting options:
+    - Simple alphabetical order (directories first, case insensitive).
+    - Last recently modified (directories first).
+    - Intelligent suggestions (based on `learn.lua` module).
+  - Indicate type (Project, Area, Resource, Archive) with letters (P, A, R, and a trash can icon for Archive).
+  - Enable navigation:
+    - Press 'Enter' on a directory to view subfolders and files.
+    - Use '/' to search for specific projects/areas/resources.
+    - Display aliases for notes instead of filenames or IDs.
+  - Implement 'Merge to Existing Note' mode:
+    - Press 'Enter' on a file to open it in the right pane alongside the original note in the left pane.
+    - Allow editing of the right pane note to merge content.
+    - Upon closing the buffer, archive the original capture note to `archive/capture/raw_capture/{filename}` without moving it to the destination folder.
+
+- **Technical Implementation**
+  - Update `ui.lua` to handle new pane content and interactions.
+  - Enhance `indexer.lua` to support directory and file listing with alias extraction.
+  - Modify `move.lua` to ensure proper archiving without destination move during manual merging.
+
+- **Testing and Validation**
+  - Test UI interactions for both panes to ensure responsiveness and correctness.
+  - Validate sorting functionalities and navigation in the right pane.
+  - Confirm that merging notes manually archives the original without moving.
+
+## Upcoming Tasks
+
+- **Bug Fixes and Enhancements**
+  - Address any issues arising from the UI refactoring.
+  - Optimize performance for large note collections in the indexer and UI.
+
+- **User Feedback Integration**
+  - Collect user feedback on the new UI for further improvements.
+  - Adjust suggestion engine based on user interactions and feedback.
+
+- **Documentation Updates**
+  - Update `README.md`, `MANUAL.md`, and help docs to reflect new UI features and workflows.
+
+- **Release Preparation**
+  - Prepare release notes for the updated version in `CHANGELOG.md`.
+  - Ensure all tests pass and perform a final code review.
+
+## Version Control Strategy
+
+- Create a new branch for UI refactoring: `feature/ui-refactor`.
+- Commit changes with descriptive messages for each major update to the UI components.
+- Push commits to the repository after significant progress or completion of the refactoring.
+
+This plan will be updated as tasks are completed or new requirements are identified. If you have any specific additions or modifications to this plan, please let me know.
