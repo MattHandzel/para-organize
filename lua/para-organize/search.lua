@@ -11,6 +11,7 @@ local conf = require("telescope.config").values
 local actions = require("telescope.actions")
 local action_state = require("telescope.actions.state")
 local previewers = require("telescope.previewers")
+local config_mod = require("para-organize.config")
 local entry_display = require("telescope.pickers.entry_display")
 
 -- Find captures matching filters
@@ -189,14 +190,14 @@ end
 
 -- Create PARA folder picker
 function M.open_folder_picker(on_select)
-  local config = require("para-organize.config").get()
+  local config = config_mod.get()
   local indexer = require("para-organize.indexer")
   local utils = require("para-organize.utils")
   
   -- Get all PARA folders
   local folders = {}
   
-  for folder_type, folder_path in pairs(config.get_para_folders()) do
+  for folder_type, folder_path in pairs(config_mod.get_para_folders()) do
     -- Get subfolders
     local find_cmd = string.format("find '%s' -type d -maxdepth 2 2>/dev/null", folder_path)
     local handle = io.popen(find_cmd)
