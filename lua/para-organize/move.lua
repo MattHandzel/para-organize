@@ -297,7 +297,7 @@ function M.move_to_destination(source_path, destination_folder)
   local para_type = nil
 
   -- Determine PARA type from path
-  local para_folders = config.get_para_folders()
+  local para_folders = config_mod.get_para_folders()
   for type_name, type_path in pairs(para_folders) do
     if destination_folder:find("^" .. vim.pesc(type_path)) then
       para_type = type_name:sub(1, -2) -- Remove 's' (projects -> project)

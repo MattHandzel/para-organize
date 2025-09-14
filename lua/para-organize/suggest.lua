@@ -289,7 +289,7 @@ function M.suggest_new_folders(captures)
   local existing_folders = {}
   
   -- Get all existing folder names
-  for _, folder_path in pairs(config.get_para_folders()) do
+  for _, folder_path in pairs(config_mod.get_para_folders()) do
     local subfolders = M.get_subfolders(folder_path)
     for _, subfolder in ipairs(subfolders) do
       existing_folders[subfolder.normalized_name] = true
