@@ -324,7 +324,14 @@ end
 -- Search index by criteria
 function M.search(criteria)
   local utils = require("para-organize.utils")
+  local config = require("para-organize.config")
   local results = {}
+  
+  -- Diagnostic logging
+  utils.log("TRACE", "Search criteria: %s", vim.inspect(criteria))
+  utils.log("TRACE", "Total entries in index: %d", vim.tbl_count(index))
+  utils.log("TRACE", "Vault directory: %s", config.get_vault_dir())
+  utils.log("TRACE", "Capture folder: %s", config.get_capture_folder())
   
   for filepath, metadata in pairs(index) do
     local match = true

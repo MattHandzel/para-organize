@@ -209,7 +209,7 @@ Basic workflow:
 
     start [filters]     Start organizing session
                        Filters: tags=tag1,tag2 sources=source1
-                               since=2024-01-01 until=2024-12-31
+                               since=2024-01-01 until_date=2024-12-31
                                status=raw modalities=text,audio
 
     stop               Stop current session
