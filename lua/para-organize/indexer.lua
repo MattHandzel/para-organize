@@ -7,6 +7,7 @@ local M = {}
 local Path = require("plenary.path")
 local Job = require("plenary.job")
 local scan = require("plenary.scandir")
+local utils = require("para-organize.utils")
 
 -- Module state
 local index = {}
@@ -16,7 +17,6 @@ local is_indexing = false
 -- Initialize indexer
 function M.init()
   local config = require("para-organize.config").get()
-  local utils = require("para-organize.utils")
 
   -- Set index file path
   index_file = vim.fn.stdpath("data") .. "/para-organize/index.json"
@@ -29,7 +29,6 @@ end
 
 -- Load index from disk
 function M.load_index()
-  local utils = require("para-organize.utils")
 
   if not utils.path_exists(index_file) then
     index = {}
@@ -51,7 +50,6 @@ end
 
 -- Save index to disk
 function M.save_index()
-  local utils = require("para-organize.utils")
 
   -- Ensure directory exists
   local index_dir = vim.fn.fnamemodify(index_file, ":h")
@@ -71,7 +69,6 @@ end
 -- Extract metadata from a note file
 function M.extract_metadata(filepath)
   local config = require("para-organize.config").get()
-  local utils = require("para-organize.utils")
 
   -- Read file content
   local content = utils.read_file(filepath)
@@ -206,7 +203,6 @@ end
 
 -- Index a single file
 function M.index_file(filepath)
-  local utils = require("para-organize.utils")
 
   utils.log("DEBUG", "Indexing file: %s", filepath)
 
@@ -221,7 +217,6 @@ end
 
 -- Update index for a single file
 function M.update_file(filepath)
-  local utils = require("para-organize.utils")
 
   -- Check if file still exists
   if not utils.path_exists(filepath) then
@@ -243,7 +238,6 @@ end
 -- Scan directory for notes
 function M.scan_directory(dir_path, on_complete)
   local config = require("para-organize.config").get()
-  local utils = require("para-organize.utils")
 
   utils.log("INFO", "Scanning directory: %s", dir_path)
 
@@ -289,15 +283,13 @@ end
 -- Full reindex of all notes
 function M.full_reindex(on_complete)
   if is_indexing then
-    local utils = require("para-organize.utils")
-    utils.log("WARN", "Indexing already in progress")
+      utils.log("WARN", "Indexing already in progress")
     return
   end
 
   is_indexing = true
 
   local config = require("para-organize.config").get()
-  local utils = require("para-organize.utils")
 
   utils.log("INFO", "Starting full reindex")
 
@@ -343,7 +335,6 @@ end
 
 -- Search index by criteria
 function M.search(criteria)
-  local utils = require("para-organize.utils")
   local config = require("para-organize.config")
   local results = {}
 
@@ -559,7 +550,6 @@ end
 -- Get all capture notes from the capture directory
 function M.get_capture_notes()
   local config = require("para-organize.config").get()
-  local utils = require("para-organize.utils")
   local capture_dir = config.paths.capture_dir
   local files = utils.glob_files("*", capture_dir)
   local notes = {}

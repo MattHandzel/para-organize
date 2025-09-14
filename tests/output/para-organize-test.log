@@ -48,3 +48,120 @@
 [2025-09-14 16:24:02] [DEBUG] UI opened
 [2025-09-14 16:24:02] [DEBUG] Learning system initialized with 3 records
 [2025-09-14 16:24:02] [DEBUG] UI closed
+[2025-09-14 16:31:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:31:08] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:31:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/move_test.md.tmp1757885468
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/backup_test.md.tmp1757885468
+[2025-09-14 16:31:08] [ERROR] Failed to read source file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/backup_test.md
+[2025-09-14 16:31:08] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:31:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [ERROR] Failed to create backup for: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/backup_test.md
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: /test/capture/note.md -> /test/projects/project-x
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/move_test.md.tmp1757885468
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/tag_test.md.tmp1757885468
+[2025-09-14 16:31:08] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:31:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/move_test.md.tmp1757885468
+[2025-09-14 16:31:08] [DEBUG] Loaded learning data with 0 associations
+[2025-09-14 16:31:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/move_test.md.tmp1757885468
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/archive_test.md.tmp1757885468
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/move_test.md.tmp1757885468
+[2025-09-14 16:31:08] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/merge_source.md.tmp1757885468
+[2025-09-14 16:31:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:31:08] [INFO] Merging /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/merge_source.md into /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/merge_target.md
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/move_test.md.tmp1757885468
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/log_test.md.tmp1757885468
+[2025-09-14 16:31:08] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:31:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:31:08] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:31:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/projects/project-x
+[2025-09-14 16:31:08] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:31:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/projects/meetings
+[2025-09-14 16:31:08] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:31:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/persistence
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:31:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/dest1
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/dest1
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/dest1
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/dest2
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/dest2
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/dest3
+[2025-09-14 16:31:08] [DEBUG] Loaded learning data with 3 associations
+[2025-09-14 16:31:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [INFO] Recorded move: nil -> /test/old
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:31:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:08] [DEBUG] Loaded index with 2414 entries
+[2025-09-14 16:31:08] [DEBUG] Indexer initialized with 2414 entries
+[2025-09-14 16:31:08] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/test_capture.md
+[2025-09-14 16:31:08] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/test_capture.md
+[2025-09-14 16:31:08] [DEBUG] Saved index with 0 entries
+[2025-09-14 16:31:08] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/test_capture.md
+[2025-09-14 16:31:08] [DEBUG] Saved index with 0 entries
+[2025-09-14 16:31:08] [DEBUG] Saved index with 0 entries
+[2025-09-14 16:31:08] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:31:08] [DEBUG] Loaded index with 2414 entries
+[2025-09-14 16:31:08] [DEBUG] Indexer initialized with 2414 entries
