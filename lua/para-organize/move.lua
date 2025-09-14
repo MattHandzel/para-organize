@@ -332,7 +332,7 @@ function M.archive_capture(source_path)
 
   -- Get archive path
   local filename = vim.fn.fnamemodify(source_path, ":t")
-  local archive_path = config.get_archive_path(filename)
+  local archive_path = config_mod.get_archive_path(filename)
 
   -- Move file to archive
   if utils.move_file(source_path, archive_path) then

@@ -464,11 +464,11 @@ function M.parse_yaml_fallback(yaml_str)
     local key, value = line:match("^([%w%-%_]+)%s*:%s*(.*)$")
     if key then
       if value == "" then
-        -- Nested map – prepare new table and push on stack
+        -- Could be a nested map OR a list; we don't know yet. Create table and push so subsequent lines belong here.
         local tbl = {}
         parent[key] = tbl
         table.insert(stack, tbl)
-        table.insert(indent_stack, indent + 1) -- anything > current indent
+        table.insert(indent_stack, indent + 1)
       elseif value == "[]" then
         parent[key] = {}
       elseif value:sub(1,1) == "[" and value:sub(-1) == "]" then
