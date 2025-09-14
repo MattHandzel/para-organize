@@ -201,6 +201,8 @@ function M.setup_autocmds()
   keymaps_mod.setup_autocmds(ui_state, M.close)
 end
 
+local actions_mod = require("para-organize.ui.actions")
+
 -- Navigation functions
 function M.next_suggestion()
   if
@@ -582,146 +584,14 @@ end
 
 -- Open directory or file in right pane
 function M.open_item()
-  -- Output debug info
-  vim.notify("DEBUG: open_item function called", vim.log.levels.DEBUG)
-
-  -- Get the current line under cursor
-  local line = vim.api.nvim_win_get_cursor(ui_state.organize_popup.winid)[1]
-  local content =
-    vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, line - 1, line, false)[1]
-
-  if not content then
-    vim.notify("No content found at current line", vim.log.levels.WARN)
-    return
-  end
-
-  vim.notify("Line content: " .. content, vim.log.levels.DEBUG)
-
-  -- Check if this is a directory entry (P/A/R folder or D for directory)
-  if
-    content:match("^%[P%] ")
-    or content:match("^%[A%] ")
-    or content:match("^%[R%] ")
-    or content:match("^%[D%] ")
-  then
-    local name = content:match("^%[.%] (.+)")
-    vim.notify("Opening directory: " .. name, vim.log.levels.INFO)
-    local dir = indexer.get_directory_by_name(name)
-    if dir then
-      -- Store the previous directory in the stack for back navigation
-      if ui_state.current_directory then
-        table.insert(ui_state.directory_stack, ui_state.current_directory)
-      end
-
-      -- Set current directory
-      ui_state.current_directory = dir
-      vim.notify("Current directory set to: " .. dir.path, vim.log.levels.DEBUG)
-
-      local sub_items = indexer.get_sub_items(dir.path)
-      local content = {
-        "# " .. name,
-        "",
-        "Press 'Enter' on a note to merge, 'Backspace' to go back",
-        "",
-      }
-      M.render_directories(sub_items)
-      vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
-      -- Keep buffer modifiable for cursor movement
-      vim.api.nvim_set_current_win(ui_state.organize_popup.winid)
-    end
-  -- Check if this is a file entry
-  elseif content:match("^%[F%] ") then
-    local name = content:match("^%[F%] (.+)")
-    vim.notify("Selected file for merge: " .. name, vim.log.levels.INFO)
-    local file = indexer.get_file_by_alias_or_name(name)
-    if file then
-      vim.notify("Starting merge with file: " .. file.name, vim.log.levels.INFO)
-      -- Set up merge operation
-      ui_state.merge_mode = true
-      ui_state.merge_target = file
-
-      -- Call render_merge_view to show the merge interface
-      -- This will handle reading files and rendering the merge view
-      M.render_merge_view()
-
-      -- Add keybindings for merge actions
-      local opts = { buffer = ui_state.organize_popup.bufnr, silent = true }
-      vim.keymap.set("n", "<C-s>", function()
-        -- Complete merge
-        local utils = require("para-organize.utils") -- Get utils inside this scope
-        local move = require("para-organize.move") -- Get move inside this scope
-        local edited_content = table.concat(
-          vim.api.nvim_buf_get_lines(ui_state.organize_popup.bufnr, 0, -1, false),
-          "\n"
-        )
-        if utils.write_file_atomic(file.path, edited_content) then
-          vim.notify("Successfully merged content to " .. file.name, vim.log.levels.INFO)
-          -- Pass the entire capture object, not just the path
-          move.archive_capture(ui_state.current_capture)
-          M.render_suggestions(ui_state.current_suggestions)
-          ui_state.merge_mode = false
-          ui_state.merge_target = nil
-        end
-      end, opts)
-
-      vim.keymap.set("n", "<leader>mx", function()
-        -- Cancel merge
-        ui_state.merge_mode = false
-        ui_state.merge_target = nil
-        M.render_suggestions(ui_state.current_suggestions)
-        vim.notify("Merge canceled", vim.log.levels.INFO)
-      end, opts)
-
-      -- Focus the organize pane
-      vim.api.nvim_set_current_win(ui_state.organize_popup.winid)
-    end
-  end
+  local indexer = require("para-organize.indexer")
+  actions_mod.open_item(ui_state, render_mod, indexer)
 end
 
 -- Back to parent directory
 function M.back_to_parent()
-  vim.notify("Going back from directory", vim.log.levels.DEBUG)
-
-  -- Initialize directory stack if it doesn't exist
-  if ui_state.directory_stack == nil then
-    ui_state.directory_stack = {}
-  end
-
-  -- If we're in a directory, go back to the previous one
-  if #ui_state.directory_stack > 0 then
-    -- Pop the previous directory
-    ui_state.current_directory = table.remove(ui_state.directory_stack)
-
-    -- If we're back at the root level, display main suggestions
-    if #ui_state.directory_stack == 0 and ui_state.current_directory == nil then
-      vim.notify("Returning to root level", vim.log.levels.DEBUG)
-      M.render_suggestions(ui_state.current_suggestions)
-      return
-    end
-
-    -- Otherwise show the contents of the previous directory
-    if ui_state.current_directory then
-      vim.notify(
-        "Going back to directory: " .. ui_state.current_directory.path,
-        vim.log.levels.DEBUG
-      )
-      local sub_items = indexer.get_sub_items(ui_state.current_directory.path)
-      local content = {
-        "# " .. ui_state.current_directory.name,
-        "",
-        "Press 'Enter' on a note to merge, 'Backspace' to go back",
-        "",
-      }
-
-      M.render_directories(sub_items)
-      vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
-      return
-    end
-  else
-    -- If we're already at the root level, just show the main suggestions
-    ui_state.current_directory = nil
-    M.render_suggestions(ui_state.current_suggestions)
-  end
+  local indexer = require("para-organize.indexer")
+  actions_mod.back_to_parent(ui_state, render_mod, indexer)
 end
 
 -- Public accessors for testing
