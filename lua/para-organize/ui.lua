@@ -28,6 +28,9 @@ local ui_state = {
   merge_target = nil,
   session = nil,
   current_sort = 1,
+  -- Track navigation state
+  current_directory = nil,  -- Current directory being viewed
+  directory_stack = {},    -- Navigation history for back button
 }
 
 -- Helper function to get the letter for a PARA type
@@ -251,6 +254,14 @@ function M.render_suggestions(suggestions)
     M.render_merge_view()
     return
   end
+  
+  -- Reset directory state when going back to main suggestions view
+  if ui_state.current_directory then
+    vim.notify("Resetting directory state, was in: " .. ui_state.current_directory.name, vim.log.levels.DEBUG)
+  end
+  ui_state.current_directory = nil
+  ui_state.directory_stack = {}
+  vim.notify("Showing main suggestions view", vim.log.levels.DEBUG)
   
   local dirs = indexer.get_para_directories()
   local content = {
@@ -576,18 +587,38 @@ function M.search_inline()
     default_value = "",
     on_submit = function(value)
       if value and value ~= "" then
-        -- Search all directories and files
         local results = {}
-        local folders = indexer.get_para_directories()
-        for _, dir in ipairs(folders) do
-          if dir.name:lower():find(value:lower()) then
-            table.insert(results, dir)
+        local search_header = ""
+        
+        -- Check if we're in a directory - search within that directory
+        if ui_state.current_directory then
+          vim.notify("Searching within directory: " .. ui_state.current_directory.name, vim.log.levels.INFO)
+          local sub_items = indexer.get_sub_items(ui_state.current_directory.path)
+          
+          for _, item in ipairs(sub_items) do
+            if item.name:lower():find(value:lower()) then
+              table.insert(results, item)
+            end
           end
+          
+          search_header = "# Search Results in '" .. ui_state.current_directory.name .. "' for: " .. value
+        else
+          -- Otherwise search all top-level directories
+          vim.notify("Searching all directories", vim.log.levels.INFO)
+          local folders = indexer.get_para_directories()
+          
+          for _, dir in ipairs(folders) do
+            if dir.name:lower():find(value:lower()) then
+              table.insert(results, dir)
+            end
+          end
+          
+          search_header = "# Search Results for: " .. value
         end
         
         -- Show search results in right pane
         local content = {
-          "# Search Results for: " .. value,
+          search_header,
           "",
           "Press 'Enter' to open folder or file, 'Backspace' to go back",
           ""
@@ -597,7 +628,15 @@ function M.search_inline()
           table.insert(content, "No results found.")
         else
           for _, item in ipairs(results) do
-            local type_letter = get_type_letter(item.type)
+            local type_letter = nil
+            if item.type == "directory" then
+              type_letter = "D"
+            elseif item.type == "file" then
+              type_letter = "F"
+            else
+              -- For top-level PARA folders
+              type_letter = get_type_letter(item.type)
+            end
             table.insert(content, string.format("[%s] %s", type_letter, item.name))
           end
         end
@@ -701,7 +740,8 @@ function M.show_help()
     "   m           Enter merge mode (via picker)",
     "   a           Archive immediately",
     "   s           Skip current capture",
-    "   /           Search in right pane (inline search)",
+    "   /           Search in right pane (context-aware, searches current directory)",
+    "   <BS>        Go back to parent directory",
     "",
     " Merge Operations:",
     "   <leader>mc  Complete merge (save changes)",
@@ -813,6 +853,15 @@ function M.open_item()
     vim.notify("Opening directory: " .. name, vim.log.levels.INFO)
     local dir = indexer.get_directory_by_name(name)
     if dir then
+      -- Store the previous directory in the stack for back navigation
+      if ui_state.current_directory then
+        table.insert(ui_state.directory_stack, ui_state.current_directory)
+      end
+      
+      -- Set current directory
+      ui_state.current_directory = dir
+      vim.notify("Current directory set to: " .. dir.path, vim.log.levels.DEBUG)
+      
       local sub_items = indexer.get_sub_items(dir.path)
       local content = {
         "# " .. name,
@@ -878,7 +927,49 @@ end
 
 -- Back to parent directory
 function M.back_to_parent()
-  M.render_suggestions(ui_state.current_suggestions)
+  vim.notify("Going back from directory", vim.log.levels.DEBUG)
+  
+  -- If we're in a directory, go back to the previous one
+  if #ui_state.directory_stack > 0 then
+    -- Pop the previous directory
+    ui_state.current_directory = table.remove(ui_state.directory_stack)
+    
+    -- If we're back at the root level, display main suggestions
+    if #ui_state.directory_stack == 0 and ui_state.current_directory == nil then
+      vim.notify("Returning to root level", vim.log.levels.DEBUG)
+      M.render_suggestions(ui_state.current_suggestions)
+      return
+    end
+    
+    -- Otherwise show the contents of the previous directory
+    if ui_state.current_directory then
+      vim.notify("Going back to directory: " .. ui_state.current_directory.path, vim.log.levels.DEBUG)
+      local sub_items = indexer.get_sub_items(ui_state.current_directory.path)
+      local content = {
+        "# " .. ui_state.current_directory.name,
+        "",
+        "Press 'Enter' on a note to merge, 'Backspace' to go back",
+        ""
+      }
+      
+      for _, item in ipairs(sub_items) do
+        if item.type == "directory" then
+          table.insert(content, "[D] " .. item.name)
+        else
+          table.insert(content, "[F] " .. (item.alias or item.name))
+        end
+      end
+      
+      vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
+      vim.api.nvim_buf_set_lines(ui_state.organize_popup.bufnr, 0, -1, false, content)
+      vim.api.nvim_buf_set_option(ui_state.organize_popup.bufnr, "modifiable", true)
+      return
+    end
+  else
+    -- If we're already at the root level, just show the main suggestions
+    ui_state.current_directory = nil
+    M.render_suggestions(ui_state.current_suggestions)
+  end
 end
 
 -- Public accessors for testing

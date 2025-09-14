@@ -349,7 +349,8 @@ require("para-organize").setup({
    - `<CR>` - Accept selected suggestion, open folder, or select file for merge
    - `m` - Merge with existing note (via picker)
    - `a` - Archive immediately
-   - `/` - Search directly in right pane (no popup)
+   - `/` - Context-aware search (searches within current folder)
+   - `<BS>` - Go back to parent directory
    - `<C-h>`/`<C-l>` - Switch between left/right panes
 
 5. **Create new destinations**:
