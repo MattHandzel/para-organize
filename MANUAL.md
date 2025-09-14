@@ -1,87 +1,374 @@
-# `para-organize.nvim` Manual
+# para-organize.nvim User Manual
 
-This document provides a detailed guide to the features and workflows of `para-organize.nvim`.
+A comprehensive guide to using the para-organize.nvim plugin for organizing notes using the PARA method.
 
-## Core Concepts
+## Table of Contents
 
-### The Index
+1. [Introduction](#introduction)
+2. [Installation](#installation)
+3. [Configuration](#configuration)
+4. [Basic Usage](#basic-usage)
+5. [Advanced Features](#advanced-features)
+6. [Keybindings](#keybindings)
+7. [Customization](#customization)
+8. [Troubleshooting](#troubleshooting)
+9. [Tips and Best Practices](#tips-and-best-practices)
 
-The plugin's speed and intelligence come from a JSON-based index of your notes. This index stores file paths and parsed frontmatter. It is built by scanning the `capture/raw_capture` directory inside your vault. To keep it up-to-date, run `:PARAOrganize reindex` whenever you add new notes. The index is stored in your Neovim data directory (e.g., `~/.local/share/nvim/para_org_index.json`).
+## Introduction
 
-### The Organizer UI
+para-organize.nvim is a Neovim plugin designed to help you quickly organize your captured notes using the PARA method (Projects, Areas, Resources, Archives). It provides an intuitive two-pane interface, intelligent suggestions for where to file your notes, and learns from your organization patterns over time.
 
-The main interface is a two-pane layout that appears after you select a note to process.
+### What is PARA?
 
-- **Left Pane (Capture Note)**: This is a fully editable buffer containing your note. You can make changes, fix typos, or add metadata before deciding where to file it.
-- **Right Pane (Action Pane)**: This pane is for taking action. It starts by showing a list of suggestions, but can change to show a list of notes in a folder or a note you want to merge into.
+PARA is a method for organizing digital information developed by Tiago Forte:
 
-## Workflows
+- **Projects**: Short-term efforts with deadlines and specific goals
+- **Areas**: Ongoing responsibilities that require maintenance over time
+- **Resources**: Topics or themes of ongoing interest
+- **Archives**: Inactive items from the other three categories
 
-There are three primary workflows for processing a note.
+This plugin helps you quickly decide which of these categories (and which specific folder) a captured note should go into.
 
-There are two primary workflows for processing a note.
+### Key Features
 
-### 1. Quick Organize
+- **Intelligent Suggestions**: Based on tags, sources, and learned patterns
+- **Two-pane Interface**: View and edit your capture while seeing destination suggestions
+- **Learning System**: Improves suggestions based on your organizational habits
+- **Safe File Operations**: Never deletes files, always archives originals
+- **Merge Workflow**: Easily merge captures into existing notes
+- **Search Integration**: Powerful search with Telescope
+- **Quick Folder Creation**: Create new projects/areas/resources on the fly
 
-This is the fastest way to file a note when the suggestions are accurate.
+## Installation
 
-1.  Run `:PARAOrganize start`.
-2.  Select a note from the Telescope picker.
-3.  In the right-hand **Suggestions** list, navigate to a destination (e.g., `[P] My-Project`).
-4.  Press `<CR>`.
-5.  The original note is copied to the destination folder and the capture is archived. The UI closes.
+### Prerequisites
 
-### 2. Batch Processing
+- Neovim >= 0.9.0
+- Required dependencies:
+  - [plenary.nvim](https://github.com/nvim-lua/plenary.nvim)
+  - [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim)
+- Recommended dependencies:
+  - [nui.nvim](https://github.com/MunifTanjim/nui.nvim)
+  - [which-key.nvim](https://github.com/folke/which-key.nvim) (optional)
+  - [nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons) (optional)
 
-This is the most efficient way to clear a large number of captures.
+### Using lazy.nvim
 
-1.  Run `:PARAOrganize start`.
-2.  In the Telescope picker, navigate to a note you want to include in your batch and press `<Tab>` to select it. The entry will be marked.
-3.  Select as many notes as you like.
-4.  Press `<C-p>` (for "Process") to begin the session.
-5.  The Organizer UI will open with the first note.
-6.  When you action that note (move, merge, or skip), the UI will automatically load the next note in your batch.
-7.  The session ends when the last note is processed.
+```lua
+{
+  "para-organize.nvim",
+  dependencies = {
+    "nvim-lua/plenary.nvim",
+    "nvim-telescope/telescope.nvim",
+    "MunifTanjim/nui.nvim",
+    -- Optional dependencies
+    "folke/which-key.nvim",
+    "nvim-tree/nvim-web-devicons",
+  },
+  config = function()
+    require("para-organize").setup({
+      -- your configuration
+    })
+  end,
+}
+```
 
-### 3. Merge Flow
+### Using packer.nvim
 
-Use this workflow when you want to consolidate a new capture into an existing note.
+```lua
+use {
+  "para-organize.nvim",
+  requires = {
+    "nvim-lua/plenary.nvim",
+    "nvim-telescope/telescope.nvim",
+    "MunifTanjim/nui.nvim",
+    -- Optional
+    "folke/which-key.nvim",
+    "nvim-tree/nvim-web-devicons",
+  },
+  config = function()
+    require("para-organize").setup({
+      -- your configuration
+    })
+  end,
+}
+```
 
-1.  Run `:PARAOrganize start` and select a capture note.
-2.  In the right-hand **Suggestions** list, press `/` to open the folder finder.
-3.  Use Telescope to find the destination folder (e.g., `Resources/Programming`). Press `<CR>`.
-4.  The right pane now shows a list of all notes inside that folder.
-5.  Select the target note you want to merge into and press `<CR>`.
-6.  The right pane now becomes an editable buffer containing the **target note**.
-7.  Manually copy content from the left (capture) pane to the right (target) pane. Make any edits you need.
-8.  When you are finished, simply close the UI by pressing `q`.
-    - The changes to the target note will be saved.
-    - The original capture note will be archived without being copied to the destination.
+## Configuration
 
-## Commands
+At a minimum, you'll need to specify your vault directory:
 
-- `:PARAOrganize start`: Begin an organizing session.
-- `:PARAOrganize reindex`: Rebuild the note index.
-- `:PARAOrganize stop`: Force-close the organizer UI.
+```lua
+require("para-organize").setup({
+  paths = {
+    vault_dir = "~/notes",  -- Path to your notes vault
+  }
+})
+```
 
-## UI Keymaps
+For a complete configuration with all options, see the [README.md](README.md) file.
 
-These keymaps are active only when the organizer UI is open.
+## Basic Usage
 
-- `q`: Close the organizer UI.
+### Starting an Organizing Session
 
-### In the Telescope Capture List:
+To start organizing your captured notes:
 
-- `<CR>`: Start a session with the single selected note.
-- `<Tab>`: Add/remove a note from the multi-selection.
-- `<C-p>`: Process all selected notes in a batch session.
+```vim
+:ParaOrganize start
+```
 
-### In the Suggestions List:
+You can filter which captures to process:
 
-- `<CR>`: Accept the selected suggestion and move the note.
-- `/`: Open the Telescope folder finder to begin a **Merge Flow**.
+```vim
+:ParaOrganize start tags=project-x,meeting
+:ParaOrganize start status=raw
+:ParaOrganize start since=2024-01-01
+:ParaOrganize start modalities=audio
+```
 
-### In the Folder Contents List:
+### The Two-Pane Interface
 
-- `<CR>`: Select a note to merge into.
-- `<leader>s`: Skip the current note and move to the next one in the batch.
+When you start an organizing session, you'll see a two-pane interface:
+
+- **Left Pane**: Shows the current capture note (editable)
+- **Right Pane**: Shows suggested destinations for the note
+
+### Processing Notes
+
+Navigate the interface with these basic commands:
+
+- **Select a suggestion**: Use `j`/`k` to navigate and `<CR>` to accept
+- **Navigate between captures**: Use `<Tab>` for next and `<S-Tab>` for previous
+- **Skip a capture**: Press `s` to skip the current capture
+- **Archive immediately**: Press `a` to archive without moving
+- **Search for destination**: Press `/` to open a fuzzy finder
+
+## Advanced Features
+
+### Merge Mode
+
+To merge a capture into an existing note:
+
+1. Press `m` to enter merge mode
+2. Select a destination folder
+3. Select a target note
+4. Edit the merged content in the right pane
+5. Press `<leader>mc` to complete the merge or `<leader>mx` to cancel
+
+### Creating New Folders
+
+Create new folders on the fly:
+
+- `<leader>np` - Create a new project
+- `<leader>na` - Create a new area
+- `<leader>nr` - Create a new resource
+
+If `auto_move_to_new_folder` is enabled (default), the current note will automatically move to the newly created folder.
+
+### Learning System
+
+The plugin learns from your organization patterns over time:
+
+- Tags that frequently go to specific folders get higher suggestion scores
+- Sources (like "email" or "meeting") develop associations with destinations
+- Recency and frequency affect suggestion ranking
+- Old patterns gradually decay in importance
+
+To see what the plugin has learned:
+
+```lua
+:lua print(vim.inspect(require("para-organize.learn").get_statistics()))
+```
+
+## Keybindings
+
+### Default Buffer Mappings
+
+When the para-organize UI is active:
+
+| Key | Action |
+|-----|--------|
+| `<CR>` | Accept selected suggestion |
+| `<Esc>` | Cancel and close |
+| `<Tab>` | Next capture |
+| `<S-Tab>` | Previous capture |
+| `j`/`k` | Navigate suggestions |
+| `s` | Skip current capture |
+| `a` | Archive immediately |
+| `m` | Enter merge mode |
+| `/` | Search for destination |
+| `?` | Show help |
+| `<leader>np` | Create new project |
+| `<leader>na` | Create new area |
+| `<leader>nr` | Create new resource |
+| `r` | Refresh suggestions |
+
+### Custom Global Mappings
+
+You can create custom global mappings using the provided `<Plug>` mappings:
+
+```vim
+" In your init.vim or init.lua
+nmap <leader>oo <Plug>(ParaOrganizeStart)
+nmap <leader>om <Plug>(ParaOrganizeMerge)
+nmap <leader>oa <Plug>(ParaOrganizeArchive)
+```
+
+## Customization
+
+### UI Configuration
+
+Customize the appearance of the UI:
+
+```lua
+require("para-organize").setup({
+  ui = {
+    layout = "float",  -- "float" or "split"
+    float_opts = {
+      width = 0.9,     -- 90% of editor width
+      height = 0.8,    -- 80% of editor height
+      border = "rounded",
+    },
+    icons = {
+      enabled = true,
+      project = "",
+      area = "",
+      resource = "",
+      archive = "🗑",
+    },
+    display = {
+      show_scores = true,  -- Show confidence scores
+      show_timestamps = true,
+    },
+  },
+})
+```
+
+### Custom Keybindings
+
+Customize the buffer-local keybindings:
+
+```lua
+require("para-organize").setup({
+  keymaps = {
+    buffer = {
+      accept = "<CR>",
+      cancel = "<Esc>",
+      next = "<Tab>",
+      prev = "<S-Tab>",
+      skip = "s",
+      archive = "a",
+      merge = "m",
+      search = "/",
+      help = "?",
+      -- Add or change mappings as needed
+    },
+  },
+})
+```
+
+### Suggestion Algorithm
+
+Adjust the suggestion algorithm to favor different matching types:
+
+```lua
+require("para-organize").setup({
+  suggestions = {
+    weights = {
+      exact_tag_match = 2.0,      -- Tag exactly matches folder name
+      normalized_tag_match = 1.5,  -- Tag matches after normalization
+      learned_association = 1.8,   -- Previously successful pattern
+      source_match = 1.3,          -- Source matches folder
+      alias_similarity = 1.1,      -- Alias similar to folder name
+    },
+  },
+})
+```
+
+## Troubleshooting
+
+### Health Check
+
+Run a health check to diagnose issues:
+
+```vim
+:checkhealth para-organize
+```
+
+### Enable Debug Logging
+
+Enable debug logging for detailed information:
+
+```lua
+require("para-organize").setup({
+  debug = {
+    enabled = true,
+    log_level = "debug",  -- "trace", "debug", "info", "warn", "error"
+  },
+})
+```
+
+The log file is located at: `vim.fn.stdpath("cache") .. "/para-organize.log"`
+
+### Common Issues
+
+**Issue**: UI not showing or crashing
+- Check if nui.nvim is installed
+- Verify your Neovim version is >= 0.9.0
+- Look for error messages with `:messages`
+
+**Issue**: No suggestions appearing
+- Ensure PARA folders exist in your vault
+- Check that captures have tags or metadata
+- Run `:ParaOrganize reindex` to rebuild the index
+
+**Issue**: Files not moving correctly
+- Check file permissions in your vault directory
+- Review operation log at `vim.fn.stdpath("data") .. "/para-organize/operations.log"`
+- Enable debug logging for more information
+
+## Tips and Best Practices
+
+### Organizing Workflow
+
+1. **Capture First**: Focus on capturing ideas without worrying about organization
+2. **Schedule Processing**: Set regular times to run through your captures
+3. **Process in Batches**: Use filters to process related captures together
+4. **Use Tags Consistently**: Consistent tagging improves suggestion quality
+5. **Create Templates**: Use templates for common note types to ensure consistent metadata
+
+### Tag Conventions
+
+- Use project names as tags to help the plugin suggest the right destinations
+- Consider using hierarchical tags like `project/subproject`
+- Be consistent with tag formats (e.g., always use kebab-case)
+
+### Keyboard-Driven Workflow
+
+For maximum efficiency, learn these key combinations:
+
+- `<Tab>`, `<CR>` - Process a note and move to next
+- `s`, `<Tab>` - Skip a note and move to next
+- `a`, `<Tab>` - Archive and move to next
+- `/` + search + `<CR>` - Quick search for destination
+
+### Extending the Plugin
+
+para-organize.nvim exposes a Lua API you can use to extend its functionality:
+
+```lua
+-- In your config files
+local para = require("para-organize")
+
+-- Custom command to process all notes from a specific source
+vim.api.nvim_create_user_command("ProcessMeetingNotes", function()
+  para.start({ sources = "meeting" })
+end, {})
+```
+
+## Additional Resources
+
+- [GitHub Repository](https://github.com/yourusername/para-organize.nvim)
+- [PARA Method by Tiago Forte](https://fortelabs.co/blog/para/)
+- [Help Documentation](doc/para-organize.txt)
