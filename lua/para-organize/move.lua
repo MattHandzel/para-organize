@@ -4,6 +4,7 @@
 local M = {}
 
 local config_mod = require("para-organize.config")
+local utils = require("para-organize.utils")
 
 -- Module state
 local operation_log = {}
@@ -327,13 +328,20 @@ end
 function M.archive_capture(capture_note)
   if not capture_note.id then
     capture_note.id = capture_note.filename .. "_" .. os.date("%Y%m%d%H%M%S")
-    require("para-organize.utils").log("WARN", "Capture note missing ID. Generated a new one: " .. capture_note.id)
+    require("para-organize.utils").log(
+      "WARN",
+      "Capture note missing ID. Generated a new one: " .. capture_note.id
+    )
   end
 
   local config = config_mod.get()
   local utils = require("para-organize.utils")
-  local archive_path = config.paths.vault_dir .. "/archives/capture/raw_capture/" .. capture_note.id .. ".md"
+  local archive_path = config.paths.vault_dir
+    .. "/archives/capture/raw_capture/"
+    .. capture_note.id
+    .. ".md"
   utils.ensure_dir(archive_path:match("(.+)/"))
+
   os.rename(capture_note.path, archive_path)
   vim.notify("Capture note archived: " .. capture_note.id, vim.log.levels.INFO)
   return archive_path
