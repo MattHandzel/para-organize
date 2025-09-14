@@ -87,6 +87,8 @@ function M._setup_commands()
       M.search(table.concat(args, " "))
     elseif subcommand == "help" then
       M.help()
+    elseif subcommand == "debug" then
+      M.debug_info()
     elseif subcommand == "new-project" then
       M.new_folder("projects", args[1])
     elseif subcommand == "new-area" then
@@ -111,6 +113,7 @@ function M._setup_commands()
         "reindex",
         "search",
         "help",
+        "debug",
         "new-project",
         "new-area",
         "new-resource",
@@ -527,6 +530,76 @@ end
 -- Check if initialized
 function M.is_initialized()
   return initialized
+end
+
+-- Show debug information
+function M.debug_info()
+  local config = load_module("config")
+  local indexer = load_module("indexer")
+  local utils = load_module("utils")
+  
+  -- Show configuration debug info
+  config.debug_info()
+  
+  -- Show index statistics
+  local stats = indexer.get_statistics()
+  utils.log("INFO", "\n========== Index Statistics ==========")
+  utils.log("INFO", "Total indexed notes: %d", stats.total)
+  utils.log("INFO", "By type:")
+  for type, count in pairs(stats.by_type) do
+    utils.log("INFO", "  %s: %d", type, count)
+  end
+  utils.log("INFO", "With tags: %d", stats.with_tags)
+  utils.log("INFO", "With sources: %d", stats.with_sources)
+  
+  -- Try to find captures directly
+  local capture_path = config.get_capture_folder()
+  utils.log("INFO", "\n========== Capture Search ==========")
+  utils.log("INFO", "Looking for captures in: %s", capture_path)
+  
+  local captures = {}
+  if vim.fn.isdirectory(capture_path) == 1 then
+    local handle = io.popen('find "' .. capture_path .. '" -name "*.md" 2>/dev/null')
+    if handle then
+      for line in handle:lines() do
+        table.insert(captures, line)
+      end
+      handle:close()
+    end
+  end
+  
+  utils.log("INFO", "Found %d .md files in capture folder", #captures)
+  for i, capture in ipairs(captures) do
+    if i <= 5 then
+      utils.log("INFO", "  - %s", capture)
+    end
+  end
+  
+  -- Try to trigger an index if needed
+  if stats.total == 0 and #captures > 0 then
+    utils.log("INFO", "\n*** WARNING: Index is empty but captures exist ***")
+    utils.log("INFO", "*** Running reindex now... ***")
+    indexer.full_reindex(function(new_stats)
+      utils.log("INFO", "Reindex complete: %d files indexed", new_stats.total)
+    end)
+  end
+  
+  -- Search for captures using the indexer
+  local capture_results = indexer.search({ para_type = "capture" })
+  utils.log("INFO", "\nIndexer found %d captures", #capture_results)
+  
+  -- Show session info if active
+  if session then
+    utils.log("INFO", "\n========== Session Info ==========")
+    utils.log("INFO", "Active session: yes")
+    utils.log("INFO", "Total captures: %d", #session.captures)
+    utils.log("INFO", "Current index: %d", session.current_index)
+  else
+    utils.log("INFO", "\nNo active session")
+  end
+  
+  utils.log("INFO", "=======================================")
+  vim.notify("Debug information written to log. Check :messages for details.", vim.log.levels.INFO)
 end
 
 return M

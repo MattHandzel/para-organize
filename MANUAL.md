@@ -288,6 +288,21 @@ require("para-organize").setup({
 
 ## Troubleshooting
 
+### Debug Mode
+
+Use the debug command to get comprehensive diagnostic information:
+
+```vim
+:ParaOrganize debug
+```
+
+This will show:
+- Configuration details and paths
+- Directory existence and file counts
+- Index statistics
+- Capture detection information
+- Session status
+
 ### Health Check
 
 Run a health check to diagnose issues:

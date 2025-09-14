@@ -224,6 +224,7 @@ Basic workflow:
 
     reindex            Rebuild the note index
     search [query]     Search notes
+    debug              Show debug information
 
     new-project {name} Create new project folder
     new-area {name}    Create new area folder

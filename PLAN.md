@@ -198,29 +198,37 @@ A Neovim plugin for organizing notes using the PARA (Projects, Areas, Resources,
 - [x] README.md with full configuration example
 - [x] flake.nix for NixOS development environment
 - [x] Makefile with development commands
-- [x] config.lua - Configuration management with validation
+- [x] config.lua - Configuration management with validation and debug info
 - [x] utils.lua - Comprehensive utility functions (logging, paths, YAML parsing, async)
 - [x] health.lua - Health checks for dependencies and configuration
-- [x] init.lua - Main entry point with commands and plugin setup
+- [x] init.lua - Main entry point with commands, plugin setup, and debug command
 - [x] indexer.lua - Note indexing with metadata extraction and search
-- [x] search.lua - Telescope integration for searching
+- [x] search.lua - Telescope integration for searching (fixed 'until' keyword issue)
 - [x] suggest.lua - Suggestion engine with scoring
 - [x] ui.lua - Two-pane interface with nui.nvim
 - [x] move.lua - Safe file operations
 - [x] learn.lua - Learning system
 - [x] tests/minimal_init.lua - Test initialization
 - [x] tests/utils_spec.lua - Unit tests for utils module
+- [x] tests/indexer_spec.lua - Unit tests for indexer module
+- [x] tests/suggest_spec.lua - Unit tests for suggest module
+- [x] tests/move_spec.lua - Unit tests for move module
+- [x] tests/learn_spec.lua - Unit tests for learn module
+- [x] tests/integration_spec.lua - Integration tests
 - [x] MANUAL.md - Comprehensive user manual
 - [x] LICENSE - MIT license
 - [x] CONTRIBUTING.md - Contributing guidelines
 - [x] CHANGELOG.md - Version change tracking
 - [x] doc/para-organize.txt - Vimdoc help documentation
-- [x] Plugin initialization and basic tests
+- [x] Plugin initialization and comprehensive tests
+- [x] GitHub Actions CI integration (test.yml, lint.yml, release.yml)
+- [x] Example configurations (minimal and full)
+- [x] Debug mode with comprehensive diagnostics
 
 ### In Progress
-- [x] Additional tests for all modules
-- [x] GitHub Actions CI integration
+- [ ] Fixing capture path detection issue
 - [ ] Enhanced keyboard shortcuts
+- [ ] Performance optimizations
 
 ### Next Steps
 1. Polish UI and keybindings

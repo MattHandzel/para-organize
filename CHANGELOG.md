@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Initial project structure
-- Configuration module with validation
+- Configuration module with validation and debug support
 - Utility functions for file operations and frontmatter parsing
 - Indexer for scanning and metadata extraction
 - Search module with Telescope integration
@@ -18,9 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Safe file operations with archive functionality
 - Learning system that improves suggestions over time
 - Documentation: README, MANUAL, and vimdoc help
-- Basic test infrastructure with busted
+- Comprehensive test infrastructure with busted
 - Health checks for dependencies and configuration
 - Development environment with NixOS flake
+- GitHub Actions CI/CD workflows
+- Debug command for troubleshooting
+- Example configurations (minimal and full)
+
+### Fixed
+- Reserved keyword 'until' usage in search.lua (now using 'until_date')
+- Reserved keyword 'then' usage in utils.lua (now using 'time_then')
+- Tag normalization function to properly handle special characters
+- String similarity test expectations
 
 ## [0.1.0] - 2025-09-14
 - Initial release with core functionality

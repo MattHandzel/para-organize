@@ -365,6 +365,7 @@ require("para-organize").setup({
 - `:ParaOrganize merge` - Enter merge mode
 - `:ParaOrganize archive` - Archive current capture
 - `:ParaOrganize reindex` - Rebuild the index
+- `:ParaOrganize debug` - Show debug information and diagnostics
 - `:ParaOrganize help` - Show help
 
 ### Filter Options

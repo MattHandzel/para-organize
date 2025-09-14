@@ -391,4 +391,73 @@ function M.get_log_level()
   return levels[level] or vim.log.levels.INFO
 end
 
+-- Print debug info about current configuration
+function M.debug_info()
+  local utils = require("para-organize.utils")
+  local conf = M.get()
+  
+  local capture_path = M.get_capture_folder()
+  
+  local info = {
+    vault_dir = vim.fn.expand(conf.paths.vault_dir),
+    capture_folder = conf.paths.capture_folder,
+    capture_path = capture_path,
+    capture_exists = vim.fn.isdirectory(capture_path) == 1,
+    para_folders = conf.paths.para_folders,
+    file_glob = conf.patterns.file_glob,
+    debug_enabled = M.is_debug(),
+    debug_level = M.get_value("debug.log_level"),
+  }
+  
+  utils.log("INFO", "========== Configuration Debug Info ==========")
+  utils.log("INFO", "Vault directory: %s", info.vault_dir)
+  utils.log("INFO", "Capture folder (relative): %s", info.capture_folder)
+  utils.log("INFO", "Capture path (full): %s", info.capture_path)
+  utils.log("INFO", "Capture path exists: %s", tostring(info.capture_exists))
+  utils.log("INFO", "File glob pattern: %s", info.file_glob)
+  utils.log("INFO", "Debug enabled: %s", tostring(info.debug_enabled))
+  utils.log("INFO", "Debug level: %s", tostring(info.debug_level))
+  
+  -- Check if directories exist and count files
+  local dirs_to_check = {
+    { name = "vault_dir", path = vim.fn.expand(conf.paths.vault_dir) },
+    { name = "capture_path", path = capture_path },
+  }
+  
+  utils.log("INFO", "\nDirectory Analysis:")
+  for _, dir_info in ipairs(dirs_to_check) do
+    local path = dir_info.path
+    local exists = vim.fn.isdirectory(path) == 1
+    local file_count = 0
+    local md_files = {}
+    
+    if exists then
+      -- Count markdown files
+      local handle = io.popen('find "' .. path .. '" -name "*.md" 2>/dev/null')
+      if handle then
+        for line in handle:lines() do
+          file_count = file_count + 1
+          if file_count <= 5 then
+            table.insert(md_files, line)
+          end
+        end
+        handle:close()
+      end
+    end
+    
+    utils.log("INFO", "%s: %s", dir_info.name, path)
+    utils.log("INFO", "  Exists: %s, .md files: %d", tostring(exists), file_count)
+    if #md_files > 0 then
+      utils.log("INFO", "  Sample files:")
+      for _, file in ipairs(md_files) do
+        utils.log("INFO", "    - %s", file)
+      end
+    end
+  end
+  
+  utils.log("INFO", "===============================================")
+  
+  return info
+end
+
 return M
