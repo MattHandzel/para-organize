@@ -1,0 +1,348 @@
+[2025-09-14 16:31:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885468
+[2025-09-14 16:31:08] [DEBUG] Loaded index with 2414 entries
+[2025-09-14 16:31:08] [DEBUG] Indexer initialized with 2414 entries
+[2025-09-14 16:31:08] [INFO] Starting full reindex
+[2025-09-14 16:31:08] [INFO] Scanning directory: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:31:08] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/test_no_frontmatter.md
+[2025-09-14 16:31:08] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/merge_target.md
+[2025-09-14 16:31:08] [INFO] Indexed 2 files from /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:31:08] [DEBUG] Saved index with 2 entries
+[2025-09-14 16:31:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885468
+[2025-09-14 16:31:08] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:31:08] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:31:08] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:31:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885468
+[2025-09-14 16:31:08] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:31:08] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:31:08] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:31:08] [INFO] Moving /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md to /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/test-project
+[2025-09-14 16:31:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885468
+[2025-09-14 16:31:08] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:31:08] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:31:08] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:31:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:08] [DEBUG] Saved learning data
+[2025-09-14 16:31:08] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:31:29] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:29] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885489
+[2025-09-14 16:31:29] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:31:29] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:31:29] [INFO] Starting full reindex
+[2025-09-14 16:31:29] [INFO] Scanning directory: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:31:29] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/test_no_frontmatter.md
+[2025-09-14 16:31:29] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/merge_target.md
+[2025-09-14 16:31:29] [INFO] Indexed 2 files from /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:31:29] [DEBUG] Saved index with 2 entries
+[2025-09-14 16:31:29] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:29] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885489
+[2025-09-14 16:31:29] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:31:29] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:31:29] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:31:29] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:29] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885489
+[2025-09-14 16:31:29] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:31:29] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:31:29] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:31:29] [INFO] Moving /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md to /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/test-project
+[2025-09-14 16:31:29] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:29] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885489
+[2025-09-14 16:31:29] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:31:29] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:31:29] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:31:29] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:29] [DEBUG] Saved learning data
+[2025-09-14 16:31:29] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:31:52] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:52] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885512
+[2025-09-14 16:31:52] [DEBUG] Loaded index with 2418 entries
+[2025-09-14 16:31:52] [DEBUG] Indexer initialized with 2418 entries
+[2025-09-14 16:31:52] [INFO] Starting full reindex
+[2025-09-14 16:31:52] [INFO] Scanning directory: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:31:52] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/test_no_frontmatter.md
+[2025-09-14 16:31:52] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/merge_target.md
+[2025-09-14 16:31:52] [INFO] Indexed 2 files from /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:31:52] [DEBUG] Saved index with 2 entries
+[2025-09-14 16:31:52] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:52] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885512
+[2025-09-14 16:31:52] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:31:52] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:31:52] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:31:52] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:52] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885512
+[2025-09-14 16:31:52] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:31:52] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:31:52] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:31:52] [INFO] Moving /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md to /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/test-project
+[2025-09-14 16:31:52] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:31:52] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885512
+[2025-09-14 16:31:52] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:31:52] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:31:52] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:31:52] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:31:52] [DEBUG] Saved learning data
+[2025-09-14 16:31:52] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:32:22] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:32:22] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885542
+[2025-09-14 16:32:22] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:32:22] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:32:22] [INFO] Starting full reindex
+[2025-09-14 16:32:22] [INFO] Scanning directory: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:32:22] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/test_no_frontmatter.md
+[2025-09-14 16:32:22] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/merge_target.md
+[2025-09-14 16:32:22] [INFO] Indexed 2 files from /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:32:22] [DEBUG] Saved index with 2 entries
+[2025-09-14 16:32:22] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:32:22] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885542
+[2025-09-14 16:32:22] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:32:22] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:32:22] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:32:22] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:32:22] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885542
+[2025-09-14 16:32:22] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:32:22] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:32:22] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:32:22] [INFO] Moving /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md to /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/test-project
+[2025-09-14 16:32:22] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:32:22] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885542
+[2025-09-14 16:32:22] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:32:22] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:32:22] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:32:22] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:32:22] [DEBUG] Saved learning data
+[2025-09-14 16:32:22] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:32:59] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:32:59] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885579
+[2025-09-14 16:32:59] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:32:59] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:32:59] [INFO] Starting full reindex
+[2025-09-14 16:32:59] [INFO] Scanning directory: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:32:59] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/test_no_frontmatter.md
+[2025-09-14 16:32:59] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/merge_target.md
+[2025-09-14 16:32:59] [INFO] Indexed 2 files from /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:32:59] [DEBUG] Saved index with 2 entries
+[2025-09-14 16:32:59] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:32:59] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885579
+[2025-09-14 16:32:59] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:32:59] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:32:59] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:32:59] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:32:59] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885579
+[2025-09-14 16:32:59] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:32:59] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:32:59] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:32:59] [INFO] Moving /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md to /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/test-project
+[2025-09-14 16:32:59] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:32:59] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885579
+[2025-09-14 16:32:59] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:32:59] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:32:59] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:32:59] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:32:59] [DEBUG] Saved learning data
+[2025-09-14 16:32:59] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:33:21] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:33:21] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885601
+[2025-09-14 16:33:21] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:33:21] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:33:21] [INFO] Starting full reindex
+[2025-09-14 16:33:21] [INFO] Scanning directory: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:33:21] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/test_no_frontmatter.md
+[2025-09-14 16:33:21] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/merge_target.md
+[2025-09-14 16:33:21] [INFO] Indexed 2 files from /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:33:21] [DEBUG] Saved index with 2 entries
+[2025-09-14 16:33:21] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:33:21] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885601
+[2025-09-14 16:33:21] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:33:21] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:33:21] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:33:21] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:33:21] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885601
+[2025-09-14 16:33:21] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:33:21] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:33:21] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:33:21] [INFO] Moving /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md to /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/test-project
+[2025-09-14 16:33:21] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:33:21] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885601
+[2025-09-14 16:33:21] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:33:21] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:33:21] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:33:21] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:33:21] [DEBUG] Saved learning data
+[2025-09-14 16:33:21] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:33:43] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:33:43] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885623
+[2025-09-14 16:33:43] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:33:43] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:33:43] [INFO] Starting full reindex
+[2025-09-14 16:33:43] [INFO] Scanning directory: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:33:43] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/test_no_frontmatter.md
+[2025-09-14 16:33:43] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/merge_target.md
+[2025-09-14 16:33:43] [INFO] Indexed 2 files from /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:33:43] [DEBUG] Saved index with 2 entries
+[2025-09-14 16:33:43] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:33:43] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885623
+[2025-09-14 16:33:43] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:33:43] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:33:43] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:33:43] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:33:43] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885623
+[2025-09-14 16:33:43] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:33:43] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:33:43] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:33:43] [INFO] Moving /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md to /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/test-project
+[2025-09-14 16:33:43] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:33:43] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885623
+[2025-09-14 16:33:43] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:33:43] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:33:43] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:33:43] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:33:43] [DEBUG] Saved learning data
+[2025-09-14 16:33:43] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:35:00] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:35:00] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885700
+[2025-09-14 16:35:00] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:35:00] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:35:00] [INFO] Starting full reindex
+[2025-09-14 16:35:00] [INFO] Scanning directory: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:35:00] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/test_no_frontmatter.md
+[2025-09-14 16:35:00] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/merge_target.md
+[2025-09-14 16:35:00] [INFO] Indexed 2 files from /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:35:00] [DEBUG] Saved index with 2 entries
+[2025-09-14 16:35:00] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:35:00] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885700
+[2025-09-14 16:35:00] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:35:00] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:35:00] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:35:00] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:35:00] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885700
+[2025-09-14 16:35:00] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:35:00] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:35:00] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:35:00] [INFO] Moving /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md to /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/test-project
+[2025-09-14 16:35:00] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:35:00] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885700
+[2025-09-14 16:35:00] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:35:00] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:35:00] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:35:00] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:35:00] [DEBUG] Saved learning data
+[2025-09-14 16:35:00] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:35:30] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:35:30] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885730
+[2025-09-14 16:35:30] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:35:30] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:35:30] [INFO] Starting full reindex
+[2025-09-14 16:35:30] [INFO] Scanning directory: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:35:30] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/test_no_frontmatter.md
+[2025-09-14 16:35:30] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/merge_target.md
+[2025-09-14 16:35:30] [INFO] Indexed 2 files from /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:35:30] [DEBUG] Saved index with 2 entries
+[2025-09-14 16:35:30] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:35:30] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885730
+[2025-09-14 16:35:30] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:35:30] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:35:30] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:35:30] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:35:30] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885730
+[2025-09-14 16:35:30] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:35:30] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:35:30] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:35:30] [INFO] Moving /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md to /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/test-project
+[2025-09-14 16:35:30] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:35:30] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885730
+[2025-09-14 16:35:30] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:35:30] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:35:30] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:35:30] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:35:30] [DEBUG] Saved learning data
+[2025-09-14 16:35:30] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:36:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:36:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885768
+[2025-09-14 16:36:08] [DEBUG] Loaded index with 0 entries
+[2025-09-14 16:36:08] [DEBUG] Indexer initialized with 0 entries
+[2025-09-14 16:36:08] [INFO] Starting full reindex
+[2025-09-14 16:36:08] [INFO] Scanning directory: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:36:08] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/test_no_frontmatter.md
+[2025-09-14 16:36:08] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/merge_target.md
+[2025-09-14 16:36:08] [INFO] Indexed 2 files from /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:36:08] [DEBUG] Saved index with 2 entries
+[2025-09-14 16:36:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:36:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885768
+[2025-09-14 16:36:08] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:36:08] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:36:08] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:36:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:36:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885768
+[2025-09-14 16:36:08] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:36:08] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:36:08] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:36:08] [INFO] Moving /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md to /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/test-project
+[2025-09-14 16:36:08] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:36:08] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885768
+[2025-09-14 16:36:08] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:36:08] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:36:08] [DEBUG] Loaded learning data with 3 associations
+[2025-09-14 16:36:08] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:36:08] [DEBUG] Saved learning data
+[2025-09-14 16:36:08] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:38:30] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:38:30] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885910
+[2025-09-14 16:38:30] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:38:30] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:38:30] [INFO] Starting full reindex
+[2025-09-14 16:38:30] [INFO] Scanning directory: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:38:30] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/test_no_frontmatter.md
+[2025-09-14 16:38:30] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/merge_target.md
+[2025-09-14 16:38:30] [INFO] Indexed 2 files from /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:38:30] [DEBUG] Saved index with 2 entries
+[2025-09-14 16:38:30] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:38:30] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885910
+[2025-09-14 16:38:30] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:38:30] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:38:30] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:38:30] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:38:30] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885910
+[2025-09-14 16:38:30] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:38:30] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:38:30] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:38:30] [INFO] Moving /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md to /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/test-project
+[2025-09-14 16:38:30] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:38:30] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885910
+[2025-09-14 16:38:30] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:38:30] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:38:30] [DEBUG] Loaded learning data with 1 associations
+[2025-09-14 16:38:30] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:38:30] [DEBUG] Saved learning data
+[2025-09-14 16:38:30] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:38:59] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:38:59] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885939
+[2025-09-14 16:38:59] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:38:59] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:38:59] [INFO] Starting full reindex
+[2025-09-14 16:38:59] [INFO] Scanning directory: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:38:59] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/test_no_frontmatter.md
+[2025-09-14 16:38:59] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/merge_target.md
+[2025-09-14 16:38:59] [INFO] Indexed 2 files from /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault
+[2025-09-14 16:38:59] [DEBUG] Saved index with 2 entries
+[2025-09-14 16:38:59] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:38:59] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885939
+[2025-09-14 16:38:59] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:38:59] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:38:59] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:38:59] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:38:59] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885939
+[2025-09-14 16:38:59] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:38:59] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:38:59] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md
+[2025-09-14 16:38:59] [INFO] Moving /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md to /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/projects/test-project
+[2025-09-14 16:38:59] [INFO] para-organize.nvim v0.1.0 initialized
+[2025-09-14 16:38:59] [ERROR] Failed to write to temporary file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md.tmp1757885939
+[2025-09-14 16:38:59] [DEBUG] Loaded index with 2 entries
+[2025-09-14 16:38:59] [DEBUG] Indexer initialized with 2 entries
+[2025-09-14 16:38:59] [DEBUG] Loaded learning data with 0 associations
+[2025-09-14 16:38:59] [DEBUG] Learning system initialized with 3 records
+[2025-09-14 16:38:59] [DEBUG] Saved learning data
+[2025-09-14 16:38:59] [DEBUG] Indexing file: /home/matth/Projects/KnowledgeManagementSystem/organize/tests/fixtures/vault/capture/raw_capture/integration_test.md

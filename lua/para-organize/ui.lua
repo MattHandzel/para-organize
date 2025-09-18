@@ -171,9 +171,6 @@ function M.render_suggestions(suggestions)
   vim.notify("Showing main suggestions view", vim.log.levels.DEBUG)
 
   local dirs = indexer.get_para_directories()
-  local content = {
-    "# Organization Pane",
-    "",
 end
 
 -- Render merge view (delegated)
