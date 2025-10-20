@@ -1,0 +1,28 @@
+# Default automation configuration for para-organize.
+
+[vault]
+root = "~/notes"
+capture_dir = "capture/raw_capture"
+
+[state]
+dir = "~/.local/state/para-organize"
+database = "automations.db"
+
+[logging]
+level = "INFO"
+
+[consumers.taskwarrior]
+type = "taskwarrior"
+marker_tag = "todo"
+strip_tags = ["todo"]
+remove_unknown_tags = true
+project_tag_prefix = "project:"
+default_project = ""
+additional_tags = []
+annotation_template = "Captured from {relative_path}"
+data_directory = "~/.task"
+taskrc_path = "~/.taskrc"
+
+[consumers.taskwarrior.backup]
+enabled = true
+directory = "backups/taskwarrior"

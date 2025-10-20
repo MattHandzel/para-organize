@@ -1,0 +1,16 @@
+[Unit]
+Description=Para-organize capture automation dispatcher
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/matth/Projects/KnowledgeManagementSystem/organize
+ExecStart=/usr/bin/env python3 -m scripts.automation.cli
+Environment=PYTHONPATH=/home/matth/Projects/KnowledgeManagementSystem/organize
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

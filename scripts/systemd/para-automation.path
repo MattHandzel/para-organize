@@ -1,0 +1,11 @@
+[Unit]
+Description=Trigger para-organize automation on new capture notes
+
+[Path]
+PathChanged=%h/notes/capture/raw_capture
+PathModified=%h/notes/capture/raw_capture
+PathExistsGlob=%h/notes/capture/raw_capture/*.md
+Unit=para-automation.service
+
+[Install]
+WantedBy=default.target

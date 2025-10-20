@@ -1,0 +1,11 @@
+[Unit]
+Description=Run para-organize capture automations hourly
+
+[Timer]
+OnCalendar=hourly
+AccuracySec=5m
+Persistent=true
+Unit=para-automation.service
+
+[Install]
+WantedBy=timers.target

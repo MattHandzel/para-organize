@@ -15,7 +15,7 @@
   outputs = { self, nixpkgs, flake-utils, neovim-nightly-overlay }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        overlays = [ neovim-nightly-overlay.overlay ];
+        overlays = [ neovim-nightly-overlay.overlays.default ];
         pkgs = import nixpkgs {
           inherit system overlays;
         };
