@@ -3,194 +3,27 @@
 
 local M = {}
 
+local data_mod = require("para-organize.learn.data")
+local features_mod = require("para-organize.learn.features")
+
 -- Module state
 local learning_data = {}
-local learning_file = nil
+local learning_file = vim.fn.stdpath("data") .. "/para-organize/learning.json"
 
--- Initialize learning system
-function M.init()
-  local utils = require("para-organize.utils")
-  
-  -- Set learning data file path
-  learning_file = vim.fn.stdpath("data") .. "/para-organize/learning.json"
-  
-  -- Load existing learning data
-  M.load_data()
-  
-  utils.log("DEBUG", "Learning system initialized with %d records", 
-    vim.tbl_count(learning_data))
+M.load_data = function()
+  learning_data = data_mod.load_data(learning_file)
 end
 
--- Load learning data from disk
-function M.load_data()
-  local utils = require("para-organize.utils")
-  
-  if not utils.path_exists(learning_file) then
-    learning_data = {
-      associations = {},
-      patterns = {},
-      statistics = {
-        total_moves = 0,
-        destinations = {},
-        last_updated = os.time(),
-      },
-    }
-    return
-  end
-  
-  local content = utils.read_file(learning_file)
-  if content then
-    local ok, data = pcall(vim.json.decode, content)
-    if ok and type(data) == "table" then
-      learning_data = data
-      utils.log("DEBUG", "Loaded learning data with %d associations",
-        vim.tbl_count(learning_data.associations or {}))
-    else
-      utils.log("ERROR", "Failed to parse learning data")
-      learning_data = {
-        associations = {},
-        patterns = {},
-        statistics = {
-          total_moves = 0,
-          destinations = {},
-          last_updated = os.time(),
-        },
-      }
-    end
-  end
+M.load_data()
+
+M.save_data = function()
+  data_mod.save_data(learning_file, learning_data)
 end
 
--- Save learning data to disk
-function M.save_data()
-  local utils = require("para-organize.utils")
-  
-  -- Ensure directory exists
-  local learning_dir = vim.fn.fnamemodify(learning_file, ":h")
-  if vim.fn.isdirectory(learning_dir) == 0 then
-    vim.fn.mkdir(learning_dir, "p")
-  end
-  
-  -- Update timestamp
-  learning_data.statistics.last_updated = os.time()
-  
-  -- Save data
-  local content = vim.json.encode(learning_data)
-  if utils.write_file_atomic(learning_file, content) then
-    utils.log("DEBUG", "Saved learning data")
-  else
-    utils.log("ERROR", "Failed to save learning data")
-  end
-end
+M.extract_features = features_mod.extract_features
+M.create_association_key = features_mod.create_association_key
 
--- Record a successful move
-function M.record_move(capture, destination)
-  local config = require("para-organize.config").get()
-  local utils = require("para-organize.utils")
-  
-  -- Extract key features for learning
-  local features = M.extract_features(capture)
-  
-  -- Create association key
-  local association_key = M.create_association_key(features)
-  
-  -- Initialize association if needed
-  if not learning_data.associations[association_key] then
-    learning_data.associations[association_key] = {
-      destinations = {},
-      created_at = os.time(),
-      last_used = os.time(),
-    }
-  end
-  
-  local association = learning_data.associations[association_key]
-  
-  -- Update destination data
-  if not association.destinations[destination] then
-    association.destinations[destination] = {
-      count = 0,
-      first_used = os.time(),
-      last_used = os.time(),
-      success_rate = 1.0,
-    }
-  end
-  
-  local dest_data = association.destinations[destination]
-  dest_data.count = dest_data.count + 1
-  dest_data.last_used = os.time()
-  
-  -- Update association metadata
-  association.last_used = os.time()
-  
-  -- Record patterns
-  M.record_patterns(capture, destination)
-  
-  -- Update statistics
-  learning_data.statistics.total_moves = learning_data.statistics.total_moves + 1
-  
-  if not learning_data.statistics.destinations[destination] then
-    learning_data.statistics.destinations[destination] = 0
-  end
-  learning_data.statistics.destinations[destination] = 
-    learning_data.statistics.destinations[destination] + 1
-  
-  -- Apply decay to old associations
-  M.apply_decay()
-  
-  -- Save data
-  M.save_data()
-  
-  utils.log("INFO", "Recorded move: %s -> %s", capture.path, destination)
-end
-
--- Extract learning features from a capture
-function M.extract_features(capture)
-  local features = {
-    tags = capture.tags or {},
-    sources = capture.sources or {},
-    has_context = capture.context ~= nil,
-    modalities = capture.modalities or {},
-    word_count = 0,
-  }
-  
-  -- Estimate word count from title and aliases
-  if capture.title then
-    features.word_count = #vim.split(capture.title, "%s+")
-  end
-  
-  -- Sort for consistent key generation
-  table.sort(features.tags)
-  table.sort(features.sources)
-  table.sort(features.modalities)
-  
-  return features
-end
-
--- Create association key from features
-function M.create_association_key(features)
-  local key_parts = {}
-  
-  -- Add tags
-  if #features.tags > 0 then
-    table.insert(key_parts, "tags:" .. table.concat(features.tags, ","))
-  end
-  
-  -- Add sources
-  if #features.sources > 0 then
-    table.insert(key_parts, "sources:" .. table.concat(features.sources, ","))
-  end
-  
-  -- Add modalities
-  if #features.modalities > 0 then
-    table.insert(key_parts, "modalities:" .. table.concat(features.modalities, ","))
-  end
-  
-  -- If no specific features, use generic key
-  if #key_parts == 0 then
-    table.insert(key_parts, "generic")
-  end
-  
-  return table.concat(key_parts, "|")
-end
+-- (Leave remaining learning logic and glue here)
 
 -- Record patterns for analysis
 function M.record_patterns(capture, destination)
@@ -416,8 +249,5 @@ function M.import(data)
   end
   return false
 end
-
--- Initialize on module load
-M.init()
 
 return M

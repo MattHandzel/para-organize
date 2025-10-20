@@ -26,8 +26,7 @@ function M.render_capture(ui_state, capture)
       table.insert(content, "")
     end
     if capture.body then
-      for line in capture.body:gmatch("[^
-]+") do
+      for line in capture.body:gmatch("[^\n]+") do
         table.insert(content, line)
       end
     end
