@@ -1470,3 +1470,33 @@ recorded here; they ARE binding precedent:
   demanding the shim deletion; tag_router's runner-driven goldens go
   green against real wiring. Any signal not firing as described = wrong
   landing.
+
+## Test anti-vacuity standards (PERMANENT — mandatory for every seat and verifier from Phase 5 on)
+
+Three named blindness patterns, each proven today by a real
+green-suite-with-broken-guard demonstration:
+1. **Refusal-predicate pins**: mutate the guard away and confirm red;
+   assert at a parameter where the OTHER branch would fire, plus a firing
+   control. (auto_tagger min_tags finding.)
+2. **Constant assertions**: assert the LITERAL value
+   ("consumer:tag_router"), never the imported module constant — flipping
+   ACTOR to "matt" left the whole suite green. Separately assert the
+   constant agrees with the literal. SWEEP DIRECTIVE (scheduled with
+   Phase-4 verification): grep tests for module-constant imports compared
+   against that module's own output — known exposed shapes: ACTOR,
+   STORE_SCHEMA_VERSION, ROUTE_SUGGESTION_SCORE,
+   DEFAULT_PURGE_RETENTION_DAYS, status/vocabulary constants.
+3. **Must-not-be-connected invariants**: pin the CONNECTION
+   (op_ctx.on_record is None), not just today's consequence — a
+   wired-but-currently-harmless connection survives a consequence check.
+Mutation-audit before handback is the seat standard (24/24, 12/12, 7/7 so
+far).
+
+DESIGNED TRIPWIRE (Phase-5 implementer, do not misread as regression):
+tag_router's `op_ctx.on_record is None` pin is correct TODAY because
+learn.record_action does not filter by actor. The standing Phase-5 ruling
+moves enforcement INTO learn.record_action (folds only Matt-decided
+actions); when that lands, on_record becomes safely wireable globally and
+this connection-pin WILL fail BY DESIGN — swap it for the callee-side pin
+(wired on_record + route-actor record ⇒ learning.json unchanged) in the
+same change that lands the filter.
