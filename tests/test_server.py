@@ -35,6 +35,7 @@ from organize_core.paths import CorePaths
 from organize_core.server import (
     EVENT_INDEX_UPDATED,
     EVENT_OP_PROGRESS,
+    INTERNAL_ERROR,
     INVALID_PARAMS,
     INVALID_REQUEST,
     METHOD_NOT_FOUND,
@@ -597,9 +598,14 @@ def test_meta_set_rejects_non_object_changes(client: RpcClient) -> None:
 
 
 #: Every OBJECT-TYPED request field, with the method that carries it.
+#: `filters` appears TWICE on purpose — `session.start` filters the backlog,
+#: while every mutating method takes its own `filters` through
+#: `OperationContext` for the doc-12 record. Two code paths, one field name,
+#: so both must validate identically.
 _OBJECT_TYPED_FIELDS: tuple[tuple[str, str, dict[str, Any]], ...] = (
     ("criteria", "search.query", {}),
     ("filters", "session.start", {}),
+    ("filters", "folder.create", {"para_type": "areas", "name": "ctx-filters"}),
     ("changes", "meta.set", {"path": QUIRK_FILES["scalar_tags"]}),
 )
 
@@ -625,6 +631,22 @@ def test_an_object_typed_field_still_rejects_a_populated_array(
     error = client.error(method, **extra, **{field: ["tags"]})
     assert error["code"] == INVALID_PARAMS
     assert field in error["message"]
+
+
+def test_operation_context_filters_reject_an_array_as_a_client_error(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    """`OperationContext.filters` was built with `dict(raw or {})`, so a
+    non-empty ARRAY raised ValueError and escaped as -32603 INTERNAL_ERROR —
+    the core blaming itself for a malformed request. It is a -32602 naming
+    the field, and the operation must not have run."""
+    error = client.error(
+        "folder.create", para_type="areas", name="never-created", filters=["tags"]
+    )
+    assert error["code"] == INVALID_PARAMS
+    assert error["code"] != INTERNAL_ERROR
+    assert "filters" in error["message"]
+    assert not (vault_of(server) / "areas/never-created").exists()
 
 
 def test_meta_set_refuses_a_no_ai_note_for_an_ai_actor(client: RpcClient) -> None:

@@ -992,9 +992,13 @@ def test_new_folder_accepts_the_singular_ui_name(ctx: OperationContext, fixture_
 def test_new_folder_rejects_separators_and_empty_names(
     ctx: OperationContext, fixture_vault: Path
 ) -> None:
+    """An unusable folder name is an ADDRESSING failure, so it RAISES rather
+    than returning ok=False — the same taxonomy class as an unknown PARA
+    type, so a client sees ONE `error.data.kind` for every way of
+    misaddressing `folder.create`."""
     for name in ("", "   ", "a/b", "..", "a\\b"):
-        result = new_folder(ctx, "areas", name)
-        assert result.ok is False, name
+        with pytest.raises(ConfigError):
+            new_folder(ctx, "areas", name)
     assert not (fixture_vault / "areas/a").exists()
 
 

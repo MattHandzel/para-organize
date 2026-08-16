@@ -1908,8 +1908,11 @@ def new_folder(ctx: OperationContext, para_type: str, name: str) -> OperationRes
 
     ``para_type`` addresses a ``vault.para_folders`` KEY, so it is PLURAL —
     but it also accepts the singular (``project``), because the UI's
-    ``<leader>np`` speaks singular. An unknown value raises ``ConfigError``
-    (it is an addressing failure); a bad ``name`` still returns ``ok=False``.
+    ``<leader>np`` speaks singular.
+
+    Every ADDRESSING failure raises ``ConfigError``: an unknown ``para_type``,
+    an empty ``name``, and a ``name`` carrying a path separator. Only
+    WORLD-STATE failures (an unwritable PARA root) return ``ok=False``.
 
     Spec 05 §6 also says "refresh folder caches/index dirs". No index call is
     needed: ``VaultIndex.para_subfolders`` enumerates directories from DISK,
@@ -1935,17 +1938,22 @@ def new_folder(ctx: OperationContext, para_type: str, name: str) -> OperationRes
             hint="valid values: " + ", ".join(sorted(folders)),
         )
 
+    # Both name checks are ADDRESSING failures for the same reason the
+    # unknown-PARA-type one above is: the request never named a folder that
+    # could be created, so there is no operation to attempt and no FAILED
+    # oplog line to write. Same taxonomy class, so a client branching on
+    # `error.data.kind` sees one kind for every way of misaddressing
+    # `folder.create`.
     clean = (name or "").strip()
     if not clean:
-        return _fail(ctx, "create_folder", root, None, "folder name is empty", now)
+        raise ConfigError(
+            "folder name is empty",
+            hint="pass the name of the folder to create under the PARA root, e.g. 'newsletter'",
+        )
     if "/" in clean or "\\" in clean or clean in {".", ".."} or "\x00" in clean:
-        return _fail(
-            ctx,
-            "create_folder",
-            root,
-            None,
+        raise ConfigError(
             f"folder name {name!r} contains a path separator; only a single folder name is allowed",
-            now,
+            hint="create one folder at a time, naming it without '/', '\\', '.' or '..'",
         )
 
     folder = root / folders[key] / clean

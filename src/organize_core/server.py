@@ -1475,7 +1475,7 @@ class OrganizeServer:
             auto_tags_present=tuple(
                 str(tag) for tag in (params.get("auto_tags_present") or ())
             ),
-            filters=dict(params.get("filters") or {}),
+            filters=_filters_from(params.get("filters")),
             describe=lambda folder: get_description(folder, self.index, self.config),
             on_record=self._learn_from_action,
         )
@@ -1637,6 +1637,23 @@ def _opt_rank(raw: Any) -> int | None:
     if isinstance(raw, bool) or not isinstance(raw, int):
         raise _invalid_params("'chosen_rank' must be an integer (1 == the top suggestion)")
     return raw
+
+
+def _filters_from(raw: Any) -> dict[str, Any]:
+    """``params['filters']`` as recorded on the ActionRecord (spec 12 §2).
+
+    This was ``dict(raw or {})``, which raised ValueError on a non-empty
+    ARRAY — a client TYPE error escaping as -32603 INTERNAL_ERROR, i.e. the
+    core reporting its own fault for a malformed request. Same shape and
+    message as ``session.start``'s ``filters``, so one field name never
+    validates two ways.
+    """
+    if raw is None:
+        return {}
+    raw = empty_array_as_object(raw)
+    if not isinstance(raw, dict):
+        raise _invalid_params("'filters' must be an object of filter=value pairs")
+    return dict(raw)
 
 
 def _durations_from(raw: Any) -> dict[str, int]:
