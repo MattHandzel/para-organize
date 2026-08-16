@@ -1414,3 +1414,29 @@ recorded here; they ARE binding precedent:
   firing control (same note minus no-ai IS processed). A pin that passes
   by route-miss or by min_tags is worse than none. Mutation-audit before
   handback (auto_tagger: 24/24 caught) is the seat standard.
+
+## Phase-4 rulings, tag_router close (architect, routed 2026-08-16)
+
+- **Stub-gate upgrade (replaces plain retirement)**: the three pending-set
+  tests get RE-POINTED at a synthetic stub type registered inside the
+  test — the unimplemented-types-refused gate lives PERMANENTLY for any
+  future consumer. Only test_routes_describe_write_is_phase_4 retires
+  outright (set_description landed).
+- **Index staleness after applies**: ONE end-of-run flush in
+  cmd_run_consumers via op_context's index (composition root owns the
+  index lifecycle once op_context lands — part of that landing spec).
+  Per-note flush rejected (full-snapshot rewrite per note).
+- **applied/results metadata asymmetry**: pinned documented shape;
+  readers must not zip them; no rename churn.
+- **auto=true + mode="integrate" fails AT CONFIG VALIDATION**:
+  validate_config rejects with ConfigError + hint ("integrate ships in
+  Phase 5; set auto=false to keep this route interactive-only until
+  then"); check lifts when Phase 5 lands; the per-note ERROR branch stays
+  as unreachable defense-in-depth. Rationale: per-note ERROR = exit 1 +
+  OnFailure alert EVERY 10 MINUTES for legal config — an alert storm that
+  trains the operator to ignore the channel. Fail once, at the door
+  (03 §1 voice).
+- **Both-ways seam pin (verifier pattern, permanent)**: a shim-retirement
+  test must fail BOTH when the base class grows the hook (delete the
+  shim) AND when the base gains the hook without the runner call — the
+  half-landed state made undeniable.
