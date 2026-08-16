@@ -1,0 +1,25 @@
+# OPTIONAL low-latency trigger (spec 06 §5): react to a capture landing
+# instead of waiting up to 10 minutes for the timer. Enable it only if you
+# want captures processed within seconds; the timer alone is sufficient.
+#
+# CAUTION — MakeDirectory=true creates the watched paths if they are absent.
+# On a machine where the vault is a network/removable mount that has not
+# come up yet, that means systemd creates an EMPTY ~/notes/capture/raw_capture
+# and the pipeline then scans nothing. That is survivable by design: spec
+# 06 §1 forbids purging emission history when a configured scan dir is
+# missing or empty (08 §B5), so a transient mount cannot make the store
+# forget a year of checkpoints. It is still worth knowing before you see an
+# empty directory appear and wonder who made it.
+
+[Unit]
+Description=organize — watch the vault for new captures and notes
+
+[Path]
+Unit=organize-pipeline.service
+# ~/notes is the symlink to ~/Obsidian/Main (spec 02: the two resolve equal).
+PathChanged=%h/notes/capture/raw_capture
+PathChanged=%h/notes/resources
+MakeDirectory=true
+
+[Install]
+WantedBy=paths.target

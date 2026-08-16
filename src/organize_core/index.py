@@ -49,6 +49,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime
@@ -399,7 +400,7 @@ class VaultIndex:
                 if name.startswith("."):  # .obsidian, .git, .trash …
                     continue
                 child_rel = f"{rel_dir}/{name}" if rel_dir else name
-                if _is_ignored(child_rel, patterns):
+                if is_ignored(child_rel, patterns):
                     continue
                 keep.append(name)
             dirnames[:] = sorted(keep)
@@ -408,7 +409,7 @@ class VaultIndex:
                 if not name.endswith(".md"):
                     continue  # .wav/.txt/.pdf interleaved in raw_capture (02)
                 rel = f"{rel_dir}/{name}" if rel_dir else name
-                if _is_ignored(rel, patterns):
+                if is_ignored(rel, patterns):
                     continue
                 path = Path(dirpath) / name
                 record = self._build_record(path, rel, max_size)
@@ -548,7 +549,7 @@ class VaultIndex:
             if not entry.is_dir() or entry.name.startswith("."):
                 continue
             rel = _relative_posix(str(self.root), str(entry))
-            if _is_ignored(rel, patterns):
+            if is_ignored(rel, patterns):
                 continue
             children.append(entry)
         return children
@@ -563,7 +564,7 @@ class VaultIndex:
                 if not entry.is_dir() or entry.name.startswith("."):
                     continue
                 rel = _relative_posix(str(self.root), str(entry))
-                if _is_ignored(rel, patterns):
+                if is_ignored(rel, patterns):
                     continue
                 subdirs.append(entry)
         prefix = str(target).rstrip(os.sep) + os.sep
@@ -804,12 +805,20 @@ def _has_glob(pattern: str) -> bool:
     return any(ch in pattern for ch in "*?[")
 
 
-def _is_ignored(rel: str, patterns: tuple[str, ...]) -> bool:
+def is_ignored(rel: str, patterns: Sequence[str]) -> bool:
     """``ignore_patterns`` are GLOBS over the vault-relative path (08 §A13).
 
     A pattern matches when it globs the whole relative path, when it is a
     path prefix of it (directory containment), or — for patterns without a
     ``/`` — when it globs any single path component.
+
+    PUBLIC because the automation pipeline's ingestion walk applies the same
+    ``vault.ignore_patterns`` (spec 06 §1) and had grown a second copy of
+    this rule; two implementations of one rule drift. Consumer
+    ``include_paths``/``exclude_paths`` are a DIFFERENT rule (06 §2:
+    prefix-or-glob, no component match, so a bare ``resources`` means the
+    top-level folder and nothing else) and deliberately stay in
+    ``consumers/runner.py``.
     """
     if not rel:
         return False
@@ -839,7 +848,7 @@ def _indexable(rel: str, patterns: tuple[str, ...]) -> bool:
         return False
     if any(component.startswith(".") for component in rel.split("/")[:-1]):
         return False
-    return not _is_ignored(rel, patterns)
+    return not is_ignored(rel, patterns)
 
 
 def _body_only(path: Path) -> str:

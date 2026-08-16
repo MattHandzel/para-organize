@@ -427,11 +427,8 @@ RESERVED_CONFIG_LEAVES: dict[str, str] = {
     # `vault.scan_dirs`; the folder that drives PARA classification is
     # `vault.capture_folder` (of which this is a subfolder).
     "vault.raw_capture_folder": "spec 02 — health-check only (config.check_vault)",
-    # Also health-check-only today. `VaultIndex.scan` deliberately walks the
-    # whole vault root (its docstring says so) and filters with
-    # `ignore_patterns`; `scan_dirs` is the automation pipeline's WATCH set
-    # (spec 06 §2), which lands with `run-consumers` in Phase 3.
-    "vault.scan_dirs": "spec 06 §2 — consumer watch set (Phase 3); health-checked today",
+    # (`vault.scan_dirs` left this list at Phase 3: consumers/runner.py walks
+    # it and consumers/store.py's purge guard keys off it — spec 06 §2.)
     # spec 03 §7: "Incremental: debounced (`incremental_debounce` ms)
     # BufWritePost hook re-indexes the written file". Under doc 10 that
     # trigger lives in the nvim client (Phase 2), not in the core; the core's
@@ -480,6 +477,16 @@ def test_every_config_leaf_has_a_reader() -> None:
     it unchanged. This one asserts each leaf is referenced by at least one
     module outside `config.py`, with a spec-cited allowlist for the keys
     deliberately reserved for a later phase.
+
+    Reader = an ATTRIBUTE ACCESS or a bound NAME, never a bare string
+    constant. That distinction is load-bearing (found in Phase 3): both
+    Phase-3 consumers emit the spec-mandated flashcard frontmatter value
+    `"status": "review"` (06 §3.2/§3.3), and counting string constants let
+    that retire the allowlist entry for `[integrate] review` — a key that is
+    still Phase 5 and still genuinely unread. Config is a dataclass tree, so
+    every real reader goes through attribute access anyway; any consumer that
+    ever wrote a word matching a config key would otherwise silently blank
+    out this gate.
     """
     import ast
 
@@ -495,8 +502,6 @@ def test_every_config_leaf_has_a_reader() -> None:
                 referenced.add(node.attr)
             elif isinstance(node, ast.Name):
                 referenced.add(node.id)
-            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-                referenced.add(node.value)
 
     unread = [leaf for leaf in _config_leaves() if leaf.rsplit(".", 1)[-1] not in referenced]
 

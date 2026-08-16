@@ -26,7 +26,9 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from organize_core.config import Config, ConsumerConfig
+from organize_core.frontmatter import Frontmatter, fields_are_no_ai
 from organize_core.llm import LLMClient
+from organize_core.paths import CorePaths
 
 
 @dataclass(frozen=True)
@@ -44,13 +46,27 @@ class NotePayload:
 
     @property
     def no_ai(self) -> bool:
-        """``no-ai: true`` in frontmatter (vault law, spec 02)."""
-        raise NotImplementedError
+        """``no-ai: true`` in frontmatter (vault law, spec 02).
+
+        Delegates to the shared frontmatter predicate — ONE no-ai rule in
+        the codebase. Ambiguous truthy values (the STRING ``"true"``) count
+        as True: for a do-not-touch flag, over-matching is the safe error.
+        """
+        return fields_are_no_ai(self.frontmatter)
 
     def tags(self) -> list[str]:
         """Frontmatter tags coerced to a list via the shared frontmatter
-        helpers — NEVER a hand-rolled re-parse (08 §B9)."""
-        raise NotImplementedError
+        list coercion — NEVER a hand-rolled re-parse (08 §B9).
+
+        Scalar ⇒ one element, list ⇒ list, missing/None ⇒ ``[]``; values are
+        stringified. RAW spellings, deliberately: vault-tag normalization
+        (``frontmatter.normalize_tag``) exists to match tags to FOLDERS, and
+        the taskwarrior consumer needs a different, domain-specific
+        normalization (06 §3.1) — normalizing here would silently rewrite
+        every underscored tag in Matt's task history.
+        """
+        fields = dict(self.frontmatter) if self.frontmatter else {}
+        return [str(value) for value in Frontmatter(fields=fields).get_list("tags")]
 
 
 class Status(Enum):
@@ -78,6 +94,13 @@ class RunContext:
     config: Config
     dry_run: bool = False
     llm: LLMClient | None = None  # None when disabled/unavailable
+    #: Resolved state/config/runtime locations (spec 10 §3). Populated by the
+    #: runner from the composition root so a consumer that needs a STATE
+    #: path — taskwarrior's ``<state>/backups/taskwarrior/<UTC-ts>`` snapshot
+    #: (06 §3.1) — can derive it instead of guessing or reading the
+    #: environment itself. ``None`` only in unit tests that build a context
+    #: by hand.
+    paths: CorePaths | None = None
 
 
 class Consumer(ABC):

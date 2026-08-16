@@ -56,6 +56,7 @@ import copy
 import json
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -355,13 +356,22 @@ def merge_sources(existing: list[str], new: list[str]) -> list[str]:
     return merged
 
 
-def is_no_ai(doc: Document) -> bool:
-    """True iff frontmatter contains ``no-ai: true`` (vault law, spec 02).
-    Every automated/LLM write path must check this before touching a file."""
-    fm = doc.frontmatter
-    if fm is None:
+def fields_are_no_ai(fields: Mapping[str, Any] | None) -> bool:
+    """The field-level ``no-ai`` rule, over a plain frontmatter mapping.
+
+    ONE rule in the codebase (Phase-3 architect ruling): :func:`is_no_ai`
+    and ``NotePayload.no_ai`` both call THIS — the automation pipeline hands
+    consumers a ``dict`` of already-parsed frontmatter, not a Document, and
+    a second hand-rolled predicate is exactly the 08 §B9 defect class.
+
+    Key matching is case-insensitive and treats ``_`` and ``-`` alike, so
+    ``no_ai`` and ``No-AI`` count. Ambiguous truthy values (the STRING
+    ``"true"``, ``yes``, ``on``, ``1``) count as no_ai — for a do-not-touch
+    flag, over-matching is the safe direction of error.
+    """
+    if not fields:
         return False
-    for key, value in fm.fields.items():
+    for key, value in fields.items():
         if not isinstance(key, str):
             continue
         if key.strip().lower().replace("_", "-") != "no-ai":
@@ -372,6 +382,15 @@ def is_no_ai(doc: Document) -> bool:
             return value.strip().lower() in {"true", "yes", "on", "1"}
         return bool(value) and not isinstance(value, (list, dict))
     return False
+
+
+def is_no_ai(doc: Document) -> bool:
+    """True iff frontmatter contains ``no-ai: true`` (vault law, spec 02).
+    Every automated/LLM write path must check this before touching a file."""
+    fm = doc.frontmatter
+    if fm is None:
+        return False
+    return fields_are_no_ai(fm.fields)
 
 
 # --- internals -------------------------------------------------------------

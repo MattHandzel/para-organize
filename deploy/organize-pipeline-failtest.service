@@ -1,0 +1,25 @@
+# A deliberate failure, wired to the SAME alerter as the real pipeline.
+#
+# This is the verification step of the cutover checklist (spec 09 §5.5:
+# "verify a failing run actually reports failure"). Starting this unit
+# proves the OnFailure= path end to end without touching the pipeline, the
+# vault, or any state:
+#
+#     systemctl --user start organize-pipeline-failtest.service
+#     journalctl --user -t organize-pipeline-alert -n 20 --no-pager
+#
+# Expected: the unit fails with status 17, and the alerter logs a marker
+# naming organize-pipeline-failtest.service. If you see nothing, the alert
+# path is broken — fix that BEFORE trusting the pipeline, because a silent
+# alerter is exactly how the last outage lasted three months.
+
+[Unit]
+Description=organize — deliberate failure to prove OnFailure alerting works
+OnFailure=organize-pipeline-failure@%n.service
+
+[Service]
+Type=oneshot
+SyslogIdentifier=organize-pipeline-failtest
+# An arbitrary distinctive exit code, so the alert can be traced to this
+# unit rather than to a real failure.
+ExecStart=/bin/sh -c 'echo "deliberate failure: proving OnFailure fires" >&2; exit 17'

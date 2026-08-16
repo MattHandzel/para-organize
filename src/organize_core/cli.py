@@ -41,9 +41,16 @@ Two wiring facts worth stating once:
   and the index snapshot and learning.json are not written.
 
 Note: ``auto-organize`` exists from day one and reports "not implemented"
-until Phase 6 (spec 13 §3 cross-check list); ``run-consumers`` likewise
-until the pipeline lands (spec 06, Phase 3) — ``--list-consumers`` already
-works because it constructs nothing (06 §4 / 08 §B2).
+until Phase 6 (spec 13 §3 cross-check list). ``run-consumers`` is live as of
+Phase 3 and is where the pipeline's composition happens: this module opens
+AND MIGRATES the automations store, then hands it to
+``consumers.runner.run_consumers`` (which never migrates, so a run can never
+race a half-migrated schema — 06 §1). ``--list-consumers`` still constructs
+nothing and needs no config (06 §4 / 08 §B2 — eager construction with I/O in
+constructors is what made one bad consumer take all four down for three
+months). ``migrate-store`` is the standalone cutover door for the same
+migration (09 §5.4); it refuses a database inside a live state directory
+unless ``--yes-live`` says so.
 """
 
 from __future__ import annotations
@@ -52,6 +59,7 @@ import argparse
 import json
 import logging
 import re
+import shutil
 import sys
 import threading
 import time
@@ -82,6 +90,8 @@ from organize_core.config import (
     metadata_fields_by_key,
 )
 from organize_core.consumers import get_consumer_types
+from organize_core.consumers.runner import UnknownConsumerError, run_consumers
+from organize_core.consumers.store import STORE_SCHEMA_VERSION, AutomationStore
 from organize_core.errors import (
     ConfigError,
     OperationError,
@@ -102,7 +112,7 @@ from organize_core.fileops import (
 )
 from organize_core.frontmatter import load_file
 from organize_core.index import NoteRecord, QueryCriteria, VaultIndex
-from organize_core.paths import CorePaths, expand
+from organize_core.paths import CorePaths, default_env, expand
 from organize_core.session import start_session
 from organize_core.suggest import CaptureFeaturesView, Suggestion, generate_candidates
 from organize_core.suggest import suggest as rank_suggestions
@@ -126,6 +136,7 @@ SUBCOMMANDS: tuple[str, ...] = (
     "actions",
     "auto-organize",
     "run-consumers",
+    "migrate-store",
     "health",
     "serve",
 )
@@ -293,6 +304,30 @@ def build_parser() -> argparse.ArgumentParser:
                    help="run only this consumer (repeatable; case-insensitive)")
     p.add_argument("--list-consumers", action="store_true",
                    help="list registered consumer types (constructs nothing)")
+    p.add_argument("--json", action="store_true", help="machine-readable run summary")
+    # Also accepted AFTER the subcommand, because `organize run-consumers
+    # --dry-run` is what anyone types (09 §5.6 makes the dry run the first
+    # supervised cutover step, so it must not be a flag you can put in the
+    # wrong place). SUPPRESS, not `default=False`: an argparse subparser
+    # default would otherwise overwrite the global `--dry-run` in the shared
+    # namespace and silently turn `organize --dry-run run-consumers` into a
+    # real run.
+    p.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS,
+                   help="evaluate everything, write nothing (spec 09 §5.6)")
+
+    p = sub.add_parser(
+        "migrate-store",
+        help="migrate automations.db to the current schema (spec 06 §1, 09 §5.4)",
+    )
+    p.add_argument("--db", metavar="PATH",
+                   help="database to migrate (default: <state-dir>/automations.db)")
+    p.add_argument("--backup-first", action="store_true",
+                   help="copy the database (and any -wal/-shm) next to it before migrating "
+                        "— 09 §5.4 'back it up first'")
+    p.add_argument("--yes-live", action="store_true",
+                   help="permit migrating a database inside a LIVE state directory; "
+                        "without it such a path is refused (cutover belt)")
+    p.add_argument("--json", action="store_true", help="machine-readable migration report")
 
     p = sub.add_parser("health", help="config + vault + core diagnostics (spec 03 §2, 10)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -1293,14 +1328,215 @@ def cmd_auto_organize(args: argparse.Namespace) -> int:
 
 
 def cmd_run_consumers(args: argparse.Namespace) -> int:
+    """One pipeline run (spec 06 §1/§4).
+
+    Composition-root duties, in this order and no other:
+
+    1. ``--list-consumers`` short-circuits BEFORE config is loaded and before
+       anything is constructed (06 §4 / 08 §B2 — eager construction with I/O
+       in constructors is what made one bad consumer take all four down).
+    2. Open AND MIGRATE the store here. ``run_consumers`` never migrates (its
+       docstring says so), so a run can never race a half-migrated schema,
+       and every store method refuses an un-migrated v1 DB loudly.
+    3. Print the 06 §4 summary lines on STDOUT (the journal gets them through
+       logging as well; systemd reads stdout).
+    4. Exit 0 clean, 1 if any consumer errored, 2 for an unknown
+       ``--consumer`` name (a usage error, hence the distinct exception type
+       rather than message sniffing).
+    """
     if args.list_consumers:
         # Spec 06 §4 / 08 §B2: listing constructs nothing — no config needed.
         for name in sorted(get_consumer_types()):
             _emit(name)
         return 0
-    _warn("run-consumers: not implemented (the automation pipeline arrives in Phase 3, spec 06)")
-    _warn("hint: `organize run-consumers --list-consumers` already lists the registered consumer types")
-    return 1
+
+    paths, config = _load(args)
+    dry_run = bool(getattr(args, "dry_run", False))
+
+    with AutomationStore(paths.automations_db) as store:
+        report = store.migrate()
+        if report.changed:
+            _warn(report.summary())
+        logger.info("%s", report.summary())
+        try:
+            summary = run_consumers(
+                config,
+                store,
+                only=args.consumer,
+                dry_run=dry_run,
+                paths=paths,
+            )
+        except UnknownConsumerError as exc:
+            # 06 §4: unknown --consumer is a USAGE error → exit 2, not the
+            # exit 1 that main() gives every other OrganizeError.
+            print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            if exc.hint:
+                print(f"hint: {exc.hint}", file=sys.stderr)
+            return 2
+
+    if args.json:
+        _json_out(
+            {
+                "dry_run": summary.dry_run,
+                "notes_scanned": summary.notes_scanned,
+                "duration_seconds": round(summary.duration_seconds, 3),
+                "purged": summary.purged,
+                "errors": summary.errors,
+                "exit_code": summary.exit_code,
+                "migration": {
+                    "from_version": report.from_version,
+                    "to_version": report.to_version,
+                    "changed": report.changed,
+                },
+                "consumers": [
+                    {
+                        "name": c.name,
+                        "success": c.success,
+                        "skip": c.skip,
+                        "limit": c.limit,
+                        "error": c.error,
+                        "filtered": c.filtered,
+                        "would_process": c.would_process,
+                        "duration_seconds": round(c.duration_seconds, 3),
+                        "failures": list(c.failures),
+                    }
+                    for c in summary.consumers
+                ],
+            }
+        )
+    else:
+        for line in summary.lines():
+            _emit(line)
+    return summary.exit_code
+
+
+#: State directories that belong to a RUNNING system. ``migrate-store``
+#: refuses to touch a database inside one without ``--yes-live`` — the
+#: cutover (09 §5.4) is the one time this command is aimed at real data, and
+#: it should be aimed deliberately. Relative to ``$HOME`` from
+#: ``paths.default_env()`` (never ``os.environ`` directly, decision 4), plus
+#: the XDG overrides if they are set.
+def _live_state_dirs() -> list[Path]:
+    env = default_env()
+    out: list[Path] = []
+
+    def add(raw: str | None, *parts: str) -> None:
+        if not raw:
+            return
+        try:
+            # No expanduser(): `raw` already comes from paths.default_env(),
+            # so a `~` here would be a literal directory name (and the
+            # repo-hygiene gate bans the environment read besides).
+            out.append(Path(raw).joinpath(*parts).resolve())
+        except (OSError, RuntimeError):  # pragma: no cover - exotic env
+            return
+
+    home = env.get("HOME")
+    # The live legacy pipeline (CLAUDE.md: never touched without a migration
+    # step and Matt's sign-off).
+    add(home, ".local", "state", "para-organize")
+    add(home, ".config", "para-organize")
+    # This build's own default state dir, when nothing overrode it.
+    add(home, ".local", "share", "organize-core")
+    add(env.get("XDG_STATE_HOME"), "para-organize")
+    add(env.get("XDG_DATA_HOME"), "organize-core")
+    return out
+
+
+def _is_live_state_path(db_path: Path) -> Path | None:
+    """The live directory ``db_path`` sits in, or None."""
+    resolved = db_path.resolve()
+    for live in _live_state_dirs():
+        if resolved == live or live in resolved.parents:
+            return live
+    return None
+
+
+def _backup_database(db_path: Path) -> list[Path]:
+    """Copy the DB and any WAL sidecars next to themselves, timestamped.
+
+    Copies rather than moves, and never overwrites: a backup step that can
+    destroy the thing it is backing up is worse than none (09 §5.4).
+    """
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    made: list[Path] = []
+    for suffix in ("", "-wal", "-shm"):
+        source = db_path.with_name(db_path.name + suffix)
+        if not source.is_file():
+            continue
+        target = source.with_name(f"{source.name}.backup-{stamp}")
+        if target.exists():  # pragma: no cover - same-second rerun
+            raise OperationError(
+                f"backup target already exists: {target}",
+                hint="wait a second and retry, or move the existing backup aside",
+            )
+        shutil.copy2(source, target)
+        made.append(target)
+    return made
+
+
+def cmd_migrate_store(args: argparse.Namespace) -> int:
+    """Migrate ``automations.db`` to the current schema (06 §1, 09 §5.4).
+
+    This is the cutover command. It prints the MigrationReport line, which
+    is the artefact to paste into the cutover log, and it is idempotent — a
+    second run reports ``no changes`` and writes nothing.
+    """
+    paths = _resolve_paths(args)
+    _configure_logging(args)
+    db_path = expand(args.db) if args.db else paths.automations_db
+
+    live = _is_live_state_path(db_path)
+    if live is not None and not args.yes_live:
+        raise OperationError(
+            f"refusing to migrate {db_path}: it is inside the live state directory {live}",
+            hint="back the file up and pass --yes-live if this really is the cutover "
+            "(spec 09 §5.4), or point --db at a copy",
+        )
+
+    if not db_path.exists():
+        _warn(f"note: {db_path} does not exist yet — creating an empty v{STORE_SCHEMA_VERSION} store")
+
+    backups: list[Path] = []
+    if args.backup_first:
+        backups = _backup_database(db_path)
+        for made in backups:
+            _warn(f"backed up: {made}")
+    elif db_path.exists():
+        _warn(
+            "warning: migrating without a backup — 09 §5.4 says back it up first "
+            "(use --backup-first)"
+        )
+
+    with AutomationStore(db_path) as store:
+        before = store.schema_version()
+        report = store.migrate()
+
+    if args.json:
+        _json_out(
+            {
+                "database": str(db_path),
+                "from_version": report.from_version,
+                "to_version": report.to_version,
+                "changed": report.changed,
+                "created": report.created,
+                "no_op": report.no_op,
+                "kept_success": report.kept_success,
+                "kept_skip": report.kept_skip,
+                "deleted_filtered": report.deleted_filtered,
+                "reset_retryable": report.reset_retryable,
+                "notes_kept": report.notes_kept,
+                "anomalies": list(report.anomalies),
+                "backups": [str(b) for b in backups],
+            }
+        )
+    else:
+        _emit(f"database: {db_path}")
+        _emit(f"schema before: v{before}")
+        _emit(report.summary())
+        for anomaly in report.anomalies:
+            _warn(f"anomaly: {anomaly}")
+    return 0
 
 
 def _state_issues(paths: CorePaths, config: Config) -> list[HealthIssue]:
@@ -1503,6 +1739,7 @@ _HANDLERS = {
     "actions": cmd_actions,
     "auto-organize": cmd_auto_organize,
     "run-consumers": cmd_run_consumers,
+    "migrate-store": cmd_migrate_store,
     "health": cmd_health,
     "serve": cmd_serve,
 }

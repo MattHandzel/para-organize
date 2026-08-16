@@ -156,9 +156,21 @@ def test_the_scoring_layer_never_reads_a_clock(module: str) -> None:
 
 # --- decision 6: no shelling out for filesystem work (05 §1.6) -------------
 
-#: ``llm.py`` is the one module that may spawn a process — the ``claude-cli``
-#: backend (06 §3.2), which is a network client, not filesystem work.
-SUBPROCESS_ALLOWED: frozenset[str] = frozenset({"llm"})
+#: The modules that may spawn a process (Phase-3 architect ruling). The
+#: exemption is for spawning an EXTERNAL TOOL the spec names BY NAME —
+#: ``llm.py``'s ``claude-cli`` backend (09 §2), ``task`` (06 §3.1),
+#: ``yt-dlp`` (06 §3.2), the research agent command (06 §3.4). It is never
+#: an exemption for FILESYSTEM work: no find/ls/cp/mv/rm equivalents, ever
+#: (spec 05 §1.6 still binds). A module that genuinely needs ``Popen``
+#: requests a ruling rather than editing this set.
+SUBPROCESS_ALLOWED: frozenset[str] = frozenset(
+    {
+        "llm",
+        "consumers.deep_research",
+        "consumers.taskwarrior",
+        "consumers.learn",
+    }
+)
 
 
 @pytest.mark.parametrize("module", MODULES)
@@ -169,6 +181,74 @@ def test_no_module_shells_out_for_filesystem_work(module: str) -> None:
         return
     used = _attribute_names(_tree(module)) & {"subprocess", "system", "popen"}
     assert used == set(), f"{module}.py must not shell out (found {sorted(used)})"
+
+
+def _subprocess_spawn_calls(tree: ast.Module) -> list[ast.Call]:
+    """Every ``subprocess.run``/``.Popen``/``.call``/``.check_output`` call."""
+    spawners = {"run", "Popen", "call", "check_call", "check_output"}
+    out: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr in spawners
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "subprocess"
+        ):
+            out.append(node)
+    return out
+
+
+@pytest.mark.parametrize("module", sorted(SUBPROCESS_ALLOWED))
+def test_an_allowlisted_module_never_uses_a_shell(module: str) -> None:
+    """The exemption buys ONE thing: argv-list spawning of a named tool.
+    ``shell=True`` turns a config-supplied command into an injection surface
+    (08 §A28), so it is structurally banned even where spawning is allowed."""
+    offenders = [
+        call.lineno
+        for call in _subprocess_spawn_calls(_tree(module))
+        for kw in call.keywords
+        if kw.arg == "shell" and not (isinstance(kw.value, ast.Constant) and kw.value.value is False)
+    ]
+    assert offenders == [], f"{module}.py passes shell= at line(s) {offenders} — argv lists only"
+
+
+@pytest.mark.parametrize("module", sorted(SUBPROCESS_ALLOWED))
+def test_an_allowlisted_module_never_passes_a_command_string(module: str) -> None:
+    """First argument is a LIST, never a plain string: a string argv is the
+    same injection class as ``shell=True`` on some platforms, and it is how a
+    path with a space silently became two arguments (08 §A28)."""
+    offenders = [
+        call.lineno
+        for call in _subprocess_spawn_calls(_tree(module))
+        if call.args
+        and isinstance(call.args[0], ast.Constant)
+        and isinstance(call.args[0].value, str)
+    ]
+    assert offenders == [], (
+        f"{module}.py passes a command STRING at line(s) {offenders} — build an argv list"
+    )
+
+
+@pytest.mark.parametrize("module", sorted(SUBPROCESS_ALLOWED))
+def test_every_spawn_carries_a_timeout_and_a_lenient_decode(module: str) -> None:
+    """B1, made structural. The 3-month outage was one ``task export`` byte
+    decoded strict-UTF-8 with no timeout. Every spawn in every allowlisted
+    module must carry ``timeout=`` and, when it decodes text, ``encoding=``
+    plus ``errors=`` — a future call site cannot forget (06 §6)."""
+    missing: list[str] = []
+    for call in _subprocess_spawn_calls(_tree(module)):
+        kwargs = {kw.arg for kw in call.keywords if kw.arg}
+        if "timeout" not in kwargs:
+            missing.append(f"line {call.lineno}: no timeout=")
+        decodes = "encoding" in kwargs or "text" in kwargs or "universal_newlines" in kwargs
+        if decodes and "errors" not in kwargs:
+            missing.append(f"line {call.lineno}: decodes text with no errors=")
+        if decodes and "encoding" not in kwargs:
+            missing.append(f"line {call.lineno}: text mode without an explicit encoding=")
+    assert missing == [], f"{module}.py: " + "; ".join(missing)
 
 
 # --- 08 §A37: test infra must not hardcode one machine's checkout ----------

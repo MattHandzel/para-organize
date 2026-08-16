@@ -1,0 +1,24 @@
+# The OnFailure= alerter (spec 06 §5). Referenced as
+# `organize-pipeline-failure@%n.service`, so %i is the full name of the unit
+# that failed — one alerter covers the timer run, the path-triggered run and
+# the failtest unit, and the alert always names its subject.
+#
+# You never enable this unit. It is pulled in by the failing unit.
+#
+# Two alert channels, both documented in deploy/README.md:
+#   1. a journal-tagged marker (`journalctl --user -t organize-pipeline-alert`)
+#      — always emitted, works headless, survives being logged out;
+#   2. a desktop notification via notify-send — best effort, since there may
+#      be no session bus when a timer fires.
+# Channel 1 is the one you can build a check on; channel 2 is the one that
+# gets your attention today. The failure mode this exists to prevent is a
+# pipeline that has been dead for three months while systemd showed
+# "success" (spec 08 §B).
+
+[Unit]
+Description=organize — alert that %i failed
+
+[Service]
+Type=oneshot
+SyslogIdentifier=organize-pipeline-alert
+ExecStart=%h/.local/bin/organize-pipeline-alert %i

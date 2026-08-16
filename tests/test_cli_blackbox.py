@@ -645,10 +645,44 @@ def test_auto_organize_is_the_phase_6_stub(core: Core) -> None:
     assert "spec 13" in proc.stderr
 
 
-def test_run_consumers_reports_phase_3(core: Core) -> None:
+def test_run_consumers_with_no_consumers_configured_is_a_clean_zero(core: Core) -> None:
+    """A REAL process exit code, which is the only thing systemd reads (06 §5:
+    exit codes propagate; the 3-month outage was a wrapper that exited 0 while
+    the pipeline crashed). This config has no `[consumers.*]` sections, so the
+    correct answer is a clean run over the vault that does nothing."""
     proc = core.run("run-consumers")
-    assert proc.returncode == 1
-    assert "arrives in Phase 3" in proc.stderr
+    assert proc.returncode == 0, proc.stderr
+    assert "0 consumer(s)" in proc.stdout
+    assert "run complete: errors=0" in proc.stdout
+    assert "Traceback" not in proc.stderr
+    # the composition root opened AND migrated the store on the way through
+    assert (core.state_dir / "automations.db").exists()
+
+
+def test_run_consumers_dry_run_takes_the_flag_after_the_subcommand(core: Core) -> None:
+    """`organize run-consumers --dry-run` is what a human types; the global
+    flag lives before the subcommand. Both must work, and the subparser must
+    not clobber the global one (argparse default-overwrite trap)."""
+    for argv in (("run-consumers", "--dry-run"), ("--dry-run", "run-consumers")):
+        proc = core.run(*argv)
+        assert proc.returncode == 0, proc.stderr
+        assert "[DRY-RUN]" in proc.stdout
+
+
+def test_run_consumers_rejects_an_unknown_consumer_with_exit_2(core: Core) -> None:
+    """spec 06 §4: unknown --consumer is a usage error, not a generic error."""
+    proc = core.run("run-consumers", "--consumer", "nope")
+    assert proc.returncode == 2
+    assert "unknown consumer(s): nope" in proc.stderr
+
+
+def test_migrate_store_creates_and_reports_the_state_database(core: Core) -> None:
+    proc = core.run("migrate-store", "--json")
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["database"] == str(core.state_dir / "automations.db")
+    assert payload["created"] is True
+    assert payload["to_version"] >= 2
 
 
 def test_list_consumers_constructs_nothing_and_needs_no_config(core: Core) -> None:

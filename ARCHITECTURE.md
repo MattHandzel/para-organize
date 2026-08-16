@@ -97,10 +97,10 @@ composition roots supply `routes.get_description` for
 | **llm** | `llm.py` | `tests/test_llm*.py` (fake endpoints) | 09 §2, 06 §3.2-3.3/§6, 11 §2, 12 §1, 08 §B11 | config |
 | **config** | `config.py` | `tests/test_config*.py` | 03 §1, 06 §2, 07, 10 §3, 11 §1, 12, 13 §2, 08 §A35/§C | paths |
 | **store** | `consumers/store.py` | `tests/test_store*.py` (incl. migration against a COPY of the live DB — coordinate with integrator; never open the live file directly) | 06 §1, 08 §B4/§B5 | paths |
-| **runner** | `consumers/runner.py` | `tests/test_runner*.py` | 06 §1/§4/§6/§7, 08 §B2-B5/§B12-B13 | store, base, config, frontmatter |
+| **runner** | `consumers/runner.py` | `tests/test_runner*.py` | 06 §1/§4/§6/§7, 08 §B2-B5/§B12-B13 | store, base, config, frontmatter, index (`is_ignored`), paths |
 | **taskwarrior** | `consumers/taskwarrior.py` | `tests/test_consumer_taskwarrior*.py` (fake `task`) | 06 §3.1, 08 §B1/§B6/§B7 | base, llm |
-| **learn-consumer** | `consumers/learn.py` | `tests/test_consumer_learn*.py` | 06 §3.2, 08 §B8 | base, llm, frontmatter |
-| **question_answer** | `consumers/question_answer.py` | `tests/test_consumer_qa*.py` | 06 §3.3, 08 §B9 | base, llm, frontmatter |
+| **learn-consumer** | `consumers/learn.py` | `tests/test_consumer_learn*.py` | 06 §3.2, 08 §B8 | base, llm, frontmatter, fileops (`atomic_write` — VAULT files, per the atomic-write ruling) |
+| **question_answer** | `consumers/question_answer.py` | `tests/test_consumer_qa*.py` | 06 §3.3, 08 §B9 | base, llm, frontmatter, fileops (`atomic_write` — VAULT files) |
 | **deep_research** | `consumers/deep_research.py` | `tests/test_consumer_research*.py` | 06 §3.4, 08 §B15 | base |
 | **tag_router** *(Phase 4)* | `consumers/tag_router.py` | `tests/test_consumer_router*.py` | 11 §1 | base, routes |
 | **auto_tagger** *(Phase 4)* | `consumers/auto_tagger.py` | `tests/test_consumer_tagger*.py` | 11 §2 | base, llm, frontmatter, index |
@@ -202,7 +202,8 @@ capture, match)` [P4]; `apply_all(ctx, capture, matches)` [P4];
 `STORE_SCHEMA_VERSION = 2`.
 
 **consumers/runner** — `scan_notes(config)`; `run_consumers(config, store,
-only, dry_run) -> RunSummary` (+ `ConsumerSummary`).
+only, dry_run, paths) -> RunSummary` (+ `ConsumerSummary`);
+`UnknownConsumerError`.
 
 **cli** — `SUBCOMMANDS`; `build_parser()` (implemented); `main(argv)`;
 `cmd_*` handlers (one per subcommand; `cmd_auto_organize` implemented as
@@ -636,6 +637,31 @@ skeleton signature changed incompatibly.
   (`ARCHIVE_SUGGESTION_TYPE` moved to `suggest` — routes imports and
   re-exports it, so `from organize_core.routes import ...` still resolves.)
 - **session** — `default_filters()`, `TERMINAL_OUTCOMES`.
+- **frontmatter (Phase 3)** — `fields_are_no_ai(fields)`: the field-level
+  `no-ai` rule over a plain mapping. `is_no_ai(doc)` and
+  `NotePayload.no_ai` both delegate to it — ONE rule (Phase-3 ruling).
+- **index (Phase 3)** — `is_ignored(rel, patterns)`, promoted from private.
+  The automation pipeline's ingestion walk applies the same
+  `vault.ignore_patterns` and had grown a second copy; consumer
+  `include_paths`/`exclude_paths` remain a DIFFERENT rule (06 §2,
+  prefix-or-glob, no component match) and stay in `runner._matches`.
+- **consumers/base (Phase 3)** — `NotePayload.no_ai` / `NotePayload.tags()`
+  implemented (delegating, per the ruling); `RunContext.paths: CorePaths |
+  None`, populated by the runner from the composition root so a consumer
+  can derive a STATE location (taskwarrior's
+  `<state>/backups/taskwarrior/<UTC-ts>`, 06 §3.1) without reading the
+  environment.
+- **consumers/store (Phase 3)** — `hash_note_text(raw_text)`;
+  `AutomationStore.open()` / `.close()` / `.schema_version()` /
+  `.upsert_note()` / `.list_purged()` / `.restore_purged()`; constants
+  `TERMINAL_STATUSES` / `RETRYABLE_STATUSES` / `V1_ONLY_STATUSES` /
+  `DEFAULT_RETENTION_DAYS`; `MigrationReport.notes_kept` / `.anomalies` /
+  `.created` / `.no_op` / `.changed` / `.summary()`. All six scaffold
+  signatures unchanged.
+- **consumers/runner (Phase 3)** — `UnknownConsumerError(ConfigError)`, so
+  the CLI can map an unknown `--consumer` to exit 2 (06 §4) without
+  sniffing exception text; `DEFAULT_PURGE_RETENTION_DAYS`.
+- **cli (Phase 3)** — subcommand `migrate-store`; `cmd_migrate_store`.
 - **server** — `MUTATING_METHODS`, `INDEX_CHANGING_METHODS`,
   `EVENT_INDEX_UPDATED` / `EVENT_OP_PROGRESS` / `EVENT_TYPES` /
   `EVENT_METHOD`, `NOT_IMPLEMENTED = -32001`, `RpcException`,
@@ -1023,3 +1049,158 @@ mirror.
   explicitly that the OLD para-automation/second-brain-automation chain
   must be masked/removed at cutover (spec 09 §5.5) — otherwise both
   generations run against the same vault.
+
+
+## Integrator seam rulings — Phase 3 close (2026-08-16)
+
+Five builder seats (store+migration, runner, taskwarrior, learn+qa,
+deep_research+deploy) shipped green and raised 24 seams. Dispositions:
+
+### Granted (implemented by the integrator)
+
+- **The composition root opens AND migrates the store.** `cmd_run_consumers`
+  does `with AutomationStore(paths.automations_db) as store: report =
+  store.migrate()` before `run_consumers`, exactly as the runner's docstring
+  requires. Regression-tested by a mutation: deleting the `migrate()` call
+  makes the pipeline e2e fail loudly (every store method refuses an
+  un-migrated v1 DB), which is the behaviour that was asked for.
+- **`NotePayload.no_ai` / `NotePayload.tags()` implemented**, delegating to
+  the frontmatter module. The field-level `no-ai` check was extracted to
+  `frontmatter.fields_are_no_ai(fields)`; `is_no_ai(doc)` now calls it too.
+  BOTH interim fallbacks deleted (`runner._note_is_no_ai`,
+  `deep_research.payload_no_ai`), per the de-dup obligation.
+  `tests/test_consumer_base.py` (45 cases) pins values AND agreement with
+  the frontmatter module; a mutation that hand-rolls either one fails.
+- **`RunContext.paths: CorePaths | None`** added and populated by
+  `run_consumers(..., paths=...)`, which the CLI passes. taskwarrior's
+  `<state>/backups/taskwarrior/<UTC-ts>` (06 §3.1) is now derivable without
+  a consumer-side environment read.
+- **`runner` uses `store.hash_note_text()`** instead of its own `hashlib`
+  site. A mutation to a second, subtly different digest fails the suite —
+  which is the point: it would orphan the 376 migrated success checkpoints
+  and refire every consumer over the whole vault.
+- **SUBPROCESS_ALLOWED expanded** to the four modules the spec names, PLUS
+  the three structural assertions the ruling asked for (no `shell=True`, no
+  string argv, every spawn carries `timeout=`, and text mode implies
+  explicit `encoding=` + `errors=`). All four mutations are caught.
+- **`vault.scan_dirs` removed from RESERVED_CONFIG_LEAVES.**
+  `integrate.review` was NOT removed — it is a false positive of the gate,
+  not a real reader. The reader heuristic now counts attribute accesses and
+  bound names only, never bare string constants: both Phase-3 consumers
+  emit the spec-mandated flashcard frontmatter value `"status": "review"`
+  (06 §3.2/§3.3), which has nothing to do with `[integrate] review`. This is
+  a deliberate refinement of the architect ruling, and it makes the gate
+  strictly sharper: with the fix the allowlist is exactly the eight keys
+  that genuinely have no reader.
+- **`index.is_ignored` promoted to public**, and `runner` calls it for
+  `vault.ignore_patterns` instead of carrying a second implementation.
+  `runner._matches` lost its `component_match` flag and is now solely the
+  06 §2 consumer prefix-or-glob rule, documented as deliberately different.
+- **Store write-path fsync removed** (`PRAGMA synchronous = NORMAL` under
+  WAL). The runner seat measured the default at 1.40 s per 1 000
+  checkpoints — ~90 s pro-rata for the 7.5k vault against spec 09 §4's 30 s
+  budget. NORMAL measures 0.06 s (23x). `migrate()` raises it to FULL for
+  its own transaction, because a migration is a cutover artefact and not
+  cheaply redone. The end-to-end ceiling in `test_runner_store.py` came down
+  from 90 s to 10 s, and `test_store.py` asserts the pragma directly — a
+  fast machine hid the regression from the wall-clock gate.
+- **`--dry-run` accepted after the subcommand** as well as before, via
+  `default=argparse.SUPPRESS` (a plain subparser default would silently
+  overwrite the global flag).
+- **Example config** now shows learn's `trigger_tags` / `triage_threshold` /
+  `topic_tags` / `[consumers.learn.triage_weights]` and qa's
+  `heuristic_detection = false` — "tunable with evidence" is the point of
+  exposing them, and B9's default belongs where an operator reads it.
+- **deploy/README step 4** now drives the migration through
+  `organize migrate-store` (rehearse on a copy, then `--backup-first
+  --yes-live`) with the measured real-data report line.
+
+### Confirmed as-is (no change; the seat's reading was right)
+
+- **`checkpoint()` refuses non-terminal statuses** and **paths must be
+  absolute** — both confirmed. B3 must not come back through a second door,
+  and a relative key would orphan history (06 §1 canonicalisation).
+- **`soft_purge` archives into `purged_*` with `restore_purged()`.** The
+  spec says hard-delete after 30 d; the seat brief says never hard-delete.
+  Reconciled correctly: rows leave `notes`/`emissions` (so they stop
+  participating in delivery decisions, which is what the spec is *for*) and
+  are recoverable. Confirmed.
+- **`filtered` deleted, `error`/`limit` kept but non-terminal.** 09 §5.4 /
+  B4. Confirmed.
+- **taskwarrior's one-task-per-note reading** over the brief's
+  "one-per-action-item". 06 §3.1 says the description is the body joined to
+  one line and the LLM's role is enrichment; the old production code agrees.
+  Confirmed — a per-bullet variant would be a spec change.
+- **taskwarrior's domain-specific tag normalization** (spaces→`_`,
+  lowercase) rather than `frontmatter.normalize_tag`. The one-normalizer law
+  is about matching vault tags to vault FOLDERS; using it here would rewrite
+  `not_reviewed` and every underscored tag in Matt's task history.
+  `NotePayload.tags()` therefore returns RAW spellings, which is now
+  documented on the property and pinned by a test.
+- **learn's B8 resolution** (the review file carries `source_hash`; the guard
+  is `learn-processed` AND a review file for this source AND a matching
+  hash). A bare `processing_status` guard cannot satisfy both "honor the
+  guard" and "a rerun on an edited source regenerates", because the
+  write-back itself changes the note hash. Confirmed; the e2e suite pins the
+  consequence (run 2 settles to a skip, no duplicate review file).
+- **learn's Whisper call is not a second LLM path.** Transcription is not
+  completion, and `llm.py` has no upload surface. Same reasoning for the
+  `yt-dlp` subprocess. Confirmed.
+- **question_answer does not write `processing_status` back.** In
+  `capture/raw_capture` that field is load-bearing — it is how the
+  unorganized-capture query finds captures (03 §40). Confirmed; if a marker
+  is ever wanted it must be a DISTINCT field.
+- **The runner never checkpoints on a dry run** — it never calls `handle`
+  at all, so taskwarrior's "dry run returns SUCCESS with the payload in
+  metadata" can never be mistaken for work done. Confirmed and pinned:
+  the e2e dry-run test asserts BOTH store tables stay empty, not just
+  `emissions` (a `mark_seen`-only leak passed the weaker assertion).
+- **The templated alerter** `organize-pipeline-failure@.service`. Already
+  approved by the architect; recorded here as shipped.
+
+### Deferred, with reason
+
+- **A retry cap for `error`/`limit`.** Not implementable under the current
+  contracts: a cross-run attempt counter needs persisted non-terminal
+  emissions, which B3/B4 forbid, and `checkpoint()` refuses them by design.
+  06 §1 as written (always retried, volume bounded by `max_notes_per_run`)
+  is what ships. A real cap needs an `attempts` column owned by the store
+  seat — a Phase-4 decision, not a Phase-3 patch.
+- **A config key for the soft-purge retention window.** Spec 06 §2's schema
+  names no such key and 06 §1 states 30 days as a value, not a knob.
+  `DEFAULT_PURGE_RETENTION_DAYS = 30` stays the single source of truth until
+  a spec change asks otherwise.
+- **`deploy/` hardcodes `%h/.config/organize-core/config.toml`.** That is
+  today's `CorePaths.config_file` default and nothing in Phase 3 moved it.
+  The drift-guard test parses every documented `organize …` invocation
+  against the live parser, so a future move fails a test rather than a
+  cutover.
+
+### Phase-3 measured results (integrator gate, 2026-08-16)
+
+- `pytest tests/` — **1893 passed, 0 failed**, 1 deselected (slow), 70 s.
+- `ruff check src tests` — clean.
+- `make perf` — 1 passed: `full_reindex(10000 notes) = 2.02 s` (gate 5 s).
+- End-to-end pipeline golden run (`tests/test_pipeline_e2e.py`, 11 tests):
+  fixture vault + all four REAL consumers + a real SQLite store + fake
+  `task`/Ollama/agent, driven twice through `cli.main`. Run 1 produces 3
+  Taskwarrior imports (one per `todo` capture, payload asserted field by
+  field), 1 learn review file + write-back + generation-log row, 1 answer
+  note + its tier-2 card, 1 agent dispatch; run 2 changes nothing — no vault
+  byte, no task, no LLM call, no agent run. Config-change retroactivity
+  (widened `include_paths`, unchanged bytes on disk) processes the
+  previously-filtered note.
+- Live-DB migration through `organize migrate-store` against a writable copy
+  of the read-only mirror: **v1→v2, notes 7516, success 376 preserved row
+  for row, skip 3, retryable 8, filtered_dropped 22497, anomalies 0**,
+  15.3 MB → 5.3 MB, 0.25 s wall. The counts reconcile exactly with
+  pre-migration SQL; the backup is byte-identical to the original.
+- Store write path: 1 000 checkpoints in **0.06 s** (was 1.40 s).
+  1 000 notes × 2 consumers end-to-end through the real store: **0.47 s**.
+- Anti-vacuity: 17 mutations injected, 17 caught — no-ai guard removed,
+  filter misses persisted, exit-2 mapping, missing `migrate()`, dry run
+  stamping `last_seen`, `needs_delivery` always true, hand-rolled `no_ai`,
+  `tags()` sweeping every list field, a second `sha256` recipe, the store
+  pragma reverted, migrate leaving `synchronous=FULL`, `shell=True`, a
+  string argv, a dropped `timeout=`, a strict-UTF-8 spawn decode, a strict
+  store `text_factory`, and a stale RESERVED_CONFIG_LEAVES entry.

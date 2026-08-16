@@ -1,0 +1,21 @@
+# 10-minute cadence, per spec 06 §5. This is the unit you enable.
+
+[Unit]
+Description=organize — run the PARA automation pipeline every 10 minutes
+
+[Timer]
+Unit=organize-pipeline.service
+# Give the session (network, vault mount, Ollama tunnel) time to settle.
+OnBootSec=5m
+OnUnitActiveSec=10m
+# Spec 06 §5 asks for this explicitly. Note that systemd only ACTS on
+# Persistent= for calendar timers — it is kept here so that switching this
+# timer to OnCalendar= later (e.g. business hours only) already carries the
+# catch-up-after-suspend behavior instead of silently losing it.
+Persistent=true
+# The work is idempotent and unhurried; letting systemd coalesce wakeups is
+# free battery.
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target

@@ -1841,12 +1841,29 @@ card_tags = ["learn-consumer"]
 min_content_length = 200
 max_cards_per_note = 12
 whisper_host = "http://server.matthandzel.com:47770"
+# Triage (spec 06 §3.2): a note without an opt-in tag is generated for when
+# 0.4*novelty + 0.4*relevance + 0.2*quality clears the threshold. Shown here
+# because "tunable with evidence" is the whole point of exposing them — every
+# candidate's score is logged at DEBUG, so raise the threshold when the
+# review queue fills with noise and lower it when good notes slip past.
+trigger_tags = ["learn", "remember", "study", "anki"]
+triage_threshold = 0.7
+topic_tags = ["science", "research", "learning", "productivity", "health",
+              "finance", "career", "ai", "psychology", "systems"]
+
+[consumers.learn.triage_weights]
+novelty = 0.4
+relevance = 0.4
+quality = 0.2
 
 [consumers.question_answer]
 type = "question_answer"
 enabled = true
 include_paths = ["capture/raw_capture"]
 max_notes_per_run = 20
+# 08 §B9: the interrogative heuristic produced 874 mostly-noise answer files.
+# The trigger is the explicit tag; the heuristic is kept, and kept OFF.
+heuristic_detection = false
 marker_tag = "question"
 answers_dir = "resources/answers"
 

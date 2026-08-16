@@ -1,0 +1,52 @@
+# organize — PARA automation pipeline (spec 06 §5).
+#
+# THE ONE RULE THIS FILE EXISTS TO ENFORCE: exit codes propagate.
+# The system it replaces wrapped the pipeline in a Python shim that caught
+# CalledProcessError, printed it, and returned 0 — so systemd recorded
+# "success" for every one of the ~13,000 runs it crashed on between
+# 2026-05-10 and 2026-08-15 (spec 08 §B "the wrapper swallows failure").
+# There is therefore no `-` prefix on ExecStart, no `|| true`, no wrapper
+# script, and an OnFailure= alert that fires on any nonzero exit.
+
+[Unit]
+Description=organize — PARA automation pipeline (one run)
+# The consumers talk to Ollama and to the research agent's APIs.
+Wants=network-online.target
+After=network-online.target
+# %n is this unit's full name, so one templated alerter serves the timer
+# run, the path-triggered run, and the failtest unit alike.
+OnFailure=organize-pipeline-failure@%n.service
+
+[Service]
+Type=oneshot
+SyslogIdentifier=organize-pipeline
+
+# Global flags come BEFORE the subcommand (organize's parser puts --config
+# on the top-level parser). The config path is stated explicitly rather than
+# left to CorePaths' default so that what this unit reads is never in doubt
+# — the two divergent automations.toml files were spec 08 §C4.
+ExecStart=%h/.local/bin/organize --log-level INFO --config %h/.config/organize-core/config.toml run-consumers
+
+# A hung LLM/agent call must become a REPORTED failure, not a stuck run that
+# quietly blocks the next timer tick. The pipeline's own target is <30 s for
+# a full 7.5k-note vault with no LLM work (spec 09 §4); 15 minutes is slack
+# for a slow remote Ollama, not a budget.
+TimeoutStartSec=900
+
+Environment=PYTHONUNBUFFERED=1
+
+# This is background housekeeping — never at the expense of the desktop.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+# The pipeline writes only its own state dir and the vault paths its
+# consumers are configured for; it never needs elevated access. (Only
+# sandbox options that work in an unprivileged user manager are used here —
+# PrivateTmp= and friends need user namespaces and turn a working pipeline
+# into a confusing start failure on hosts that lack them.)
+NoNewPrivileges=true
+
+# Deliberately NO [Install] section: this unit is started by
+# organize-pipeline.timer and organize-pipeline.path. Enabling the service
+# itself would additionally fire one run at every login, which is noise.
