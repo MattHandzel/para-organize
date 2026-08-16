@@ -1397,3 +1397,20 @@ recorded here; they ARE binding precedent:
   VERBATIM with commit hash / doc-section cites; seats treat any uncited
   brief mandate touching persistence or the vault as requiring a ruling
   before implementation.
+
+## Phase-4 close-out directives (architect, routed 2026-08-16)
+
+- **Integrator's FIRST action, one pass**: land the two shared-file seams
+  exactly as specified above (RunContext.op_context field + per-consumer
+  dataclasses.replace in the runner; Consumer.bind() with skip-on-raise =
+  error + exit 1) and retire the four Phase-4 stub-gate tests per their
+  embedded instructions, citing the phase close. Both consumers are
+  complete but INERT at runtime until the seams land (their
+  ERROR/filtered fallbacks self-heal on landing).
+- **Vacuous-pin class (verifier/fixer checklist, permanent)**: every
+  refusal-predicate pin gets the mutate-the-guard-away check. Concretely
+  for tag_router's no-ai pin: the fixture no-ai note's tag must MATCH an
+  auto=true route (so the guard is the only thing refusing), plus a
+  firing control (same note minus no-ai IS processed). A pin that passes
+  by route-miss or by min_tags is worse than none. Mutation-audit before
+  handback (auto_tagger: 24/24 caught) is the seat standard.
