@@ -360,6 +360,28 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
 - **Phase gates run `make gate`** (test + perf + lint): the spec 09 §4
   full-scale perf tests are `-m slow` and excluded from the default suite,
   so a bare `make test` is NOT a complete phase gate.
+
+## Phase-2 integrator inbox (facts from the commands seat, verified)
+
+- **actions.lua dispatch-name contract gap**: commands.lua + checkhealth
+  expect 20 dispatch names; actions.lua is missing 7 — `start`, `next`,
+  `prev`, `reindex`, `debug`, `refresh`, `set_meta` (it has
+  `next_capture`/`prev_capture`/`refresh_suggestions`/`set_meta_field`
+  instead and lacks start/reindex/debug entirely). `:ParaOrganize start`
+  has nowhere to go until reconciled. Integrator: align actions.lua to the
+  20-name contract (checkhealth asserts it).
+- **Wire fact**: `vim.json.encode({})` emits `[]`, which the server
+  rejects (-32602) before method lookup — every no-arg RPC must send
+  `vim.empty_dict()`. Fixed in phc_support + pickers; any new call site
+  must follow.
+- **Wire fact**: query `para_type` matches the SINGULAR value while
+  `folder.create` takes the PLURAL key; `folder.list` emits singular
+  `type`, `Suggestion.type` emits plural — client normalizes in
+  `pickers.suggestion_entry` pending a core ruling (requested).
+- **plenary wart**: `PlenaryBustedFile` does not forward `minimal_init` to
+  its child nvim (child loads the user's real config!). Run specs
+  in-process via `-c "lua require('plenary.busted').run(<abs>)"` or
+  `PlenaryBustedDirectory {minimal_init=...}`.
 - **`--json` flag**: the per-subcommand `--json` (machine-readable output)
   added by the cli+server seat is an approved ADDITIVE surface change —
   spec 10 §2 makes other frontends (Claude agents) first-class CLI
