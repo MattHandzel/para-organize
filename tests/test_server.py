@@ -403,10 +403,12 @@ def test_path_escaping_the_vault_is_refused(client: RpcClient) -> None:
 def test_suggest_for_note_ranks_the_matching_folder_first(client: RpcClient) -> None:
     suggestions = client.result("suggest.for_note", path=QUIRK_FILES["iso_filename"])
     # SINGULAR type values on the wire (`Suggestion.type`).
+    # `blog` and `kms` fire NO signal, so the 0.3 folder-type bonus no longer
+    # carries them past `min_confidence` (architect ruling 2026-08-16: the
+    # floor applies to the signal score) — the list is the folder the tag
+    # actually names, plus the archive entry.
     assert [(s["name"], s["type"], s["score"]) for s in suggestions] == [
         ("health", "area", 3.7),
-        ("blog", "project", 0.3),
-        ("kms", "project", 0.3),
         ("Archive Now", "archive", 0.1),
     ]
     assert suggestions[0]["reasons"] == [
@@ -996,6 +998,120 @@ def test_events_subscribe_rejects_an_unknown_event(client: RpcClient) -> None:
     error = client.error("events.subscribe", events=["everything"])
     assert error["code"] == INVALID_PARAMS
     assert "unknown event" in error["message"]
+
+
+# ---------------------------------------------------------------------------
+# Transport robustness (real-data soak regressions)
+# ---------------------------------------------------------------------------
+
+
+def test_a_slow_client_still_receives_a_whole_multi_megabyte_line(
+    server: OrganizeServer,
+) -> None:
+    """The accept loop's 50 ms poll timeout was applied to the ACCEPTED
+    socket, so `sendall` raised `socket.timeout` the moment the ~208 KB send
+    buffer filled and the handler closed the connection mid-line — with no
+    error frame and no log entry. Every response bigger than one send buffer
+    (a real `search.query` returns 2-3 MB) was a coin flip for any client
+    that renders while it reads."""
+    payload = "x" * (4 * 1024 * 1024)
+    with RpcClient(server.socket_path, timeout=30.0) as subscriber:
+        subscriber.result("events.subscribe", events=[EVENT_INDEX_UPDATED])
+        assert server.emit(EVENT_INDEX_UPDATED, {"blob": payload}) == 1
+        # fall far enough behind that the server's send buffer is full
+        time.sleep(0.3)
+        event = subscriber.next_event(timeout=30.0)
+    assert event["data"]["blob"] == payload, "the line was truncated in flight"
+
+
+def test_an_emit_failure_never_turns_an_applied_operation_into_an_error(
+    server: OrganizeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The post-write notifications run after the vault has already changed.
+    A raise there (observed as `RuntimeError: dictionary changed size during
+    iteration` out of `index.stats()`) was converted into -32603, so a
+    completed move was reported as a failure — and a client that retries on
+    error files the note twice."""
+    real_emit = server.emit
+
+    def exploding_emit(event: str, data: dict[str, Any]) -> int:
+        if event == EVENT_INDEX_UPDATED:
+            raise RuntimeError("dictionary changed size during iteration")
+        return real_emit(event, data)
+
+    monkeypatch.setattr(server, "emit", exploding_emit)
+    with RpcClient(server.socket_path) as conn:
+        result = conn.result("op.archive", path=QUIRK_FILES["context_as_string"])
+
+    assert result["ok"] is True
+    assert (vault_of(server) / "archive/capture/raw_capture/context-string.md").is_file()
+
+
+def test_index_stats_for_the_index_updated_event_are_read_under_the_write_lock(
+    server: OrganizeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pins the ordering fix rather than the race it removes: the snapshot
+    must be taken while the writer still holds the lock."""
+    held: list[bool] = []
+    real_stats = server.index.stats
+
+    def spy() -> dict[str, Any]:
+        held.append(server._rwlock._writer)
+        return real_stats()
+
+    monkeypatch.setattr(server.index, "stats", spy)
+    with RpcClient(server.socket_path) as conn:
+        conn.result("op.archive", path=QUIRK_FILES["context_as_string"])
+
+    assert held and all(held), "index.stats() ran with no write lock held"
+
+
+def test_readers_are_not_starved_by_a_queue_of_writers() -> None:
+    """`folder.list` p95 was 2.3 s and `search.query` 28.9 s under a bulk
+    file-away because the lock was strictly writer-preferring: a reader waited
+    while ANY writer was queued, and that never cleared. The reader must now
+    get in after a BOUNDED number of writes (spec 09 §4 budgets a UI action at
+    < 50 ms)."""
+    from organize_core.server import _WRITER_BATCH_LIMIT, _ReadWriteLock
+
+    lock = _ReadWriteLock()
+    order: list[str] = []
+    order_lock = threading.Lock()
+    writers = _WRITER_BATCH_LIMIT * 3
+    gate = threading.Event()
+
+    def writer() -> None:
+        with lock.write():
+            with order_lock:
+                order.append("w")
+
+    def reader() -> None:
+        with lock.read():
+            with order_lock:
+                order.append("r")
+
+    with lock.write():  # hold everyone off while the queue builds
+        threads = [threading.Thread(target=writer, daemon=True) for _ in range(writers)]
+        for thread in threads:
+            thread.start()
+        while lock._waiting_writers < writers:
+            time.sleep(0.005)
+        reader_thread = threading.Thread(target=reader, daemon=True)
+        reader_thread.start()
+        while lock._waiting_readers < 1:
+            time.sleep(0.005)
+        gate.set()
+
+    for thread in [*threads, reader_thread]:
+        thread.join(timeout=10.0)
+        assert not thread.is_alive()
+
+    assert gate.is_set()
+    assert len(order) == writers + 1
+    position = order.index("r")
+    assert position <= _WRITER_BATCH_LIMIT, (
+        f"the reader waited behind {position} writes; the bound is {_WRITER_BATCH_LIMIT}"
+    )
 
 
 # ---------------------------------------------------------------------------

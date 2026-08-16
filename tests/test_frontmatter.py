@@ -493,6 +493,40 @@ def test_duplicate_keys_do_not_corrupt_the_block() -> None:
     assert rebuilt == "---\nid: third\ntags:\n- a\n---\nbody\n"
 
 
+def test_duplicate_keys_with_differing_values_are_recorded_and_warned(
+    tmp_path, caplog
+) -> None:
+    """YAML last-wins stays (PyYAML does the same, and changing the merge
+    semantics would be worse than the disease) — but a rewrite silently drops
+    the earlier value a human currently reads in the file, so it is named.
+    Real vault files hit this, e.g. a note with two `end_date:` lines."""
+    import logging
+
+    text = "---\nid: EXP-1\nend_date: 2026-05-10\nstart_date: 2026-03-27\nend_date: 2026-04-26\n---\nbody\n"
+    doc = parse(text)
+    assert doc.frontmatter.fields["end_date"] == "2026-04-26"  # last wins, unchanged
+    assert doc.frontmatter.style["duplicate_keys"] == ["end_date"]
+
+    path = tmp_path / "exp.md"
+    path.write_text(text, encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="organize_core.frontmatter"):
+        load_file(path)
+    assert "end_date" in caplog.text
+    assert str(path) in caplog.text
+
+
+def test_duplicate_keys_that_differ_only_by_quoting_are_not_reported() -> None:
+    """A style difference is not a lost value — reporting it would be noise
+    on the files that are actually fine."""
+    doc = parse("---\nid: '2026-04-26'\nid: \"2026-04-26\"\n---\nbody\n")
+    assert doc.frontmatter.style["duplicate_keys"] == []
+
+
+def test_a_block_without_duplicates_records_none() -> None:
+    doc = parse("---\nid: a\ntags:\n- x\n---\nbody\n")
+    assert doc.frontmatter.style["duplicate_keys"] == []
+
+
 def test_boolean_is_not_confused_with_one() -> None:
     """``True == 1`` in Python — the change detector must still notice."""
     doc = parse("---\nno-ai: true\n---\nbody\n")

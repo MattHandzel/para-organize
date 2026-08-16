@@ -162,6 +162,11 @@ def test_to_json_block_fields_match_the_spec_field_for_field() -> None:
         "vault_stats",
         "durations_ms",
         "dry_run",
+        # Promoted out of `filters` for the same reason `dry_run` was: spec 12
+        # §2 defines `filters` as the SESSION's search filters, so a marker
+        # hidden there could not be branched on — learning folded failed moves
+        # in as successful accepts.
+        "partial_failure",
     ]
     assert list(payload["context"]["suggestions_shown"][0]) == ["path", "score", "rank", "reasons"]
     assert list(payload["llm"]) == [

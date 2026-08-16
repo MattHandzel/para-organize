@@ -398,10 +398,10 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
   - So a client MUST check `result.ok` AND branch on `error.data.kind` — a
     200-shaped response is not proof the operation happened.
 
-  KNOWN GAP (not fixed by this patch): `fileops.new_folder` still returns
-  `ok=false` for an INVALID FOLDER NAME (empty / contains a separator),
-  which the rule above puts in the RAISE column. Only the unknown-
-  `para_type` case was migrated.
+  `fileops.new_folder` is the worked example: an unknown `para_type`, an
+  empty name and a name carrying a path separator all raise `ConfigError`,
+  so ONE `error.data.kind` covers every way of misaddressing
+  `folder.create`; only an unwritable PARA root reaches `ok=false`.
 - **Phase gates run `make gate`** (test + perf + lint): the spec 09 §4
   full-scale perf tests are `-m slow` and excluded from the default suite,
   so a bare `make test` is NOT a complete phase gate.
@@ -655,3 +655,287 @@ generating the vault dominates its runtime); the 1k gate always runs.
   the contract; actions adds aliases next/prev/refresh/set_meta to its
   existing impls and implements start/reindex/debug. The checkhealth
   "actions missing:" check stays a permanent health ERROR.
+
+## Integrator seam rulings — Phase 2 close (nvim thin client)
+
+Every seam the three lua seats raised, with the decision. Files written by the
+integrator this phase: `lua/para-organize/{init,config,state}.lua`,
+`tests/plugin/{minimal_init,helpers,e2e_spec}.lua`, the `test-plugin` Makefile
+target, `doc/MIGRATION-from-old-setup.md`.
+
+### Granted (implemented)
+
+1. **`config.lua` exposes the core-process keys** (rpc+core seat). `get()` is
+   the accessor every seat already probes for; `core_options()` returns the
+   exact table `core.ensure_running` consumes. Both spellings — top-level
+   `socket_path`/`core_cmd` and the nested `core.*` block — are accepted, and
+   **`setup()` normalises a nested spelling UP to the top level**. Without
+   that normalisation the top-level DEFAULT (`{"organize","serve"}`) silently
+   beat a user's `core.core_cmd`: a silent wrong answer, and the first thing
+   the E2E gate caught.
+2. **`state.has_session()`** (commands seat). A real predicate, so
+   `:ParaOrganize skip` with no session refuses cleanly instead of relying on
+   shape-sniffing. `state.session` stays a real field for the fallback path.
+3. **Three additive config keys blessed** (ui+actions seat):
+   `keymaps.buffer.sort_cycle` (default `S` — spec 03's documented resolution
+   of the accidental `s`/`s` double-binding), `ui.capture_pane_keymaps`
+   (`core` | `navigation` | `none`), `ui.close_on_complete`. All three are in
+   the schema and in the migration note.
+4. **`tests/plugin/minimal_init.lua` and `tests/plugin/helpers.lua`
+   consolidated.** The three per-seat minimal_inits and the two per-seat
+   support modules are now shims onto one implementation each, so every seat's
+   documented command line still works and there is one environment. The
+   consolidated init keeps BOTH fixes the seats found: the user's real config
+   is removed from `rtp`/`packpath`, and `:PlenaryBustedFile` is overridden to
+   run in-process (plenary's own command spawns a child nvim without
+   forwarding `-u`).
+5. **`actions.lua` aligned to the 20-name dispatch contract.** Added `start`,
+   `reindex`, `debug` (each delegating to the composition root, which owns the
+   core connection) and the aliases `next`/`prev`/`previous`/`refresh`/
+   `set_meta`. `:checkhealth para-organize` now reports "every command and
+   keymap resolves to an action".
+6. **Stale-reply guard in `actions.rpc`.** A reply arriving after its session
+   was torn down (`<Esc>` mid-load, or `start` with new filters) is dropped:
+   it neither drives the UI nor emits an error notification. Comparing the
+   session identity at reply time is the only way to distinguish "the core
+   failed" from "we stopped listening", and without it a stale
+   `suggest.for_note` could write into the NEXT session's state.
+7. **`pickers.resolve_client` table-error crash** (reported by the ui+actions
+   seat) — already fixed in-seat by `M.error_message(cerr)` flattening
+   `core.ensure_running`'s structured error to a string; verified by the
+   pickers seat's own "core unreachable" specs, no further action.
+
+### Confirmed as-is (no change; the seat's reading was right)
+
+8. **`Client:request(m,p,cb)` is `cb(err, result)`** while `request_sync`
+   returns `result, err`. Both entry points keep their orders; `actions`
+   normalises defensively via `callback_style`. The asymmetry is pinned by
+   tests on both sides.
+9. **Nested empty objects must be `vim.empty_dict()`.** `rpc.lua` normalises
+   the TOP-LEVEL params table only. `init.obj()` and `pickers.obj()` are the
+   two helpers; every new call site follows.
+10. **Spec 07 acceptance test 4 (keymap collision raises at setup) is split.**
+    Metadata-vs-core collisions are enforced by the CORE (`CORE_KEYMAPS` in
+    `organize_core.config`, because spec 10 §3 moved `metadata_fields` into
+    `config.toml`); core-vs-core collisions from `keymaps.buffer` overrides
+    raise in `init.setup()` via `actions.detect_collisions()`. A failed gate
+    rolls the config back, so a rejected `setup()` never leaves a
+    half-applied table behind.
+
+### Deferred
+
+11. **`folder.list` for the browse view** — already granted and shipped by the
+    core seat (`folder.list` / `folder.children`). `actions.open_item`'s
+    degraded `search.query` fallback stays as feature detection for an older
+    core; the redundant `pickers.suggestion_entry` plural-normalisation is the
+    remaining Phase-2 cleanup.
+
+### Phase-2 measured results
+
+`make test-plugin` — 202 specs across 8 files, all green, each spec in its own
+headless nvim: rpc 25, core 12, ui 23, actions 44, commands 32, pickers 36,
+health 23, **e2e 7**. `make test` — 1277 passed, untouched by this phase.
+
+The E2E gate (spec 09 §3) drives the real stack: fixture vault built by
+`tests/conftest.py` → `organize serve` spawned BY THE PLUGIN → `:ParaOrganize
+start` → two panes rendered with the top suggestion → accept → assertions
+against BYTES ON DISK (moved copy, original archived under its own filename,
+`<type>/<folder>` tag added, `processing_status: organized`, `learning.json`,
+`operations.log`, an `operation=move` ActionRecord) → next capture auto-loaded
+→ `:ParaOrganize stop` → zero orphan buffers/windows/autocmds, and the core
+still listening (stop closes the session, not the shared daemon).
+
+## Real-data findings — fix stage (architect rulings, 2026-08-16)
+
+Five probe seats drove the core against a read-only mirror of the live vault
+(70,377 notes; 2,445 raw captures; 13,362 indexed under the test config). Every
+finding below was reproduced on that corpus before it was fixed, and every fix
+carries a FIXTURE-based regression test — no committed test references the
+mirror.
+
+### Suggestion scoring (spec 04 §2)
+
+1. **`min_confidence` applies to the SIGNAL score, not the total** —
+   `suggest.suggest` now compares `score - _type_bonus(...)` against
+   `suggestions.learning.min_confidence`; the full score still ranks. The
+   default floor (0.3) is >= the areas (0.2) and resources (0.1) type bonuses,
+   so comparing it against the TOTAL made the always-firing signal #7 decide
+   survival: **83 of the vault's 136 PARA folders were unreachable at any
+   `max_suggestions`**, and 1450 of 1858 backlog captures (78%) received an
+   identical 9-row list of `projects/` folders, every row scored 0.30 with an
+   empty reason list, ordered by an ASCII accident (`projects/B2-polish` was
+   rank 1 for all 1450 because "B" sorts before "a"). This RESOLVES spec 04
+   §2's self-contradiction — "every folder is technically a candidate — ranking
+   does the real work" vs "apply `min_confidence` 0.3 as the documented floor":
+   every folder is still scored and the bonus still ranks, but a candidate with
+   no evidence is not offered. Consequences, all pinned:
+   a zero-signal capture returns the archive entry ALONE (the honest "no
+   confident destination" state), every non-archive suggestion carries >= 1
+   reason (which closes the "rank 1 with `reasons: []`" finding without
+   inventing a reason string for signal 7), and projects > areas > resources
+   still holds among survivors (04 §7 acceptance).
+   `test_min_confidence_drops_bare_areas_and_resources_but_keeps_projects` —
+   which pinned the ⚠-flagged literal reading, not an acceptance item — is
+   RETIRED and replaced by
+   `test_min_confidence_applies_to_the_signal_score_not_the_total`,
+   `test_a_capture_with_no_signal_gets_the_archive_entry_alone` and
+   `test_every_non_archive_suggestion_carries_at_least_one_reason`.
+2. **Signal 6 matches at TOKEN granularity** — a sanctioned deviation from 04
+   §2 #6's literal "case-insensitive substring, either way". Both sides are
+   split on non-alphanumerics and one side's token list must be a CONTIGUOUS
+   run inside the other's. The raw substring test made short folder names match
+   inside unrelated words: `resources/ui` was the rank-1 suggestion for a
+   capture whose entire context was "quitting toastmasters" (the `ui` inside
+   q-UI-tting). Context is the only signal that reads free prose and it fired
+   just 16 times across the whole backlog, so its precision matters far more
+   than its recall. Weight and signal count unchanged.
+3. **Signal 2 absorbs morphological variation, in `suggest.py` ONLY** — the
+   normalized-tag signal now also fires (at its own 1.5 weight) when a
+   configured suffix strip (`suggestions.tag_suffix_strip`, default
+   `["-system", "-systems"]`) and/or a naive singular/plural reaches the folder
+   name, with a reason string naming the derivation
+   (`Tag 'productivity-system' ~ folder 'productivity'`). Matt's two dominant
+   tag conventions systematically missed their obvious destination:
+   `productivity-system` (65 captures) never reached `areas/productivity`,
+   `principle` (39) never reached `areas/principles`. HARD CONSTRAINT, pinned
+   by `test_signal_2_variant_matching_never_touches_the_shared_normalizer`:
+   `frontmatter.normalize_tag` is NOT touched — it also builds learning
+   association keys, the `<type>/<folder>` tag a move writes and the
+   frontmatter that lands on disk, so morphing it would corrupt learning keys
+   and vault data. Variants are derived at MATCH TIME. No 8th signal.
+4. **Signals 1 and 2 double-firing on an already-normalized tag stays** —
+   REJECTED. It is spec-literal, it inflates uniformly (so ordering is
+   unaffected), and it is pinned by the 3.8/3.7/3.6 numeric goldens.
+5. **Not defects, recorded so the weights are not mistaken for load-bearing
+   tuning**: `alias_similarity` (1.1) fired 0 times and `source_match` (1.3)
+   fired once across 1858 captures — captures carry timestamp-shaped aliases
+   and the generic source `me` (1176 of them). Answered on the record: alias
+   similarity is not dominating nonsensically; it never fires.
+
+### File operations (spec 05)
+
+6. **Move verifies BYTES** — `move_to_destination` compared
+   `_read_text(dest_path)` (universal-newline mode) against the string it had
+   just written, so the comparison could never succeed for a note containing a
+   CR and `move` refused **569 of 1858 backlog captures (30.6%)** with a false
+   "copy verification failed". `_read_text` is documented READ-BACK ONLY and is
+   now documented as never admissible for byte fidelity; `_verbatim_text` is
+   its counterpart for verification. The fixture vault had no CR anywhere,
+   which is why the suite was blind — it has two now.
+7. **A failed verification ROLLS THE COPY BACK** —
+   `_discard_unverified_copy` is a third sanctioned deleter in `fileops`
+   (named in the structural never-delete guard). It is admissible because the
+   destination came from `collision_free_path`, so it did not exist before
+   `atomic_write` created it, and because it refuses to touch the source. The
+   old branch left a fully-organized duplicate of a capture the caller had
+   just been told was NOT filed, and every retry added another `_1`, `_2`, …
+   copy. If the unlink itself fails, the ActionRecord and the error message
+   both name the stray file. This is independent of the CR defect: it would
+   corrupt the vault on any real verification failure.
+8. **Moving a note into the folder it is already in is an `ok=True` NO-OP** —
+   it silently renamed the note to `<name>_1.md` (the note was its own
+   collision) and archived the original filename, divorcing the file from its
+   `id:`/`aliases:` and breaking every `[[wikilink]]` to it (05 §3) while
+   returning rc=0. It is one mis-click away in the picker. Nothing is written,
+   nothing archived, no oplog line, no ActionRecord; `details.noop` says so and
+   the CLI prints it.
+9. **`.backups` (including anything under it) and the VAULT ROOT are refused
+   as move destinations**, in the taxonomy+hint style of the existing
+   "destination is the archive capture folder" refusal. Both are inside the
+   vault but outside `vault.scan_dirs`, so the note left the capture folder,
+   was archived as organized, and was then never indexed again — reported as a
+   success. The list is deliberately these two only.
+10. **`FrontmatterError` from a mutation names the FILE** — `_parse_named` is
+    the one chokepoint (`_read_document` + `archive_capture`), mirroring what
+    `frontmatter.load_file` already did for scans. "line 30, column 17" with no
+    path is unactionable in a batch run over 1,858 captures against the 23 real
+    files with unparseable YAML.
+
+### Action corpus and learning (spec 12 §2 / 04 §33)
+
+11. **`ActionContext.partial_failure` is a FIRST-CLASS field**, promoted out of
+    `context.filters["partial_failure"]` for exactly the reason `dry_run` was
+    (integrator ruling #3): `filters` is defined as the SESSION's search
+    filters, so no reader could branch on it. `from_json` still reads the
+    legacy spelling — those records are already on disk in Matt's corpus.
+    Consequences: `learn.record_action` returns `None` for a partially-applied
+    operation (spec 04 §33 learns on every **successful** move/merge; three
+    failed moves had taught an association with `count: 3, success_rate: 1.0`,
+    and every retry compounded it), and `ActionRecorder.stats` counts them in
+    `total`/`by_operation` and in a new `partial_failures` field but keeps them
+    out of `suggestions` entirely — they had been reported as rank-1 accepts
+    with `top_accept_rate: 1.0`.
+
+### Server (spec 10 §1, 09 §4)
+
+12. **The accept-poll timeout is off the ACCEPTED socket.** `_ACCEPT_POLL_
+    SECONDS` (0.05) is the accept loop's stop/idle cadence; applied to the
+    client it made `sendall` raise `socket.timeout` as soon as the ~208 KB send
+    buffer filled — i.e. whenever a client was >50 ms behind on draining — and
+    the handler closed the connection MID-LINE with no error frame and no log
+    entry. Every response larger than one send buffer (a real `search.query`
+    returns 2.2–3.2 MB) was a coin flip for any client that renders while it
+    reads. Clients are now blocking (`shutdown()` closes every connection, so
+    nothing can hang forever), `_send_bytes` resumes a partial write instead of
+    abandoning the line, and a genuine drop is logged at ERROR with the byte
+    count.
+13. **Post-write emits cannot fail an applied operation.** The
+    `index-updated` stats snapshot is taken INSIDE `run()`, under the write
+    lock; taking it after `submit()` returned read the record map with no lock
+    held while the next queued writer mutated it, and the resulting
+    `RuntimeError("dictionary changed size during iteration")` escaped dispatch
+    — turning a move that had already written the destination, archived the
+    original and appended its oplog line into a `-32603` for the client (a
+    client that retries on error then files the note twice). Every post-write
+    notification now goes through `_emit_best_effort`, and `VaultIndex.stats`
+    iterates a snapshot as defence in depth.
+14. **`_ReadWriteLock` is PHASE-FAIR, not strictly writer-preferring.** Readers
+    waited while ANY writer was queued, which under a bulk file-away never
+    cleared: `folder.list` p95 went from 10.9 ms idle to a 2,349 ms max, and
+    `search.query` from 216 ms to 28,899 ms — the picker freezing for seconds
+    while `folder.list`'s docstring promised "never queued" (that docstring is
+    corrected). Writers keep priority for at most `_WRITER_BATCH_LIMIT` (8)
+    consecutive acquisitions; a releasing writer then hands the readers queued
+    at that moment an explicit pass, which is a HARD gate on new writers (a
+    soft hint degrades to "eventually" — measured: a reader still waited behind
+    12 writes). Read latency is bounded by 8 writes; writers cannot be
+    postponed indefinitely, because passes are granted in bounded batches and
+    are never renewed by newly arriving readers.
+
+### CLI
+
+15. **`index --full --stats` reindexes, then reports.** It silently ignored
+    `--full` and printed the stats of the untouched index — `total: 0` in 0.09s
+    on fresh state where `--full` alone indexes 13,362 notes. A silently wrong
+    answer, which 09 §1.5 forbids. `--json` output stays parseable (the
+    progress line is suppressed) and `--dry-run` composes.
+16. **A non-`OrganizeError` exception is one attributable line, not a raw
+    traceback.** A sweep of `move` over the real backlog emitted seven bare
+    tracebacks, unattributable to any note. The last-resort handler names the
+    subcommand and its subject and points at `--debug`, which remains the only
+    way to see the stack (09 §1.5).
+17. **`suggest --json` emits `rank`** — `move --suggestions-json` documents its
+    input as `{path, score, rank, reasons}`, and a client building that shape
+    by hand had no `rank` to copy.
+
+### Frontmatter (visibility only)
+
+18. **Duplicate frontmatter keys with genuinely different values are named.**
+    YAML last-wins is correct and is what PyYAML does, so the parse is
+    unchanged — but re-emitting the block drops the earlier value a human
+    currently reads in the file. `style["duplicate_keys"]` records the keys
+    whose occurrences PARSE differently (quoting-only differences are not
+    reported) and `load_file` warns with the path and the keys.
+
+### Declined, with reasons
+
+- **Per-op index cost** (~1.2 s floor: every mutating CLI op rewrites the whole
+  14 MB `index.json`; `suggest` spends ~726 ms of its ~861 ms deserializing it).
+  Real and worth doing, but it is an index-persistence redesign (incremental
+  patch/journal, or routing the CLI through a running `organize serve`), not a
+  defect fix — it belongs in its own phase with its own perf gates.
+- **An unreproduced traceback class in `move`** (7 of 100 captures in one sweep
+  against a state the reporter could not reconstruct; five reproduction
+  attempts came back clean). Ruling 16 converts any such crash into an
+  attributable one-line error naming the note, which is what makes the next
+  occurrence diagnosable; hunting it further without a repro is not a fix.

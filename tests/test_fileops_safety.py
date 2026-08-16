@@ -193,7 +193,13 @@ def test_only_atomic_write_and_archive_may_remove_a_path() -> None:
     rmtree / rename anywhere else in fileops.py fails this test."""
     tree = ast.parse(inspect.getsource(fileops))
     removers = {"unlink", "remove", "removedirs", "rmdir", "rmtree", "rename"}
-    allowed = {"atomic_write", "_archive_file"}
+    # `_discard_unverified_copy` is the THIRD and last sanctioned deleter: it
+    # removes only a destination copy this very operation created via
+    # `collision_free_path` + `atomic_write` and then failed to verify, and it
+    # refuses to touch the source. Without it a failed move left a
+    # fully-organized duplicate in the vault and a further `_N` copy per
+    # retry — see test_move_rolls_back_the_copy_when_verification_fails.
+    allowed = {"atomic_write", "_archive_file", "_discard_unverified_copy"}
     offenders: list[tuple[str, str, int]] = []
 
     def walk(node: ast.AST, scope: str) -> None:
@@ -1156,7 +1162,14 @@ def test_a_partially_applied_move_still_records(fixture_vault: Path, tmp_path: P
     records = action_records(ctx)
     assert len(records) == 1, "a mutated vault with zero corpus lines is untraceable"
     assert records[0]["operation"] == "move"
-    assert "archiving the original failed" in records[0]["context"]["filters"]["partial_failure"]
+    # `partial_failure` is a FIRST-CLASS context field (spec 12 §2 promotion,
+    # same precedent as `dry_run`): `filters` is the session's search filters,
+    # so a marker hidden there was invisible to learning and to `actions
+    # stats`, and three failed moves read as successful rank-1 accepts.
+    assert (
+        "archiving the original failed" in records[0]["context"]["partial_failure"]
+    )
+    assert "partial_failure" not in records[0]["context"]["filters"]
     assert records[0]["targets"][0]["path"] == str(destination)
 
 
@@ -1184,7 +1197,8 @@ def test_a_partially_applied_merge_still_records(fixture_vault: Path, tmp_path: 
     records = action_records(ctx)
     assert len(records) == 1
     assert records[0]["operation"] == "merge"
-    assert "archiving the capture failed" in records[0]["context"]["filters"]["partial_failure"]
+    assert "archiving the capture failed" in records[0]["context"]["partial_failure"]
+    assert "partial_failure" not in records[0]["context"]["filters"]
     # The record still carries what it takes to reverse the edit by hand.
     assert records[0]["targets"][0]["before_text"] == before
 

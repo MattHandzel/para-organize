@@ -592,6 +592,179 @@ def test_move_of_a_note_without_frontmatter_creates_a_block(
     )
 
 
+# --- move: destinations that are not filing destinations -------------------
+
+
+def test_move_into_the_notes_own_folder_is_a_noop(
+    ctx: OperationContext, fixture_vault: Path
+) -> None:
+    """Real-data finding: this silently renamed the note to `<name>_1.md` and
+    archived the ORIGINAL filename, so the file no longer matched its own
+    `id:`/`aliases:` and every [[wikilink]] to it broke (05 §3) — while
+    returning rc=0."""
+    rel = QUIRK_FILES["current_schema"]
+    source = fixture_vault / rel
+    before = source.read_bytes()
+    folder = source.parent
+
+    result = move_to_destination(ctx, record_for(fixture_vault, rel), folder)
+
+    assert result.ok is True
+    assert result.details["noop"] == f"the note is already in {folder}"
+    # nothing renamed, nothing archived, nothing written
+    assert source.read_bytes() == before
+    assert not (folder / "2026-06-10T21:33:05.379Z_1.md").exists()
+    assert not (fixture_vault / "archive/capture/raw_capture/2026-06-10T21:33:05.379Z.md").exists()
+    assert log_lines(ctx) == []
+    assert action_records(ctx) == []
+
+
+@pytest.mark.parametrize("where", ["backup_dir", "inside_backup_dir", "vault_root"])
+def test_move_refuses_destinations_outside_the_para_tree(
+    ctx: OperationContext, fixture_vault: Path, where: str
+) -> None:
+    """All are inside the vault but outside `vault.scan_dirs`: the note would
+    be archived as organized and then never indexed again — reported as a
+    success. A subfolder of `.backups` is still the backup directory."""
+    rel = QUIRK_FILES["current_schema"]
+    source = fixture_vault / rel
+    before = source.read_bytes()
+    dest = {
+        "backup_dir": ctx.backup_dir,
+        "inside_backup_dir": ctx.backup_dir / "2026-08",
+        "vault_root": fixture_vault,
+    }[where]
+    dest.mkdir(parents=True, exist_ok=True)
+
+    result = move_to_destination(ctx, record_for(fixture_vault, rel), dest)
+
+    assert result.ok is False
+    assert "not a filing destination" in (result.error or "")
+    assert source.read_bytes() == before
+    assert not (dest / "2026-06-10T21:33:05.379Z.md").exists()
+    assert not (fixture_vault / "archive/capture/raw_capture/2026-06-10T21:33:05.379Z.md").exists()
+    assert action_records(ctx) == []
+
+
+# --- move: CR-bearing notes (05 §1 byte fidelity, 05 §9 acceptance) --------
+#
+# Real-data finding: 569 of the 1,858 real backlog captures (30.6%) contain a
+# carriage return, and `move` refused every one of them with a false "copy
+# verification failed" — the copy on disk was perfect, but the read-back used
+# universal-newline mode so `\r\n` came back as `\n` and the comparison could
+# never succeed. The suite had no CR fixture at all; these are it.
+
+CR_REL = "capture/raw_capture/cr-note.md"
+
+
+def write_cr_capture(vault: Path, *, eol: str, rel: str = CR_REL) -> bytes:
+    """A capture whose BODY uses ``eol`` line endings (frontmatter stays LF,
+    which is exactly the real corpus's shape: CRs arrive with pasted body
+    content). Returns the bytes written."""
+    body = eol.join(["## Content", "pasted from a windows editor", "second line", ""])
+    raw = (
+        "---\ntags:\n- impro\nprocessing_status: raw\nlast_edited_date: '2026-06-10'\n---\n" + body
+    ).encode("utf-8")
+    path = vault / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    return raw
+
+
+@pytest.mark.parametrize("eol", ["\r\n", "\r"], ids=["crlf", "lone-cr"])
+def test_move_of_a_cr_bearing_note_succeeds_and_keeps_the_bytes(
+    ctx: OperationContext, fixture_vault: Path, eol: str
+) -> None:
+    original_bytes = write_cr_capture(fixture_vault, eol=eol)
+    assert b"\r" in original_bytes
+    dest_folder = fixture_vault / "projects" / "blog"
+
+    result = move_to_destination(ctx, record_for(fixture_vault, CR_REL), dest_folder)
+
+    assert result.ok is True, result.error
+    dest = dest_folder / "cr-note.md"
+    written = dest.read_bytes()
+    # the body's carriage returns survive the rewrite verbatim (05 §1)
+    assert written.count(b"\r") == original_bytes.count(b"\r")
+    assert eol.encode("utf-8") + b"second line" in written
+    # and the operation completed: original archived under its own filename
+    archived = fixture_vault / "archive/capture/raw_capture/cr-note.md"
+    assert archived.read_bytes() == original_bytes
+    assert not (fixture_vault / CR_REL).exists()
+    assert log_lines(ctx)[-1].endswith("[SUCCESS] Backup: " + str(result.backup_path))
+
+
+def test_dry_run_move_of_a_cr_note_predicts_the_real_move(
+    fixture_vault: Path, tmp_path: Path
+) -> None:
+    """A dry run that reports success for an operation the live path refuses
+    is worse than no preview at all (09 §5.6)."""
+    write_cr_capture(fixture_vault, eol="\r\n")
+    dest_folder = fixture_vault / "projects" / "blog"
+    record = record_for(fixture_vault, CR_REL)
+
+    preview = move_to_destination(
+        make_ctx(fixture_vault, tmp_path / "dry", dry_run=True), record, dest_folder
+    )
+    live = move_to_destination(make_ctx(fixture_vault, tmp_path / "live"), record, dest_folder)
+
+    assert preview.ok is True
+    assert live.ok == preview.ok
+    assert live.destination == preview.destination
+
+
+def _short_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the next ``atomic_write`` land 5 bytes short — a genuine
+    verification failure (short write / full disk / concurrent writer)."""
+    real_write = fileops.atomic_write
+
+    def short_write(path: Path, content: str, **kwargs: Any) -> None:
+        real_write(path, content[:-5], **kwargs)
+
+    monkeypatch.setattr(fileops, "atomic_write", short_write)
+
+
+def test_move_rolls_back_the_copy_when_verification_fails(
+    ctx: OperationContext, fixture_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The caller is told the note was NOT filed, so a fully-organized copy
+    sitting at the destination is a silent duplicate — and every retry adds
+    another ``_1``, ``_2``… copy."""
+    source = fixture_vault / QUIRK_FILES["current_schema"]
+    original_bytes = source.read_bytes()
+    dest_folder = fixture_vault / "projects" / "blog"
+    _short_write(monkeypatch)
+
+    result = move_to_destination(
+        ctx, record_for(fixture_vault, QUIRK_FILES["current_schema"]), dest_folder
+    )
+
+    assert result.ok is False
+    assert "copy verification failed" in (result.error or "")
+    assert "the copy was removed" in (result.error or "")
+    # nothing left at the destination, nothing archived, original untouched
+    assert not (dest_folder / "2026-06-10T21:33:05.379Z.md").exists()
+    assert not (fixture_vault / "archive/capture/raw_capture/2026-06-10T21:33:05.379Z.md").exists()
+    assert source.read_bytes() == original_bytes
+    # a rolled-back operation changed nothing, so it is not a doc-12 precedent
+    assert action_records(ctx) == []
+    assert log_lines(ctx)[-1].endswith(f"Error: {result.error}")
+
+
+def test_repeated_failing_moves_leave_no_orphan_copies(
+    ctx: OperationContext, fixture_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest_folder = fixture_vault / "projects" / "blog"
+    before = sorted(p.name for p in dest_folder.iterdir())
+    _short_write(monkeypatch)
+    for _ in range(3):
+        result = move_to_destination(
+            ctx, record_for(fixture_vault, QUIRK_FILES["current_schema"]), dest_folder
+        )
+        assert result.ok is False
+    assert sorted(p.name for p in dest_folder.iterdir()) == before
+
+
 # --- archive_capture (05 §3, 08 §A14/§A15) ---------------------------------
 
 

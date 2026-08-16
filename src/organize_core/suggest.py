@@ -24,7 +24,10 @@ The reference implementation (`d753672~1`) carried an eighth, unspecced
 seven and forbids adding signals, so it is NOT reproduced here.
 
 Signal 7 contributes no reason string (parity): it fires for every candidate,
-so a reason would be pure noise in the UI.
+so a reason would be pure noise in the UI. For the same reason it is
+SUBTRACTED before ``min_confidence`` is applied — see :func:`suggest`: a
+signal that fires unconditionally must not be what decides which candidates
+survive the floor.
 
 Also exposed for ARBITRARY TEXT (spec 13 §3 cross-check): auto-organize
 scores ad-hoc selections, not only indexed capture files.
@@ -213,6 +216,24 @@ def calculate_score(
         if tag == candidate.normalized_name:
             score += weights.normalized_tag_match
             reasons.append(f"Tag '{tag}' (normalized) matches")
+            continue
+        # …and the same signal absorbs the MORPHOLOGICAL variation the
+        # `tag_normalization` map exists for but cannot enumerate: Matt's
+        # `<topic>-system` convention and singular/plural drift. On the real
+        # backlog `productivity-system` (65 captures) never reached
+        # `areas/productivity` and `principle` (39) never reached
+        # `areas/principles`; each near-miss dropped the capture into the
+        # no-signal fallback. Scored at the NORMALIZED weight, so a genuine
+        # exact match still outranks a near-miss — signal #1 fires for it too.
+        #
+        # Variants are derived HERE, at match time. `frontmatter.normalize_tag`
+        # is deliberately NOT touched: it also builds learning association
+        # keys, the `<type>/<folder>` tag a move writes, and the frontmatter
+        # that lands on disk, so morphing it would corrupt learning and vault
+        # data (architect ruling, 2026-08-16).
+        if _tag_variant_matches(tag, candidate.normalized_name, config):
+            score += weights.normalized_tag_match
+            reasons.append(f"Tag '{tag}' ~ folder '{candidate.name}'")
 
     # 3. learned association — 1.8 × learned score (spec 04 §2 #3 / §4)
     learned = get_association_score(
@@ -239,18 +260,94 @@ def calculate_score(
             score += similarity * weights.alias_similarity
             reasons.append(f"Alias '{alias}' similar")
 
-    # 6. context match — 1.0, substring either direction (spec 04 §2 #6)
-    context_text = " ".join(capture.context).strip().lower()
-    folder_name = candidate.name.strip().lower()
-    if context_text and folder_name:
-        if folder_name in context_text or context_text in folder_name:
-            score += weights.context_match
-            reasons.append("Context matches folder")
+    # 6. context match — 1.0, either direction, at TOKEN granularity
+    #    (spec 04 §2 #6). See `_contains_token_run`.
+    if _context_matches(" ".join(capture.context), candidate.name):
+        score += weights.context_match
+        reasons.append("Context matches folder")
 
     # 7. folder-type bonus — always fires, no reason string (spec 04 §2 #7)
     score += _type_bonus(candidate.type, config)
 
     return score, reasons
+
+
+def _tag_variant_matches(tag: str, folder: str, config: SuggestionsConfig) -> bool:
+    """Does ``tag`` reach ``folder`` after a light morphological pass?
+
+    Two rules, both symmetric, applied to the already-normalized forms:
+
+    1. strip a configured suffix (``suggestions.tag_suffix_strip``, default
+       ``-system`` / ``-systems``) from either side;
+    2. naive singular/plural — a trailing ``s`` on either side.
+
+    Both may apply together (``principles-system`` → ``principle``). This is
+    deliberately conservative: no stemmer, no ``-es``/``-ies`` rules, nothing
+    that could singularize an unrelated word into a folder name.
+    """
+    if not tag or not folder:
+        return False
+    return bool(_tag_variants(tag, config) & _tag_variants(folder, config))
+
+
+def _tag_variants(value: str, config: SuggestionsConfig) -> set[str]:
+    variants = {value}
+    for suffix in config.tag_suffix_strip:
+        clean = suffix.strip().lower()
+        if clean and value.endswith(clean) and len(value) > len(clean):
+            variants.add(value[: -len(clean)])
+    for variant in list(variants):
+        if variant.endswith("s") and len(variant) > 1:
+            variants.add(variant[:-1])
+        else:
+            variants.add(variant + "s")
+    return {v for v in variants if v}
+
+
+def _tokens(text: str) -> list[str]:
+    """Lower-cased alphanumeric runs; everything else separates tokens."""
+    out: list[str] = []
+    current: list[str] = []
+    for char in text.lower():
+        if char.isalnum():
+            current.append(char)
+        elif current:
+            out.append("".join(current))
+            current = []
+    if current:
+        out.append("".join(current))
+    return out
+
+
+def _contains_token_run(haystack: list[str], needle: list[str]) -> bool:
+    """Is ``needle`` a CONTIGUOUS run of tokens inside ``haystack``?"""
+    if not needle or len(needle) > len(haystack):
+        return False
+    for start in range(len(haystack) - len(needle) + 1):
+        if haystack[start : start + len(needle)] == needle:
+            return True
+    return False
+
+
+def _context_matches(context_text: str, folder_name: str) -> bool:
+    """Spec 04 §2 #6's "case-insensitive substring, either way", anchored on
+    TOKEN boundaries.
+
+    A raw substring test made short folder names match inside unrelated
+    words: `resources/ui` was the rank-1 suggestion for a capture whose whole
+    context was "quitting toastmasters" — the ``ui`` inside ``q-ui-tting``.
+    Context is the only signal that reads free prose and almost nothing else
+    fires on the real corpus, so those misfires reliably reached rank 1
+    (sanctioned deviation from the literal "substring" wording, architect
+    ruling 2026-08-16).
+    """
+    context_tokens = _tokens(context_text)
+    folder_tokens = _tokens(folder_name)
+    if not context_tokens or not folder_tokens:
+        return False
+    return _contains_token_run(context_tokens, folder_tokens) or _contains_token_run(
+        folder_tokens, context_tokens
+    )
 
 
 def _type_bonus(candidate_type: str, config: SuggestionsConfig) -> float:
@@ -305,8 +402,9 @@ def suggest(
 ) -> list[Suggestion]:
     """Full ranking (spec 04 §1-2):
 
-    - score every candidate; drop those below ``learning.min_confidence``
-      (archive entry exempt);
+    - score every candidate; drop those whose SIGNAL score (the total minus
+      the always-firing type bonus) is below ``learning.min_confidence``
+      (archive entry exempt) — see below;
     - STABLE sort, score descending, tiebreak name ascending;
     - truncate so the returned list is EXACTLY ≤ ``max_suggestions``
       INCLUDING the synthetic archive entry (off-by-one fixed, 04 §1);
@@ -316,6 +414,23 @@ def suggest(
 
     Route injection (11 §1) happens ABOVE this layer (routes.merge_route_
     suggestions) so scoring stays route-agnostic and pure.
+
+    THE FLOOR APPLIES TO THE SIGNAL SCORE, NOT THE TOTAL (architect ruling,
+    2026-08-16). ``min_confidence`` defaults to 0.3, which is >= the areas
+    (0.2) and resources (0.1) type bonuses, so comparing it against the TOTAL
+    made the always-firing signal #7 decide survival: on the real vault 83 of
+    136 PARA folders could not be returned at ANY ``max_suggestions``, while
+    the 53 ``projects/`` folders all came back at exactly 0.30 with an empty
+    reason list — an identical 9-row list for 1450 of 1858 backlog captures,
+    ordered by an ASCII accident (``projects/B2-polish`` won 1450 times
+    because "B" sorts before "a"). Subtracting the type bonus first resolves
+    spec 04 §2's self-contradiction ("every folder is technically a candidate
+    — ranking does the real work" vs "apply min_confidence as the documented
+    floor"): every folder is still SCORED and the bonus still RANKS, but a
+    candidate with no evidence behind it is not offered. A capture that fires
+    no signal therefore returns the archive entry alone — the honest "no
+    confident destination" state — and every non-archive suggestion carries
+    at least one reason.
     """
     min_confidence = config.learning.min_confidence
 
@@ -324,7 +439,8 @@ def suggest(
         if candidate.type in _EXCLUDED_CANDIDATE_TYPES:
             continue
         score, reasons = calculate_score(capture, candidate, config, learning, now=now)
-        if score <= 0.0 or score < min_confidence:
+        signal_score = score - _type_bonus(candidate.type, config)
+        if signal_score <= 0.0 or signal_score < min_confidence:
             continue
         scored.append(
             Suggestion(

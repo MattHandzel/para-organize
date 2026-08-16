@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,6 +66,8 @@ try:  # PyYAML is optional (06 §1); the stdlib fallback below covers its absenc
     import yaml as _yaml
 except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
     _yaml = None
+
+logger = logging.getLogger(__name__)
 
 # Canonical render order for known capture-schema fields (spec 03 §8).
 KNOWN_FIELD_ORDER: tuple[str, ...] = (
@@ -261,12 +264,24 @@ def load_file(path: Path) -> Document:
     (06 §6 — invalid bytes must not crash a scan). I/O errors propagate."""
     text = Path(path).read_text(encoding="utf-8", errors="replace")
     try:
-        return parse(text)
+        doc = parse(text)
     except FrontmatterError as exc:
         # Loud, with the file path — never a silent skip (09 §1.5).
         raise FrontmatterError(
             f"{path}: {exc}", hint=exc.hint or _PARSE_HINT
         ) from exc
+    duplicates = doc.frontmatter.style.get("duplicate_keys") if doc.frontmatter else None
+    if duplicates:
+        # Visibility, not behaviour: the parse stays YAML last-wins (changing
+        # that would be worse than the disease), but the value a human reads
+        # in the file will vanish the first time organize rewrites the block.
+        logger.warning(
+            "%s: frontmatter key(s) %s appear more than once with different values; "
+            "YAML keeps the LAST one and a rewrite will drop the earlier value",
+            path,
+            ", ".join(duplicates),
+        )
+    return doc
 
 
 # --- normalization + merge helpers (single home for these rules) -----------
@@ -461,9 +476,13 @@ def _build_style(
     lines = fm_text.splitlines(keepends=True)
     chunkable = True
     seen: set[Any] = set()
+    duplicated: set[Any] = set()
     previous = -1
     for key, line_no in key_lines:
-        if key in seen or line_no <= previous or key not in fields:
+        if key in seen:
+            duplicated.add(key)
+            chunkable = False
+        elif line_no <= previous or key not in fields:
             chunkable = False
         seen.add(key)
         previous = line_no
@@ -493,7 +512,45 @@ def _build_style(
         "order": order,
         "snapshot": copy.deepcopy(fields),
         "chunkable": chunkable,
+        # Keys that appear MORE THAN ONCE with genuinely different values.
+        # YAML last-wins is correct and is what PyYAML does, so nothing here
+        # changes the parse — but rewriting the block re-emits one entry, and
+        # the earlier value a human currently reads on line 3 disappears. The
+        # real vault has files where that loses a distinct value, so the fact
+        # is recorded and `load_file` warns; silence is the only option that
+        # is definitely wrong.
+        "duplicate_keys": _duplicates_with_differing_values(lines, key_lines, duplicated),
     }
+
+
+def _duplicates_with_differing_values(
+    lines: list[str], key_lines: list[tuple[Any, int]], duplicated: set[Any]
+) -> list[str]:
+    """Of the repeated keys, the ones whose occurrences PARSE differently.
+
+    Re-parses only the chunks of keys already known to repeat, so the common
+    path pays nothing. Two occurrences that differ only by quoting parse to
+    the same value and are not reported — that is a style difference, not a
+    lost value.
+    """
+    if not duplicated:
+        return []
+    values: dict[Any, list[Any]] = {}
+    for idx, (key, line_no) in enumerate(key_lines):
+        if key not in duplicated:
+            continue
+        end = key_lines[idx + 1][1] if idx + 1 < len(key_lines) else len(lines)
+        try:
+            parsed, _ = _parse_mapping("".join(lines[line_no:end]))
+        except FrontmatterError:
+            continue
+        if key in parsed:
+            values.setdefault(key, []).append(parsed[key])
+    return sorted(
+        str(key)
+        for key, seen_values in values.items()
+        if len(seen_values) > 1 and any(not _same(v, seen_values[0]) for v in seen_values[1:])
+    )
 
 
 _KEY_HEAD_RE = re.compile(r"^\s*(?:'(?:[^']|'')*'|\"(?:\\.|[^\"])*\"|[^:#]*?)\s*:\s*(.*)$")

@@ -448,10 +448,21 @@ def record_action(data: LearningData, record: Any, *, now: float) -> LearningDat
     at all.
 
     Skipped: dry runs (a rehearsal is not a precedent — the same rule every
-    other corpus reader applies), operations outside
-    :data:`LEARNED_OPERATIONS`, and records with no destination target.
+    other corpus reader applies), PARTIALLY-APPLIED operations, operations
+    outside :data:`LEARNED_OPERATIONS`, and records with no destination
+    target.
+
+    Spec 04 §33 records "on every **successful** accept/move/merge". A
+    partially-applied move copied the note but never archived the original,
+    so the destination is not where the note ended up — and teaching it makes
+    the NEXT capture more likely to be steered at a destination that just
+    failed. Three failed moves against one folder produced an association
+    with ``count: 3, success_rate: 1.0``, and every retry compounded it.
     """
-    if bool(getattr(getattr(record, "context", None), "dry_run", False)):
+    context = getattr(record, "context", None)
+    if bool(getattr(context, "dry_run", False)):
+        return None
+    if getattr(context, "partial_failure", None) is not None:
         return None
     if str(getattr(record, "operation", "")) not in LEARNED_OPERATIONS:
         return None

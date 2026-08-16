@@ -140,6 +140,33 @@ def test_index_stats_json_exact_counts(core: Core) -> None:
     assert stats["parse_errors"] == 1  # the broken-yaml quirk file, indexed empty
 
 
+def test_index_full_stats_reindexes_before_reporting(core: Core) -> None:
+    """`--full --stats` used to silently ignore `--full` and report the
+    UNTOUCHED index: on fresh state that is `total: 0` where `--full` alone
+    indexes the whole vault. A silently wrong answer, which 09 §1.5
+    forbids."""
+    assert not (core.state_dir / "index.json").exists()
+    proc = core.run("index", "--full", "--stats", "--json")
+    assert proc.returncode == 0, proc.stderr
+    stats = json.loads(proc.stdout)  # `--json` stays parseable
+    assert stats["total"] == 21
+    assert (core.state_dir / "index.json").is_file()
+
+
+def test_index_full_stats_human_output_reports_both(core: Core) -> None:
+    proc = core.run("index", "--full", "--stats")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith("reindexed 21 notes in ")
+    assert "total: 21" in proc.stdout
+
+
+def test_index_full_stats_honors_dry_run(core: Core) -> None:
+    proc = core.run("--dry-run", "index", "--full", "--stats")
+    assert proc.returncode == 0, proc.stderr
+    assert "would reindex 21 notes" in proc.stdout
+    assert not (core.state_dir / "index.json").exists()
+
+
 def test_index_missing_config_is_a_loud_error_not_a_traceback(core: Core) -> None:
     env = dict(core.env, ORGANIZE_CORE_CONFIG_DIR=str(core.config_dir / "nope"))
     proc = core.run("index", env=env)
@@ -156,6 +183,32 @@ def test_debug_flag_adds_the_traceback(core: Core) -> None:
     assert proc.returncode == 1
     assert "Traceback" in proc.stderr
     assert "ConfigError: config file not found" in proc.stderr
+
+
+def test_an_unexpected_exception_is_one_attributable_line_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The one in-process case in this file: forcing a REAL bug needs a
+    handler injection, which a subprocess cannot take. A sweep of `move` over
+    the real backlog emitted seven bare tracebacks, unattributable to any
+    note. A bug must still be one loud line naming the operation and its
+    subject; `--debug` is the only way to see the stack (09 §1.5)."""
+    from organize_core import cli
+
+    def boom(_args: object) -> int:
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setitem(cli._HANDLERS, "move", boom)
+
+    assert cli.main(["move", "capture/raw_capture/x.md", "projects/blog"]) == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "internal error in `organize move capture/raw_capture/x.md`" in err
+    assert "RuntimeError: kaboom" in err
+    assert "--debug" in err
+
+    assert cli.main(["--debug", "move", "capture/raw_capture/x.md", "projects/blog"]) == 1
+    assert "Traceback" in capsys.readouterr().err
 
 
 def test_explicit_dir_flags_beat_the_environment(core: Core, tmp_path: Path) -> None:
@@ -211,6 +264,21 @@ def test_suggest_text_path_spec_13_3(core: Core) -> None:
     assert payload["subject"] == "--text"
     assert payload["suggestions"][0]["route"] == "impro"
     assert payload["suggestions"][0]["description"] == "Improv and performance practice."
+
+
+def test_suggest_json_entries_carry_the_rank_move_documents(core: Core) -> None:
+    """`organize move --suggestions-json` documents its input as
+    `{path, score, rank, reasons}`, but `suggest --json` emitted no `rank`,
+    so a client building that shape by hand had nothing to copy."""
+    core.index()
+    proc = core.run("suggest", CAPTURE, "--json")
+    assert proc.returncode == 0, proc.stderr
+    entries = json.loads(proc.stdout)["suggestions"]
+    assert entries, "the fixture capture has a matching route"
+    assert [e["rank"] for e in entries] == list(range(1, len(entries) + 1))
+    # the documented shape is now buildable straight from this payload
+    for entry in entries:
+        assert {"path", "score", "rank", "reasons"} <= set(entry)
 
 
 def test_suggest_without_note_or_text_is_a_usage_error(core: Core) -> None:

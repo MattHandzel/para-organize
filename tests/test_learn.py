@@ -992,6 +992,39 @@ def test_record_action_ignores_a_dry_run() -> None:
     assert learn_mod.record_action(LearningData(), record, now=NOW) is None
 
 
+def test_record_action_ignores_a_partially_applied_operation() -> None:
+    """Spec 04 §33 learns on every SUCCESSFUL accept/move/merge. A move that
+    copied the note but never archived the original did not put the note
+    where the record says — and on real data three such failures taught an
+    association with ``count: 3, success_rate: 1.0``, steering later captures
+    at a destination that had just failed."""
+    from organize_core.actions import ActionContext
+
+    record = _action_record(["meeting"], f"{DEST}/note.md")
+    incomplete = replace_context(
+        record, ActionContext(partial_failure="archiving the original failed: EACCES")
+    )
+    assert learn_mod.record_action(LearningData(), incomplete, now=NOW) is None
+    # the identical record without the marker still teaches — the guard is
+    # the marker, not the shape of the record
+    assert learn_mod.record_action(LearningData(), record, now=NOW) is not None
+
+
+def test_record_action_ignores_the_legacy_filters_spelling_of_the_marker() -> None:
+    """Records written before ``partial_failure`` was promoted are already on
+    disk in Matt's corpus; they must keep being recognized as non-precedents
+    when they are read back."""
+    from organize_core.actions import ActionRecord
+
+    record = _action_record(["meeting"], f"{DEST}/note.md")
+    payload = record.to_json()
+    payload["context"]["partial_failure"] = None
+    payload["context"]["filters"] = {"partial_failure": "archiving the original failed"}
+    reread = ActionRecord.from_json(payload)
+    assert reread.context.partial_failure == "archiving the original failed"
+    assert learn_mod.record_action(LearningData(), reread, now=NOW) is None
+
+
 def replace_context(record: Any, context: Any) -> Any:
     import dataclasses
 

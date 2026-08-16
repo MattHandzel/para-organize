@@ -557,12 +557,31 @@ class WriterQueue:
             item.done.set()
 
 
+#: How many writers may be admitted ahead of a waiting reader before the
+#: readers that are already queued are let through as a batch. Bounds the
+#: read tail at (this many) write operations instead of "however long the
+#: bulk file-away runs" — spec 09 §4 budgets a UI action at < 50 ms.
+_WRITER_BATCH_LIMIT = 8
+
+
 class _ReadWriteLock:
-    """Writer-preferring many-readers/one-writer lock.
+    """PHASE-FAIR many-readers/one-writer lock.
 
     Guards the warm index: queued writers already run one at a time, but a
     read iterating the record map while a writer mutates it would tear. Read
     methods still run concurrently with each other (spec 10 §1).
+
+    Writers keep priority — that is what stops a read flood from starving the
+    file-away path — but ONLY for ``_WRITER_BATCH_LIMIT`` consecutive
+    acquisitions. The lock was strictly writer-preferring, so a reader waited
+    while ANY writer was queued; with a bulk move running back to back that
+    condition never cleared and reads that take 5 ms idle were measured at
+    2.3 s (folder.list) and 28.9 s (search.query) — the picker freezing for
+    seconds at a time while `folder.list`'s docstring promised "never
+    queued". A releasing writer now hands the queued readers an explicit
+    pass, so read latency is bounded by at most ``_WRITER_BATCH_LIMIT``
+    writes and writers can never be postponed indefinitely either (passes are
+    granted in bounded batches, never renewed by newly arriving readers).
     """
 
     def __init__(self) -> None:
@@ -570,12 +589,23 @@ class _ReadWriteLock:
         self._readers = 0
         self._writer = False
         self._waiting_writers = 0
+        self._waiting_readers = 0
+        #: writers admitted since the last batch of readers was let through
+        self._writer_batch = 0
+        #: readers still owed an admission from the last granted pass
+        self._reader_pass = 0
 
     @contextlib.contextmanager
     def read(self) -> Iterator[None]:
         with self._cond:
-            while self._writer or self._waiting_writers:
-                self._cond.wait()
+            self._waiting_readers += 1
+            try:
+                while self._writer or (self._waiting_writers and self._reader_pass == 0):
+                    self._cond.wait()
+            finally:
+                self._waiting_readers -= 1
+            if self._reader_pass > 0:
+                self._reader_pass -= 1
             self._readers += 1
         try:
             yield
@@ -590,16 +620,29 @@ class _ReadWriteLock:
         with self._cond:
             self._waiting_writers += 1
             try:
-                while self._writer or self._readers:
+                # `_reader_pass` is a HARD gate, not a hint: without it the
+                # woken readers merely race the woken writers for the
+                # condition, the writers usually win, and the bound the pass
+                # exists to provide degrades to "eventually" (measured: a
+                # reader still waited behind 12 writes with a limit of 8).
+                while self._writer or self._readers or self._reader_pass:
                     self._cond.wait()
             finally:
                 self._waiting_writers -= 1
             self._writer = True
+            self._writer_batch += 1
         try:
             yield
         finally:
             with self._cond:
                 self._writer = False
+                if self._writer_batch >= _WRITER_BATCH_LIMIT and self._waiting_readers:
+                    # Hand the readers queued RIGHT NOW a pass, and start a
+                    # fresh writer batch. Bounded on purpose: readers that
+                    # arrive after this point wait for the next batch, so a
+                    # steady read stream cannot postpone the writer queue.
+                    self._reader_pass = self._waiting_readers
+                    self._writer_batch = 0
                 self._cond.notify_all()
 
 
@@ -663,11 +706,36 @@ class _Connection:
             line = self.outbox.get()
             if line is None:
                 return
-            try:
-                self.sock.sendall(line.encode("utf-8", errors="replace"))
-            except OSError:
-                self.close()
+            if not self._send_bytes(line.encode("utf-8", errors="replace")):
                 return
+
+    def _send_bytes(self, payload: bytes) -> bool:
+        """Write one whole line, or close the connection LOUDLY.
+
+        A send timeout is NOT a dead peer — it is a slow reader — so the
+        remaining bytes are retried from where the write stopped instead of
+        abandoning the line half-written (which delivered truncated JSON to
+        the client). A genuine OSError still closes, but never silently: an
+        unexplained mid-line disconnect is unattributable from the client
+        side, which is exactly how this went unnoticed under soak.
+        """
+        sent = 0
+        while sent < len(payload):
+            try:
+                sent += self.sock.send(payload[sent:])
+            except TimeoutError:
+                continue  # slow drainer: resume from `sent`, never truncate
+            except OSError as exc:
+                logger.error(
+                    "server: conn%d dropped after %d of %d bytes: %s",
+                    self.id,
+                    sent,
+                    len(payload),
+                    exc,
+                )
+                self.close()
+                return False
+        return True
 
     def _read_loop(self) -> None:
         buffer = b""
@@ -1012,7 +1080,17 @@ class OrganizeServer:
                     return
                 raise
             self._touch()
-            client.settimeout(_ACCEPT_POLL_SECONDS)
+            # NO timeout on the ACCEPTED socket. `_ACCEPT_POLL_SECONDS` is the
+            # accept loop's stop/idle polling cadence — applying it to the
+            # client made `sendall` raise `socket.timeout` (an OSError) as soon
+            # as the ~208 KB send buffer filled, i.e. whenever a client was
+            # more than 50 ms behind on draining. The handler then closed the
+            # connection MID-LINE with no error frame and no log entry, so a
+            # multi-MB `search.query` response was truncated into invalid JSON
+            # for any client that renders while it reads (every Neovim client).
+            # Blocking is safe: `shutdown()` closes every connection, which
+            # wakes a blocked `recv`/`sendall`.
+            client.settimeout(None)
             conn = _Connection(self, client, next(self._conn_ids))
             with self._connections_lock:
                 self._connections[conn.id] = conn
@@ -1095,25 +1173,46 @@ class OrganizeServer:
 
         self.emit(EVENT_OP_PROGRESS, {"method": method, "phase": "start", "params": _echo(params)})
 
-        def run() -> Any:
+        def run() -> tuple[Any, dict[str, int] | None]:
             with self._rwlock.write():
-                return handler(conn, params)
+                handled = handler(conn, params)
+                # Snapshot the stats HERE, under the write lock. Taking them
+                # after `submit` returns reads the record map with NO lock
+                # held while the next queued writer mutates it, and the
+                # resulting RuntimeError("dictionary changed size during
+                # iteration") escaped dispatch — turning an operation that had
+                # already written the destination, archived the original and
+                # appended its oplog line into a -32603 for the client. A
+                # client that retries on error then files the note twice.
+                stats = self.index.stats() if method in INDEX_CHANGING_METHODS else None
+                return handled, stats
 
         try:
-            result = self.writer.submit(run)
+            result, stats = self.writer.submit(run)
         except Exception as exc:
-            self.emit(
+            self._emit_best_effort(
                 EVENT_OP_PROGRESS,
                 {"method": method, "phase": "failed", "error": f"{type(exc).__name__}: {exc}"},
             )
             raise
-        self.emit(
+        # THE VAULT HAS ALREADY CHANGED. Nothing below may raise past this
+        # point: a notification that fails to go out is a lost event, while a
+        # completed mutation reported as an error is a lost operation.
+        self._emit_best_effort(
             EVENT_OP_PROGRESS,
             {"method": method, "phase": "complete", "result": _summarize(result)},
         )
-        if method in INDEX_CHANGING_METHODS:
-            self.emit(EVENT_INDEX_UPDATED, {"method": method, "stats": self.index.stats()})
+        if stats is not None:
+            self._emit_best_effort(EVENT_INDEX_UPDATED, {"method": method, "stats": stats})
         return result
+
+    def _emit_best_effort(self, event: str, data: dict[str, Any]) -> None:
+        """``emit`` that can never fail its caller — for the post-write
+        notifications, where the operation is already applied."""
+        try:
+            self.emit(event, data)
+        except Exception:  # noqa: BLE001 - a lost event never fails an applied op
+            logger.exception("server: could not emit %s", event)
 
     # --- handlers: reads -------------------------------------------------
 
@@ -1364,7 +1463,11 @@ class OrganizeServer:
 
     def _folder_list(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
         """``folder.list`` — every immediate PARA subfolder, with its spec 11
-        §3 description where one exists. Read-only; never queued.
+        §3 description where one exists. Read-only: it never enters the
+        WriterQueue, but it DOES take the index read lock, so it can wait
+        behind an in-flight write (bounded by ``_WRITER_BATCH_LIMIT``, see
+        ``_ReadWriteLock``). The docstring used to promise "never queued",
+        which is why a 2.3 s tail under bulk-move load went unexplained.
 
         Enumerated from DISK (``VaultIndex.para_subfolders``), not from the
         indexed notes, so a freshly created and still-empty folder is

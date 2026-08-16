@@ -135,6 +135,14 @@ class SuggestionsConfig:
     learning: LearningConfig = field(default_factory=LearningConfig)
     # tag_normalization map, e.g. {"project": "projects"} (spec 04 §2 #2).
     tag_normalization: dict[str, str] = field(default_factory=dict)
+    #: Tag suffixes signal #2 strips when looking for a folder (spec 04 §2 #2's
+    #: "variation" clause). Matt's dominant convention is `<topic>-system`:
+    #: `productivity-system` appears on 65 real backlog captures and never
+    #: reached `areas/productivity`, because the tag signals are exact-string.
+    #: MATCH-TIME ONLY — `frontmatter.normalize_tag` is deliberately NOT
+    #: touched, since it also feeds learning association keys, the
+    #: `<type>/<folder>` tag a move writes, and the frontmatter on disk.
+    tag_suffix_strip: list[str] = field(default_factory=lambda: ["-system", "-systems"])
 
 
 # ---------------------------------------------------------------------------
@@ -787,6 +795,7 @@ _SUGGESTION_KEYS = {
     "weights",
     "learning",
     "tag_normalization",
+    "tag_suffix_strip",
 }
 
 
@@ -889,6 +898,9 @@ def _validate_suggestions(v: _Validator, raw: dict[str, Any]) -> SuggestionsConf
         weights=weights,
         learning=learning,
         tag_normalization=v.string_map(table, "tag_normalization", "suggestions"),
+        tag_suffix_strip=v.string_list(
+            table, "tag_suffix_strip", "suggestions", d_s.tag_suffix_strip
+        ),
     )
 
 
@@ -1692,6 +1704,11 @@ archives = "archive"
 max_suggestions = 10
 always_show_archive = true
 
+# Tag suffixes the normalized-tag signal strips when looking for a folder, so
+# `productivity-system` reaches `areas/productivity`. Match-time only: nothing
+# here changes a tag that is written to a note or to learning.json.
+tag_suffix_strip = ["-system", "-systems"]
+
 # Scoring weights (spec 04 §2). These are the defaults-of-record; acceptance
 # tests assert them numerically.
 [suggestions.weights]
@@ -1714,7 +1731,11 @@ recency_decay = 0.9      # per-day base: 0.9 ** days_since_use
 frequency_boost = 1.2    # applied once an association is used > 5 times
 max_history = 1000       # association cap; oldest by last_used evicted first
 eviction_days = 90       # hard-delete horizon
-min_confidence = 0.3     # candidate floor (the archive entry is exempt)
+# Candidate floor, applied to the SIGNAL score — the total MINUS the
+# always-firing folder-type bonus (the archive entry is exempt). Comparing it
+# against the total would make signal #7 decide survival, which put every
+# `areas/` and `resources/` folder permanently out of reach at this default.
+min_confidence = 0.3
 
 # Tag → PARA-folder normalization used by the normalized-tag signal.
 [suggestions.tag_normalization]

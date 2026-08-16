@@ -742,6 +742,49 @@ def test_export_of_an_empty_corpus_is_zero(actions_dir: Path, tmp_path: Path) ->
 # --- stats -----------------------------------------------------------------
 
 
+def test_partially_applied_operations_are_counted_but_never_an_accept(
+    actions_dir: Path,
+) -> None:
+    """A move that copied the note but never archived the original DID touch
+    the vault — so it stays in `total`/`by_operation` and is named by
+    `partial_failures` — but it is not an accepted rank-1 suggestion. On real
+    data three such failures reported `top_accept_rate: 1.0`."""
+    recorder = ActionRecorder(actions_dir)
+    shown = (SuggestionShown(path="projects/blog", score=3.25, rank=1),)
+    recorder.record(
+        make_record(
+            id="act_ok",
+            operation="move",
+            context=ActionContext(suggestions_shown=shown, chosen_rank=1),
+        )
+    )
+    for index in range(3):
+        recorder.record(
+            make_record(
+                id=f"act_bad_{index}",
+                operation="move",
+                context=ActionContext(
+                    suggestions_shown=shown,
+                    chosen_rank=1,
+                    partial_failure="archiving the original failed: EACCES",
+                ),
+            )
+        )
+
+    stats = ActionRecorder(actions_dir).stats()
+    assert stats["total"] == 4
+    assert stats["by_operation"] == {"move": 4}
+    assert stats["partial_failures"] == 3
+    assert stats["suggestions"] == {
+        "with_suggestions": 1,
+        "top_chosen": 1,
+        "other_rank_chosen": 0,
+        "none_chosen": 0,
+        "top_accept_rate": 1.0,
+        "rank_histogram": {1: 1},
+    }
+
+
 def test_stats_of_an_empty_corpus(actions_dir: Path) -> None:
     assert ActionRecorder(actions_dir).stats() == {
         "total": 0,
@@ -752,6 +795,7 @@ def test_stats_of_an_empty_corpus(actions_dir: Path) -> None:
         "by_actor": {},
         "by_route": {},
         "by_edit_mode": {},
+        "partial_failures": 0,
         "suggestions": {
             "with_suggestions": 0,
             "top_chosen": 0,
@@ -862,6 +906,7 @@ def test_stats_exact_values_over_a_known_corpus(actions_dir: Path) -> None:
         },
         "by_route": {"workout": 2},
         "by_edit_mode": {"integrate": 2, "append": 1},
+        "partial_failures": 0,
         "suggestions": {
             "with_suggestions": 3,
             "top_chosen": 1,

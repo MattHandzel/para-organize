@@ -216,6 +216,85 @@ def test_signal_2_normalized_tag_match() -> None:
     assert reasons == ["Tag 'impro' (normalized) matches"]
 
 
+def test_signal_2_absorbs_the_system_suffix_convention() -> None:
+    """Real-data goldens. `productivity-system` is on 65 backlog captures and
+    never reached `areas/productivity`; `principle` is on 39 and never reached
+    `areas/principles`. Both now fire signal #2 (weight 1.5) with a reason
+    naming the derivation (architect ruling 2026-08-16)."""
+    score, reasons = calculate_score(
+        view(normalized_tags=("productivity-system",)), cand("productivity", "areas"),
+        DEFAULTS, EMPTY_LEARNING, now=NOW,
+    )
+    assert score == pytest.approx(W_NORMALIZED + B_AREAS, rel=1e-12)  # 1.7
+    assert reasons == ["Tag 'productivity-system' ~ folder 'productivity'"]
+
+    score, reasons = calculate_score(
+        view(normalized_tags=("principle",)), cand("principles", "areas"),
+        DEFAULTS, EMPTY_LEARNING, now=NOW,
+    )
+    assert score == pytest.approx(W_NORMALIZED + B_AREAS, rel=1e-12)
+    assert reasons == ["Tag 'principle' ~ folder 'principles'"]
+
+
+def test_signal_2_variant_matching_does_not_singularize_unrelated_words() -> None:
+    """Deliberately conservative: a trailing `s` and the configured suffixes,
+    nothing else. No stemmer, no `-es`/`-ies` rules — nothing that could fold
+    one real word into a different folder's name."""
+    for tag, folder in (
+        ("business", "busy"),
+        ("physics", "physical"),
+        ("relationships", "relation"),
+        ("system", "systems-thinking"),
+        ("class", "classes"),  # the -es rule is deliberately absent
+        ("mindset", "mind"),
+    ):
+        score, reasons = calculate_score(
+            view(normalized_tags=(tag,)), cand(folder, "areas", normalized=folder),
+            DEFAULTS, EMPTY_LEARNING, now=NOW,
+        )
+        assert reasons == [], (tag, folder, reasons)
+        assert score == pytest.approx(B_AREAS, rel=1e-12)
+
+
+def test_signal_2_variant_match_never_outranks_a_real_exact_match() -> None:
+    """A near-miss pays the normalized weight only; an exact tag additionally
+    fires signal #1, so the exact folder always wins."""
+    capture = view(tags=("productivity-system",), normalized_tags=("productivity-system",))
+    exact = cand("productivity-system", "areas", normalized="productivity-system")
+    near = cand("productivity", "areas")
+    ranked = suggest(capture, [near, exact], DEFAULTS, EMPTY_LEARNING, now=NOW)
+    assert [s.name for s in ranked] == ["productivity-system", "productivity"]
+    assert ranked[0].score == pytest.approx(W_EXACT + W_NORMALIZED + B_AREAS, rel=1e-12)
+    assert ranked[1].score == pytest.approx(W_NORMALIZED + B_AREAS, rel=1e-12)
+
+
+def test_signal_2_suffix_list_is_configurable() -> None:
+    config = SuggestionsConfig(tag_suffix_strip=["-tracker"])
+    score, reasons = calculate_score(
+        view(normalized_tags=("sleep-tracker",)), cand("sleep", "areas"),
+        config, EMPTY_LEARNING, now=NOW,
+    )
+    assert score == pytest.approx(W_NORMALIZED + B_AREAS, rel=1e-12)
+    assert reasons == ["Tag 'sleep-tracker' ~ folder 'sleep'"]
+    # and the default suffixes are no longer honored once overridden
+    assert calculate_score(
+        view(normalized_tags=("sleep-system",)), cand("sleep", "areas"),
+        config, EMPTY_LEARNING, now=NOW,
+    )[1] == []
+
+
+def test_signal_2_variant_matching_never_touches_the_shared_normalizer() -> None:
+    """Structural pin on the architect's hard constraint: the morphological
+    pass is MATCH-TIME only. `frontmatter.normalize_tag` also builds learning
+    association keys, the `<type>/<folder>` tag a move writes, and the
+    frontmatter that lands on disk — morphing it would corrupt learning keys
+    and vault data."""
+    from organize_core import frontmatter as fm
+
+    assert fm.normalize_tag("productivity-system") == "productivity-system"
+    assert fm.normalize_tag("principle") == "principle"
+
+
 def test_signals_1_and_2_stack() -> None:
     candidate = cand("impro", "resources")
     score, reasons = calculate_score(
@@ -369,6 +448,44 @@ def test_signal_6_empty_context_never_matches() -> None:
     assert reasons == []
 
 
+def test_signal_6_does_not_match_inside_a_word() -> None:
+    """Real-data regression: `resources/ui` was the rank-1 suggestion for a
+    capture whose entire context was "quitting toastmasters" — the "ui" inside
+    q-UI-tting. The match is now anchored on token boundaries (architect
+    ruling 2026-08-16, a sanctioned deviation from 04 §2 #6's literal
+    "substring" wording); context is the only signal that reads free prose, so
+    its misfires reliably reached rank 1."""
+    score, reasons = calculate_score(
+        view(context=("quitting toastmasters",)), cand("ui", "resources"),
+        DEFAULTS, EMPTY_LEARNING, now=NOW,
+    )
+    assert score == pytest.approx(B_RESOURCES, rel=1e-12)
+    assert reasons == []
+
+
+@pytest.mark.parametrize(
+    ("context", "folder", "fires"),
+    [
+        ("reflection", "daily-reflection-system", True),  # whole token inside the folder
+        ("morning standup notes", "standup", True),  # whole token inside the context
+        ("health", "health", True),  # exact equality still fires
+        ("quitting toastmasters", "ui", False),  # inside a word
+        ("classic literature", "class", False),  # prefix of a word
+        ("reflections", "reflection", False),  # a different token, not a substring match
+    ],
+)
+def test_signal_6_matches_whole_tokens_in_either_direction(
+    context: str, folder: str, fires: bool
+) -> None:
+    score, reasons = calculate_score(
+        view(context=(context,)), cand(folder, "resources", normalized=folder),
+        DEFAULTS, EMPTY_LEARNING, now=NOW,
+    )
+    expected = W_CONTEXT + B_RESOURCES if fires else B_RESOURCES
+    assert score == pytest.approx(expected, rel=1e-12)
+    assert reasons == (["Context matches folder"] if fires else [])
+
+
 def test_signal_7_type_bonus_exact_values() -> None:
     """The bonus always fires and carries no reason string (parity)."""
     for para_type, expected in (
@@ -514,28 +631,89 @@ def test_ranking_projects_beats_areas_beats_resources_exact_scores() -> None:
     )
 
 
-def test_min_confidence_drops_bare_areas_and_resources_but_keeps_projects() -> None:
-    """04 §2 ⚠: min_confidence 0.3 is the documented floor. The type bonus
-    alone puts projects exactly AT the floor (kept) and areas/resources
-    below it (dropped)."""
+def test_min_confidence_applies_to_the_signal_score_not_the_total() -> None:
+    """Architect ruling 2026-08-16, resolving spec 04 §2's contradiction
+    ("every folder is technically a candidate — ranking does the real work"
+    vs "apply min_confidence 0.3 as the documented floor").
+
+    The floor is compared against the SIGNAL score — the total MINUS the
+    always-firing type bonus. Against the TOTAL, the default 0.3 sat above
+    the areas (0.2) and resources (0.1) bonuses, so signal #7 alone decided
+    survival: on the real vault 83 of 136 PARA folders were unreachable at
+    any `max_suggestions`, and every `projects/` folder came back at 0.30
+    with an empty reason list.
+    """
     candidates = [
         cand("alpha", "projects"),
         cand("beta", "areas"),
         cand("gamma", "resources"),
     ]
-    result = suggest(view(), candidates, DEFAULTS, EMPTY_LEARNING, now=NOW)
-    assert [s.name for s in result] == ["alpha"]
-    assert result[0].score == pytest.approx(B_PROJECTS, rel=1e-12)
+    # No signal fires: NOTHING survives, regardless of type. Not a single
+    # unexplained row (the old behaviour returned `alpha` at 0.30).
+    assert suggest(view(), candidates, DEFAULTS, EMPTY_LEARNING, now=NOW) == []
+
+    # One shared signal fires on all three: all three survive, and the type
+    # bonus still RANKS them projects > areas > resources (04 §7 acceptance).
+    capture = view(tags=("shared",), normalized_tags=("shared",))
+    shared = [
+        cand("shared", "resources"),
+        cand("shared", "areas"),
+        cand("shared", "projects"),
+    ]
+    ranked = suggest(capture, shared, DEFAULTS, EMPTY_LEARNING, now=NOW)
+    assert [s.type for s in ranked] == ["project", "area", "resource"]
+    assert [round(s.score, 12) for s in ranked] == [3.8, 3.7, 3.6]
+
+
+def test_a_capture_with_no_signal_gets_the_archive_entry_alone() -> None:
+    """The honest "no confident destination" state. 1450 of 1858 real backlog
+    captures used to receive an identical 9-row list of `projects/` folders,
+    every row scored 0.30 with `reasons: []`, ordered by an ASCII accident —
+    `projects/B2-polish` was rank 1 for all of them because "B" sorts before
+    "a"."""
+    candidates = [cand(name, "projects") for name in ("B2-polish", "agent", "blog")]
+    result = suggest(
+        view(), candidates, DEFAULTS, EMPTY_LEARNING, now=NOW, archive_path=ARCHIVE_PATH
+    )
+    assert [s.name for s in result] == [ARCHIVE_SUGGESTION_NAME]
+
+
+def test_every_non_archive_suggestion_carries_at_least_one_reason() -> None:
+    """The floor now filters on evidence, so a suggestion presented to Matt
+    can always say why it is there — signal #7 still contributes no reason
+    string (04 §2), it just no longer carries a candidate on its own."""
+    capture = view(tags=("health",), normalized_tags=("health",), context=("shoulder mobility",))
+    candidates = [
+        cand("health", "areas"),
+        cand("mobility", "resources"),
+        cand("cooking", "projects"),
+    ]
+    result = suggest(
+        capture, candidates, DEFAULTS, EMPTY_LEARNING, now=NOW, archive_path=ARCHIVE_PATH
+    )
+    assert [s.name for s in result] == ["health", "mobility", ARCHIVE_SUGGESTION_NAME]
+    for suggestion in result:
+        assert suggestion.reasons, suggestion
 
 
 def test_min_confidence_is_configurable_and_honored() -> None:
+    """Still a real, honored knob — now measured against the signal score."""
     candidates = [cand("beta", "areas")]
+    # a single learned association worth 0.2 of signal
+    learning = LearningData()
+    learning.associations["generic"] = Association(
+        created_at=NOW,
+        last_used=NOW,
+        destinations={candidates[0].path: DestinationStat(count=1, last_used=NOW)},
+    )
+    learning.statistics = Statistics(total_moves=10)
+    signal = calculate_score(view(), candidates[0], DEFAULTS, learning, now=NOW)[0] - B_AREAS
+    assert 0.15 < signal < 0.65, signal
+
     lenient = SuggestionsConfig(learning=LearningConfig(min_confidence=0.15))
-    assert [s.name for s in suggest(view(), candidates, lenient, EMPTY_LEARNING, now=NOW)] == [
-        "beta"
-    ]
-    strict = SuggestionsConfig(learning=LearningConfig(min_confidence=0.25))
-    assert suggest(view(), candidates, strict, EMPTY_LEARNING, now=NOW) == []
+    assert [s.name for s in suggest(view(), candidates, lenient, learning, now=NOW)] == ["beta"]
+    strict = SuggestionsConfig(learning=LearningConfig(min_confidence=0.65))
+    assert suggest(view(), candidates, strict, learning, now=NOW) == []
 
 
 def test_ties_break_on_name_then_path_deterministically() -> None:
@@ -695,7 +873,11 @@ def test_decayed_learning_ranks_below_fresh_learning() -> None:
     )
     learning.statistics = Statistics(total_moves=10)
 
-    result = suggest(view(), [stale, fresh], DEFAULTS, learning, now=NOW)
+    # A 30-day-old association is worth 0.044 of SIGNAL, below the default
+    # floor, so this ordering assertion needs a config that still admits it —
+    # the point here is the decay ordering, not the floor.
+    lenient = SuggestionsConfig(learning=LearningConfig(min_confidence=0.01))
+    result = suggest(view(), [stale, fresh], lenient, learning, now=NOW)
     assert [s.name for s in result] == ["alpha", "beta"]
     # fresh: 0.5781296526357756 × 1.8 + 0.3
     assert result[0].score == pytest.approx(1.340633374744396, rel=1e-12)
@@ -844,6 +1026,8 @@ def test_from_text_end_to_end_ranking() -> None:
     ]
     result = suggest(v, candidates, DEFAULTS, EMPTY_LEARNING, now=NOW,
                      archive_path=ARCHIVE_PATH)
-    assert [s.name for s in result] == ["health", "cooking", ARCHIVE_SUGGESTION_NAME]
+    # `cooking` and `reading` fire NOTHING, so they are not offered at all —
+    # only the folder the text actually names, plus the archive entry.
+    assert [s.name for s in result] == ["health", ARCHIVE_SUGGESTION_NAME]
     assert result[0].score == pytest.approx(1.2, rel=1e-12)  # 1.0 + 0.2
-    assert result[1].score == pytest.approx(0.3, rel=1e-12)  # bare projects bonus
+    assert result[0].reasons == ("Context matches folder",)

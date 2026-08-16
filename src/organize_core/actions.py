@@ -231,6 +231,21 @@ class SuggestionShown:
         )
 
 
+def _partial_failure_marker(data: dict[str, Any]) -> str | None:
+    """The partial-failure marker, reading BOTH the first-class field and the
+    legacy ``filters["partial_failure"]`` spelling — records written before
+    the promotion are already on disk in Matt's corpus and must keep being
+    recognized as non-precedents."""
+    legacy = data.get("filters")
+    candidates = [data.get("partial_failure")]
+    if isinstance(legacy, dict):
+        candidates.append(legacy.get("partial_failure"))
+    for value in candidates:
+        if value is not None and value is not False:
+            return str(value)
+    return None
+
+
 @dataclass(frozen=True)
 class ActionContext:
     """``context`` block (spec 12 §2).
@@ -246,6 +261,19 @@ class ActionContext:
     ``filters`` entry so that exclusion cannot be forgotten by a new reader
     (it used to live at ``filters["dry_run"]``, which every consumer had to
     know about by convention).
+
+    ``partial_failure`` names what did NOT finish on a spec 05 §1.2
+    partially-applied operation (the destination copy landed; archiving the
+    original failed). The record exists because the vault really did change,
+    so it stays in ``query``/``export`` — that is the audit trail — but the
+    operation did not complete, so it is NOT an accepted suggestion and NOT a
+    doc-12 precedent: ``learn.record_action`` skips it and ``stats`` keeps it
+    out of the accept-rate corpus. First-class for the same reason
+    ``dry_run`` is: it used to be smuggled into ``filters["partial_failure"]``
+    while spec 12 §2 defines ``filters`` as the SESSION's search filters, so
+    neither reader could branch on anything meaningful — and three failed
+    moves consequently taught ``learning.json`` a destination association
+    with ``count: 3, success_rate: 1.0``.
     """
 
     session_id: str | None = None
@@ -257,6 +285,7 @@ class ActionContext:
     vault_stats: dict[str, int] = field(default_factory=dict)
     durations_ms: dict[str, int] = field(default_factory=dict)
     dry_run: bool = False
+    partial_failure: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -269,6 +298,7 @@ class ActionContext:
             "vault_stats": dict(self.vault_stats),
             "durations_ms": dict(self.durations_ms),
             "dry_run": self.dry_run,
+            "partial_failure": self.partial_failure,
         }
 
     @classmethod
@@ -294,6 +324,11 @@ class ActionContext:
             # `false`/absent counts as a dry run, so a corrupt record can only
             # ever be omitted from the corpus, never mistaken for a precedent.
             dry_run=data.get("dry_run", False) is not False,
+            # Same fail-closed reading: any non-null marker means the
+            # operation did not finish, so it can only ever be excluded from
+            # precedent, never mistaken for a completed one. Records written
+            # before this was promoted carry it under `filters`.
+            partial_failure=_partial_failure_marker(data),
         )
 
 
@@ -848,6 +883,13 @@ class ActionRecorder:
         where suggestions were shown and none was chosen — a skip — counts
         against the engine, per 12 §2 "a rejection is as much signal").
         Rates are ``None`` when their denominator is zero.
+
+        PARTIALLY-APPLIED operations (``context.partial_failure``) are counted
+        in ``total``/``by_operation`` — they really did touch the vault, and
+        ``partial_failures`` reports how many — but they are kept OUT of the
+        suggestion corpus entirely: the operation never completed, so calling
+        it an accepted rank-1 suggestion overstates the engine. Three failed
+        moves used to read as ``top_accept_rate: 1.0``.
         """
         by_operation: dict[str, int] = {}
         by_actor: dict[str, int] = {}
@@ -864,6 +906,8 @@ class ActionRecorder:
         first_ts: str | None = None
         last_ts: str | None = None
 
+        partial_failures = 0
+
         for rec in self.query(include_dry_run=include_dry_run):
             total += 1
             by_operation[rec.operation] = by_operation.get(rec.operation, 0) + 1
@@ -872,7 +916,12 @@ class ActionRecorder:
                 by_route[rec.context.route] = by_route.get(rec.context.route, 0) + 1
             if rec.edit_mode:
                 by_edit_mode[rec.edit_mode] = by_edit_mode.get(rec.edit_mode, 0) + 1
-            if rec.context.suggestions_shown:
+            # Counted and named, but kept out of every suggestion metric: an
+            # operation that did not finish is not an accepted suggestion.
+            incomplete = rec.context.partial_failure is not None
+            if incomplete:
+                partial_failures += 1
+            if rec.context.suggestions_shown and not incomplete:
                 with_suggestions += 1
                 rank = rec.context.chosen_rank
                 if rank is None:
@@ -881,7 +930,7 @@ class ActionRecorder:
                     top_chosen += 1
                 else:
                     other_rank_chosen += 1
-            if rec.context.chosen_rank is not None:
+            if rec.context.chosen_rank is not None and not incomplete:
                 rank_histogram[rec.context.chosen_rank] = (
                     rank_histogram.get(rec.context.chosen_rank, 0) + 1
                 )
@@ -902,6 +951,7 @@ class ActionRecorder:
             "by_actor": by_actor,
             "by_route": by_route,
             "by_edit_mode": by_edit_mode,
+            "partial_failures": partial_failures,
             "suggestions": {
                 "with_suggestions": with_suggestions,
                 "top_chosen": top_chosen,

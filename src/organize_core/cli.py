@@ -561,8 +561,15 @@ def _archive_folder(config: Config) -> Path:
     return (config.vault.root / archives / config.vault.archive_capture_path).resolve()
 
 
-def _suggestion_json(suggestion: Suggestion, config: Config) -> dict[str, Any]:
-    return {
+def _suggestion_json(suggestion: Suggestion, config: Config, rank: int | None = None) -> dict[str, Any]:
+    """One `--json` suggestion entry.
+
+    ``rank`` is emitted because `organize move --suggestions-json` documents
+    its input as ``{path, score, rank, reasons}``: a client that builds that
+    shape by hand from this payload had no ``rank`` to copy, even though it
+    is exactly the 1-based list position the human output already prints.
+    """
+    payload = {
         "path": suggestion.path,
         "relative_path": _rel(suggestion.path, config) if suggestion.path else "",
         "name": suggestion.name,
@@ -572,6 +579,9 @@ def _suggestion_json(suggestion: Suggestion, config: Config) -> dict[str, Any]:
         "route": suggestion.route,
         "description": suggestion.description,
     }
+    if rank is not None:
+        payload["rank"] = rank
+    return payload
 
 
 def _print_result(result: OperationResult, config: Config) -> None:
@@ -593,6 +603,11 @@ def _print_result(result: OperationResult, config: Config) -> None:
     tag_added = result.details.get("tag_added")
     if tag_added:
         _emit(f"  tag added: {tag_added}")
+    noop = result.details.get("noop")
+    if noop:
+        # A successful op that deliberately changed nothing still says so —
+        # silence here reads as "filed" (09 §1.5 loud failure's twin).
+        _emit(f"  {noop} — nothing was written")
     if result.dry_run:
         _emit("  nothing was written")
 
@@ -631,6 +646,28 @@ def cmd_index(args: argparse.Namespace) -> int:
     index = _open_index(paths, config)
 
     if args.stats:
+        # `--full --stats` used to print the stats of the UNTOUCHED index and
+        # silently skip the reindex: on fresh state that is `total: 0` in
+        # 0.09s where `--full` alone indexes 13,362 notes — a silently wrong
+        # answer, which 09 §1.5 forbids. The two flags now compose: reindex
+        # first (honoring --dry-run), then report.
+        if args.full:
+            if args.dry_run:
+                total = index.scan()
+                line = (
+                    f"index (dry-run): would reindex {total} notes; "
+                    f"{paths.index_path} not written"
+                )
+            else:
+                result = index.full_reindex()
+                line = (
+                    f"reindexed {result['total']} notes in {result['duration']:.2f}s "
+                    f"-> {paths.index_path}"
+                )
+            # `--json` must stay parseable: the progress line would prefix the
+            # payload with non-JSON.
+            if not args.json:
+                _emit(line)
         stats = index.stats()
         if args.json:
             _json_out(stats)
@@ -725,7 +762,15 @@ def cmd_suggest(args: argparse.Namespace) -> int:
     ranked = [_with_description(item, index, config) for item in ranked]
 
     if args.json:
-        _json_out({"subject": subject, "suggestions": [_suggestion_json(s, config) for s in ranked]})
+        _json_out(
+            {
+                "subject": subject,
+                "suggestions": [
+                    _suggestion_json(s, config, rank)
+                    for rank, s in enumerate(ranked, start=1)
+                ],
+            }
+        )
         return 0
     if not ranked:
         _emit(f"no suggestions for {subject}")
@@ -1444,10 +1489,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     except OSError as exc:
         # Environment failures (permissions, full disk, socket path too long)
         # are user-fixable, so they get the loud one-liner too — not a
-        # traceback (09 §1.5). Real bugs still surface as tracebacks.
+        # traceback (09 §1.5).
         if debug:
             traceback.print_exc()
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - the last line of the CLI
+        # A REAL BUG. Still one attributable line rather than a raw traceback:
+        # a batch run over the backlog emitted seven bare tracebacks in one
+        # sweep, unattributable to any note because argparse's Namespace is
+        # all the frame carries. `--debug` is the only way to see the stack.
+        if debug:
+            traceback.print_exc()
+        subject = " ".join(
+            str(getattr(args, name))
+            for name in ("note", "path", "source", "capture")
+            if getattr(args, name, None)
+        )
+        where = f"{args.command} {subject}".strip()
+        print(f"internal error in `organize {where}`: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(
+            "hint: this is a bug in organize, not something you did — rerun with "
+            "--debug for the traceback and report it",
+            file=sys.stderr,
+        )
         return 1
 
 

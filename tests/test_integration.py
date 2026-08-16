@@ -50,6 +50,7 @@ from organize_core.errors import FrontmatterError, NoAiRefusal
 from organize_core.fileops import (
     OperationContext,
     OperationLog,
+    archive_capture,
     merge_into_note,
     move_to_destination,
     new_folder,
@@ -362,6 +363,31 @@ def test_broken_yaml_is_indexed_but_never_silently_rewritten(
     with pytest.raises(FrontmatterError):
         update_frontmatter(ctx, path, {"importance": "high"})
     assert path.read_bytes() == before, "a refused op leaves the file untouched"
+
+
+def test_every_mutating_op_names_the_unparseable_file(
+    env: tuple[Path, VaultIndex, Config, CorePaths],
+) -> None:
+    """"line 30, column 17" with no path is unactionable in a batch run over
+    1,858 captures against the 23 real files with unparseable YAML. `set-meta`
+    named the file; `move` and `archive` did not."""
+    vault, index, config, paths = env
+    path = vault / BROKEN
+    before = path.read_bytes()
+    record = record_of(index, vault, BROKEN)
+    ctx = make_ctx(config, index, paths)
+
+    operations = {
+        "set-meta": lambda: update_frontmatter(ctx, path, {"importance": "high"}),
+        "move": lambda: move_to_destination(ctx, record, vault / "projects" / "blog"),
+        "archive": lambda: archive_capture(ctx, record),
+    }
+    for name, run in operations.items():
+        with pytest.raises(FrontmatterError) as caught:
+            run()
+        assert str(path) in str(caught.value), f"{name} did not name the file"
+        assert "unparseable YAML frontmatter" in str(caught.value)
+    assert path.read_bytes() == before
 
 
 def test_set_meta_replace_is_one_write_and_one_action(
@@ -853,13 +879,12 @@ def test_suggestions_agree_across_the_two_doors(
 
     # The exact ranking, not just "they match" — otherwise two identically
     # broken doors would pass. This capture's tags (impro, creativity) match
-    # no folder NAME, so only signal 7 (the type bonus) fires: bare projects
-    # folders score 0.3 and sit exactly AT the default min_confidence floor,
-    # bare areas (0.2) and resources (0.1) fall below it and are dropped, and
-    # the archive entry is appended unconditionally (04 §1-2).
+    # no folder NAME, so NO signal fires at all; the folder-type bonus alone
+    # no longer carries a candidate past `min_confidence` (04 §2, architect
+    # ruling 2026-08-16: the floor applies to the SIGNAL score), so both doors
+    # must report the honest "no confident destination" state — the
+    # unconditional archive entry and nothing else (04 §1).
     assert cli_shape == [
-        ("<VAULT>/projects/blog", "project", 0.3),
-        ("<VAULT>/projects/kms", "project", 0.3),
         ("<VAULT>/archive/capture/raw_capture", "archive", 0.1),
     ]
 

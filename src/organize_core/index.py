@@ -594,14 +594,20 @@ class VaultIndex:
         by_type: dict[str, int] = {}
         backlog = 0
         parse_errors = 0
-        for record in self._records.values():
+        # Iterate a SNAPSHOT, not the live mapping: the server used to call
+        # this outside its write lock, and a concurrent writer turned an
+        # already-applied operation into a RuntimeError("dictionary changed
+        # size during iteration"). The server now snapshots under the lock;
+        # this is the defence in depth for every other caller.
+        records = list(self._records.values())
+        for record in records:
             by_type[record.para_type] = by_type.get(record.para_type, 0) + 1
             if record.para_type == "capture" and (record.processing_status or "") == "raw":
                 backlog += 1
             if record.parse_error:
                 parse_errors += 1
         return {
-            "total": len(self._records),
+            "total": len(records),
             "by_para_type": by_type,
             "capture_backlog": backlog,
             "parse_errors": parse_errors,

@@ -262,10 +262,26 @@ def _read_text(path: Path) -> str:
     """Every text read in this module: utf-8 with ``errors="replace"`` so a
     single bad byte can never crash an operation (06 §6 / 08 §B18).
 
-    READ-BACK / VERIFICATION ONLY. The mutation path goes through
-    :func:`_read_document`, which decodes STRICTLY — see there.
+    READ-BACK ONLY, and NEVER for byte-fidelity verification: ``read_text``
+    opens in UNIVERSAL-NEWLINE mode, so a ``\\r\\n`` or a lone ``\\r`` on disk
+    comes back as ``\\n``. Comparing that against the string we wrote is
+    guaranteed to differ for any note containing a CR — 23% of the real
+    capture backlog. Verification goes through :func:`_verbatim_text`.
+    The mutation path goes through :func:`_read_document`, which decodes
+    STRICTLY — see there.
     """
     return Path(path).read_text(encoding="utf-8", errors="replace")
+
+
+def _verbatim_text(raw: bytes) -> str:
+    """Decode read-back bytes WITHOUT newline translation.
+
+    The counterpart of :func:`_read_text` for the one caller that compares
+    what landed on disk against what it meant to write: ``atomic_write``
+    opens with ``newline=""`` (verbatim), so the comparison must decode
+    verbatim too.
+    """
+    return raw.decode("utf-8", errors="replace")
 
 
 def _decode_for_mutation(raw: bytes, path: Path) -> str:
@@ -314,7 +330,22 @@ def _read_document(path: Path) -> tuple[Document, str, FileSnapshot]:
     raw = path.read_bytes()
     snapshot = FileSnapshot(path=str(path), mtime=mtime, sha256=hashlib.sha256(raw).hexdigest())
     text = _decode_for_mutation(raw, path)
-    return parse(text), text, snapshot
+    return _parse_named(text, path), text, snapshot
+
+
+def _parse_named(text: str, path: Path) -> Document:
+    """``parse`` with the offending FILE named in the error.
+
+    ``frontmatter.parse`` takes text, so its message is only ever "line 30,
+    column 17" — unactionable in a batch run over 1,858 captures against the
+    23 real files with unparseable YAML. `frontmatter.load_file` already does
+    this for the scan path; every MUTATION path now goes through here, so no
+    call site can forget it (09 §1.5: an error must be actionable).
+    """
+    try:
+        return parse(text)
+    except FrontmatterError as exc:
+        raise FrontmatterError(f"{path}: {exc}", hint=exc.hint) from exc
 
 
 def _fields(doc: Document) -> dict[str, Any]:
@@ -713,6 +744,32 @@ def collision_free_path(dest: Path) -> Path:
     )
 
 
+def _discard_unverified_copy(dest_path: Path, source: Path) -> Path | None:
+    """Remove a destination copy THIS operation just created and then failed
+    to verify. Returns the path when it could NOT be removed (so the caller
+    names the stray file), ``None`` when the vault is clean again.
+
+    One of the three delete sites in this module — the structural
+    never-delete guard in ``tests/test_fileops_safety.py`` lists them by
+    name. It is admissible because ``dest_path`` came from
+    ``collision_free_path``, so it did not exist before ``atomic_write``
+    created it moments ago, and because the SOURCE is explicitly refused
+    here: spec 05 §1's "no code path may lose note content" holds — the
+    original is untouched and nothing has been archived yet.
+
+    Not doing this is what produced, on real data, a fully-organized
+    duplicate at the destination of a capture whose move had just been
+    reported as failed, plus another ``_1``, ``_2``… copy per retry.
+    """
+    if _resolved(dest_path) == _resolved(source):  # pragma: no cover - defensive
+        return dest_path
+    try:
+        dest_path.unlink()
+    except OSError:
+        return dest_path
+    return None
+
+
 def get_archive_path(filename: str, config: Config, *, now: float) -> Path:
     """``<vault>/<para_folders.archives>/<archive_capture_path>/<filename>``
     KEEPING the original filename (wikilinks depend on it — 05 §3, 08 §A15);
@@ -924,9 +981,12 @@ def _record_action(
     appends one ActionRecord" — and spec 05 §1.2 explicitly blesses a
     partially-applied operation (the destination copy exists, archiving the
     original failed). Those branches mutate the vault, so they record too,
-    with ``context.filters["partial_failure"]`` naming what did not finish;
-    the corpus is the audit trail, and a real vault edit that appears
-    nowhere in it is an untraceable mutation. Operations that changed
+    with ``context.partial_failure`` naming what did not finish — a
+    FIRST-CLASS field, not a ``filters`` entry, because ``filters`` is the
+    session's search filters and no reader could branch on it (learning
+    folded three failed moves in as successful accepts). The corpus is the
+    audit trail, and a real vault edit that appears nowhere in it is an
+    untraceable mutation. Operations that changed
     nothing (a missing source, an unwritable destination) still do NOT
     record: the schema has no "it failed" slot and their story is the
     operation log's FAILED line.
@@ -938,8 +998,6 @@ def _record_action(
     being hardcoded empty on every real record.
     """
     filters: dict[str, Any] = dict(ctx.filters)
-    if partial_failure:
-        filters["partial_failure"] = partial_failure
     try:
         record = ActionRecord(
             id=new_action_id(now=now),
@@ -951,6 +1009,7 @@ def _record_action(
             context=ActionContext(
                 session_id=ctx.session_id,
                 dry_run=ctx.dry_run,
+                partial_failure=partial_failure or None,
                 route=route,
                 vault_stats=_vault_stats(ctx),
                 filters=filters,
@@ -1190,7 +1249,8 @@ def move_to_destination(
         / (ctx.config.vault.para_folders.get("archives") or "archive")
         / ctx.config.vault.archive_capture_path
     )
-    if _resolved(dest_folder) == archive_folder:
+    resolved_dest = _resolved(dest_folder)
+    if resolved_dest == archive_folder:
         return _fail(
             ctx,
             "move",
@@ -1199,6 +1259,47 @@ def move_to_destination(
             f"{dest_folder} is the archive capture folder, not a filing destination",
             now,
             details={"archive_path": str(archive_folder)},
+        )
+
+    # Two destinations that are inside the vault but are not FILING
+    # destinations: the note leaves the capture folder, is archived as
+    # organized, and is then never indexed again because neither location is
+    # under `vault.scan_dirs` — reported as a success. Moving a note into the
+    # backup dir additionally writes that note's own backup beside it.
+    backup_root = _resolved(ctx.backup_dir)
+    if resolved_dest == backup_root or backup_root in resolved_dest.parents:
+        return _fail(
+            ctx,
+            "move",
+            source,
+            dest_folder,
+            f"{dest_folder} is inside the backup directory, not a filing destination",
+            now,
+        )
+    if resolved_dest == _resolved(ctx.config.vault.root):
+        return _fail(
+            ctx,
+            "move",
+            source,
+            dest_folder,
+            f"{dest_folder} is the vault root, not a filing destination",
+            now,
+        )
+
+    # Moving a note into the folder it ALREADY lives in is a no-op, not a
+    # rename. `collision_free_path` would otherwise see the note itself as
+    # the collision, file the copy as `<name>_1.md` and archive the original
+    # FILENAME — divorcing the file from its own `id:`/`aliases:` and
+    # breaking every [[wikilink]] to it (05 §3), while returning ok=True. It
+    # is one mis-click away in the picker.
+    if resolved_dest == _resolved(source.parent):
+        return OperationResult(
+            ok=True,
+            operation="move",
+            source=str(source),
+            destination=str(source),
+            dry_run=ctx.dry_run,
+            details={"noop": f"the note is already in {dest_folder}"},
         )
 
     if not dest_folder.is_dir():
@@ -1289,26 +1390,50 @@ def move_to_destination(
             details=details,
         )
 
-    written = _read_text(dest_path)
-    if written != new_text:
-        # The vault HAS changed (a file exists at dest_path), so this branch
-        # records — spec 12 §2 "every state-changing operation".
-        _record_action(
-            ctx,
-            op_type="move",
-            capture=capture_state,
-            targets=[
-                _target_state(dest_path, None, written, "destination", description=description)
-            ],
-            now=now,
-            partial_failure="copy verification failed; the original was NOT archived",
-        )
+    # BYTE-exact read-back. `atomic_write` wrote `new_text` verbatim
+    # (newline=""), so the check must compare BYTES: a `read_text()` here
+    # translates every CR on disk back to LF and then reports "verification
+    # failed" for a copy that is in fact perfect. 23% of the real capture
+    # backlog contains a CR, and every one of them was unmovable.
+    written_bytes = dest_path.read_bytes()
+    if written_bytes != new_text.encode("utf-8"):
+        # ROLL THE COPY BACK. `dest_path` came from `collision_free_path`, so
+        # it did not exist before `atomic_write` created it and removing it
+        # restores the vault exactly. Leaving it behind produced a
+        # fully-organized duplicate of a capture that the caller was told had
+        # NOT been filed — and every retry added another `_1`, `_2`, … copy.
+        written = _verbatim_text(written_bytes)
+        stray = _discard_unverified_copy(dest_path, source)
+        if stray is not None:
+            # Rollback failed: the vault HAS changed, so this branch records
+            # (spec 12 §2) and the message names the file left behind.
+            _record_action(
+                ctx,
+                op_type="move",
+                capture=capture_state,
+                targets=[
+                    _target_state(dest_path, None, written, "destination", description=description)
+                ],
+                now=now,
+                partial_failure="copy verification failed; the original was NOT archived",
+            )
+            message = (
+                f"copy verification failed at {dest_path}; the original was NOT archived "
+                f"and the unverified copy could NOT be removed — delete {stray} by hand"
+            )
+        else:
+            # Nothing changed: no ActionRecord (a rolled-back operation is not
+            # a doc-12 precedent), just the FAILED oplog line `_fail` writes.
+            message = (
+                f"copy verification failed at {dest_path}; the copy was removed "
+                "and the original was NOT archived"
+            )
         return _fail(
             ctx,
             "move",
             source,
             dest_path,
-            f"copy verification failed at {dest_path}; the original was NOT archived",
+            message,
             now,
             backup=backup,
             details=details,
@@ -1384,7 +1509,7 @@ def archive_capture(ctx: OperationContext, capture: NoteRecord) -> OperationResu
     # Pure relocation: tolerate bytes we could not rewrite (this operation
     # never rewrites), so the read stays lenient here on purpose.
     text = _read_text(source)
-    doc = parse(text)
+    doc = _parse_named(text, source)
     capture_state = _capture_state(source, text, doc)
 
     if ctx.dry_run:
