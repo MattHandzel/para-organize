@@ -19,6 +19,13 @@ these numerically):
 Deliberately NOT signals (parity, 04 §2): body text, modalities, location,
 folder note-counts, folder recency. Do not add signals.
 
+The reference implementation (`d753672~1`) carried an eighth, unspecced
+"fallback: filename similarity" signal.  Spec 04 §2 fixes the signal list at
+seven and forbids adding signals, so it is NOT reproduced here.
+
+Signal 7 contributes no reason string (parity): it fires for every candidate,
+so a reason would be pure noise in the UI.
+
 Also exposed for ARBITRARY TEXT (spec 13 §3 cross-check): auto-organize
 scores ad-hoc selections, not only indexed capture files.
 """
@@ -27,11 +34,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from organize_core import frontmatter
 from organize_core.config import SuggestionsConfig
 from organize_core.index import NoteRecord
-from organize_core.learn import LearningData
+from organize_core.learn import LearningData, get_association_score
 
 ARCHIVE_SUGGESTION_NAME = "Archive Now"
+ARCHIVE_SUGGESTION_SCORE = 0.1
+ARCHIVE_SUGGESTION_REASON = "Safe default option"
+
+# Spec 04 §2 #5: aliases that are really the capture id are not names.
+_CAPTURE_ALIAS_PREFIX = "capture_"
+_ALIAS_SIMILARITY_GATE = 0.6
+
+# Spec 04 §1: archives are never a scored candidate.
+_EXCLUDED_CANDIDATE_TYPES = frozenset({"archives", "archive"})
 
 
 @dataclass(frozen=True)
@@ -66,32 +83,91 @@ class CaptureFeaturesView:
     """The capture attributes scoring reads — constructed either from a
     NoteRecord (normal path) or from arbitrary text + optional tags
     (spec 13 §3). Keeping this explicit stops scoring from ever reaching
-    back into the index (purity)."""
+    back into the index (purity).
+
+    ``modalities`` is carried even though it is NOT a signal (04 §2's
+    exclusion list stands): ``learn.create_association_key`` includes a
+    ``modalities:`` part, so a view that dropped it would compute a
+    different association key than ``record_move`` stored and the learned
+    signal would silently never fire for captures that have modalities.
+    """
 
     tags: tuple[str, ...] = ()
     normalized_tags: tuple[str, ...] = ()
     sources: tuple[str, ...] = ()
+    modalities: tuple[str, ...] = ()  # association-key parity only, never a signal
     aliases: tuple[str, ...] = ()
     capture_id: str | None = None
     context: tuple[str, ...] = ()
 
     @classmethod
     def from_record(cls, record: NoteRecord) -> CaptureFeaturesView:
-        raise NotImplementedError
+        return cls(
+            tags=tuple(str(tag) for tag in record.tags or ()),
+            normalized_tags=tuple(str(tag) for tag in record.normalized_tags or ()),
+            sources=tuple(str(source) for source in record.sources or ()),
+            modalities=tuple(str(modality) for modality in record.modalities or ()),
+            aliases=tuple(str(alias) for alias in record.aliases or ()),
+            capture_id=record.capture_id,
+            context=tuple(str(item) for item in record.context or ()),
+        )
 
     @classmethod
     def from_text(cls, text: str, tags: list[str] | None = None) -> CaptureFeaturesView:
         """Ad-hoc text view (13 §3). Signal inputs are frontmatter-shaped,
         so an untagged selection scores on context/type-bonus only unless
-        the caller supplies tags (e.g. from the auto-tagger)."""
-        raise NotImplementedError
+        the caller supplies tags (e.g. from the auto-tagger).
+
+        The text itself becomes the ``context`` — signal 6 is the only one
+        that reads free prose, and inventing new text signals is forbidden
+        by 04 §2.  No aliases, no sources, no modalities: arbitrary text has
+        none, and fabricating them would fabricate score.
+        """
+        raw_tags = tuple(str(tag) for tag in (tags or ()))
+        context = (text,) if text and text.strip() else ()
+        return cls(
+            tags=raw_tags,
+            normalized_tags=tuple(frontmatter.normalize_tag(tag) for tag in raw_tags),
+            sources=(),
+            modalities=(),
+            aliases=(),
+            capture_id=None,
+            context=context,
+        )
 
 
 def string_similarity(a: str, b: str) -> float:
     """Normalized Levenshtein similarity ``1 - dist/max_len`` ∈ [0, 1]
     (spec 04 §2 #5 — regression-tested with exact numeric cases; the
     original returned raw distance, 08 §A7). Empty-vs-empty ⇒ 1.0."""
-    raise NotImplementedError
+    if a == b:
+        return 1.0
+    max_len = max(len(a), len(b))
+    if max_len == 0:
+        return 1.0
+    distance = _levenshtein(a, b)
+    similarity = 1.0 - (distance / max_len)
+    # Distance is bounded by max_len, so this is already in [0, 1]; clamp
+    # anyway so the alias signal can never exceed its weight (04 §7).
+    return min(1.0, max(0.0, similarity))
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """Classic two-row edit distance (stdlib only, O(len(a) * len(b)))."""
+    if len(a) < len(b):
+        a, b = b, a
+    if not b:
+        return len(a)
+    previous = list(range(len(b) + 1))
+    for i, char_a in enumerate(a, start=1):
+        current = [i]
+        for j, char_b in enumerate(b, start=1):
+            insert = current[j - 1] + 1
+            delete = previous[j] + 1
+            substitute = previous[j - 1] + (char_a != char_b)
+            current.append(min(insert, delete, substitute))
+        previous = current
+    return previous[-1]
 
 
 def calculate_score(
@@ -106,7 +182,70 @@ def calculate_score(
     signal, e.g. ``Tag 'impro' matches folder``) per spec 04 §2. The
     learned_association term calls ``learn.get_association_score`` (pure,
     NaN-guarded) with ``now``."""
-    raise NotImplementedError
+    weights = config.weights
+    score = 0.0
+    reasons: list[str] = []
+
+    # 1. exact tag match — 2.0 PER MATCHING TAG (spec 04 §2 #1)
+    for tag in capture.tags:
+        if tag == candidate.name or tag == candidate.normalized_name:
+            score += weights.exact_tag_match
+            reasons.append(f"Tag '{tag}' matches folder")
+
+    # 2. normalized tag match — 1.5 per tag (spec 04 §2 #2). The normalizer
+    #    (including the tag_normalization map) is applied where the view is
+    #    built; scoring is a pure string comparison.
+    for tag in capture.normalized_tags:
+        if tag == candidate.normalized_name:
+            score += weights.normalized_tag_match
+            reasons.append(f"Tag '{tag}' (normalized) matches")
+
+    # 3. learned association — 1.8 × learned score (spec 04 §2 #3 / §4)
+    learned = get_association_score(
+        learning, capture, candidate.path, config.learning, now=now
+    )
+    if learned > 0:
+        score += learned * weights.learned_association
+        reasons.append("Previously used destination")
+
+    # 4. source match — 1.3 per source (spec 04 §2 #4)
+    for source in capture.sources:
+        if frontmatter.normalize_tag(source) == candidate.normalized_name:
+            score += weights.source_match
+            reasons.append(f"Source '{source}' matches")
+
+    # 5. alias similarity — 1.1 × similarity when > 0.6 (spec 04 §2 #5)
+    for alias in capture.aliases:
+        if alias.startswith(_CAPTURE_ALIAS_PREFIX):
+            continue
+        if capture.capture_id is not None and alias == capture.capture_id:
+            continue
+        similarity = string_similarity(alias.lower(), candidate.name.lower())
+        if similarity > _ALIAS_SIMILARITY_GATE:
+            score += similarity * weights.alias_similarity
+            reasons.append(f"Alias '{alias}' similar")
+
+    # 6. context match — 1.0, substring either direction (spec 04 §2 #6)
+    context_text = " ".join(capture.context).strip().lower()
+    folder_name = candidate.name.strip().lower()
+    if context_text and folder_name:
+        if folder_name in context_text or context_text in folder_name:
+            score += weights.context_match
+            reasons.append("Context matches folder")
+
+    # 7. folder-type bonus — always fires, no reason string (spec 04 §2 #7)
+    score += _type_bonus(candidate.type, config)
+
+    return score, reasons
+
+
+def _type_bonus(candidate_type: str, config: SuggestionsConfig) -> float:
+    bonus = config.weights.type_bonus
+    return {
+        "projects": bonus.projects,
+        "areas": bonus.areas,
+        "resources": bonus.resources,
+    }.get(candidate_type, 0.0)
 
 
 def generate_candidates(
@@ -115,7 +254,28 @@ def generate_candidates(
     """Build candidates from ``{para_type_key: [folder paths]}`` (the
     caller feeds ``VaultIndex.para_subfolders`` output — no I/O here).
     Archives excluded (spec 04 §1)."""
-    raise NotImplementedError
+    candidates: list[Candidate] = []
+    for para_type, paths in para_subfolders.items():
+        if para_type in _EXCLUDED_CANDIDATE_TYPES:
+            continue
+        for path in sorted(paths or ()):
+            name = _basename(path)
+            if not name:
+                continue
+            candidates.append(
+                Candidate(
+                    path=path,
+                    name=name,
+                    normalized_name=frontmatter.normalize_tag(name),
+                    type=para_type,
+                )
+            )
+    return candidates
+
+
+def _basename(path: str) -> str:
+    """Last non-empty path segment, without touching the filesystem."""
+    return path.rstrip("/").rpartition("/")[2]
 
 
 def suggest(
@@ -141,4 +301,44 @@ def suggest(
     Route injection (11 §1) happens ABOVE this layer (routes.merge_route_
     suggestions) so scoring stays route-agnostic and pure.
     """
-    raise NotImplementedError
+    min_confidence = config.learning.min_confidence
+
+    scored: list[Suggestion] = []
+    for candidate in candidates:
+        if candidate.type in _EXCLUDED_CANDIDATE_TYPES:
+            continue
+        score, reasons = calculate_score(capture, candidate, config, learning, now=now)
+        if score <= 0.0 or score < min_confidence:
+            continue
+        scored.append(
+            Suggestion(
+                path=candidate.path,
+                name=candidate.name,
+                type=candidate.type,
+                score=score,
+                reasons=tuple(reasons),
+            )
+        )
+
+    # list.sort is stable; the explicit name/path tiebreak makes the order
+    # total, so identical inputs always produce an identical list (04 §2).
+    scored.sort(key=lambda item: (-item.score, item.name, item.path))
+
+    limit = max(0, int(config.max_suggestions))
+    if limit == 0:
+        return []
+    include_archive = bool(config.always_show_archive) and archive_path is not None
+    keep = limit - 1 if include_archive else limit
+
+    result = scored[:keep]
+    if include_archive:
+        result.append(
+            Suggestion(
+                path=archive_path or "",
+                name=ARCHIVE_SUGGESTION_NAME,
+                type="archives",
+                score=ARCHIVE_SUGGESTION_SCORE,
+                reasons=(ARCHIVE_SUGGESTION_REASON,),
+            )
+        )
+    return result
