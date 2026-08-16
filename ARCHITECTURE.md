@@ -357,6 +357,21 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
   structural decision 3). Disposition: when Phase 3 adds consumer state
   writers, lift ONE state-file atomic-write helper into a small shared
   module (not fileops) and migrate learn/index to it.
+- **VOCABULARY SPLIT (PARA plural vs singular)**: PLURAL is the
+  DESTINATION-KIND — `Suggestion.type`, `folder.list`'s emitted `type`, and
+  `folder.create`'s `para_type` all speak `projects`/`areas`/`resources`/
+  `archives`, so a client can compare a suggestion against a listed folder
+  without normalizing. SINGULAR `ParaType` is NOTE-RECORD IDENTITY —
+  `NoteRecord.para_type`, search criteria, and the `project/x` tag prefixes.
+  Request params that name a PARA folder accept either form (`folder.list`
+  normalizes via `PARA_TYPE_TO_KEY`); OUTPUT is never mixed.
+- **`op.*` / `folder.create` validation failures return a SUCCESSFUL RPC**
+  with `result.ok = false` (and `result.error` set), NOT a JSON-RPC error — an error
+  is reserved for protocol and unexpected faults. Kept deliberately: a
+  refused operation is a normal outcome the UI renders, not an exception.
+  The obligation this creates on callers is documented here because it is
+  invisible at the call site: a client MUST check `.ok` — a 200-shaped
+  response is not proof the operation happened.
 - **Phase gates run `make gate`** (test + perf + lint): the spec 09 §4
   full-scale perf tests are `-m slow` and excluded from the default suite,
   so a bare `make test` is NOT a complete phase gate.
@@ -374,10 +389,13 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
   rejects (-32602) before method lookup — every no-arg RPC must send
   `vim.empty_dict()`. Fixed in phc_support + pickers; any new call site
   must follow.
-- **Wire fact**: query `para_type` matches the SINGULAR value while
-  `folder.create` takes the PLURAL key; `folder.list` emits singular
-  `type`, `Suggestion.type` emits plural — client normalizes in
-  `pickers.suggestion_entry` pending a core ruling (requested).
+- **Wire fact — RESOLVED (core patch)**: query `para_type` matches the
+  SINGULAR value while `folder.create` takes the PLURAL key; `folder.list`
+  used to emit singular `type` against `Suggestion.type`'s plural. Settled
+  by the VOCABULARY SPLIT ruling above — `folder.list` now emits the PLURAL
+  destination-kind, so core output is consistent and the client-side
+  normalization in `pickers.suggestion_entry` is now redundant and is
+  scheduled for DELETION in the Phase-2 fix stage.
 - **plenary wart**: `PlenaryBustedFile` does not forward `minimal_init` to
   its child nvim (child loads the user's real config!). Run specs
   in-process via `-c "lua require('plenary.busted').run(<abs>)"` or
@@ -571,3 +589,32 @@ Measured 2026-08-16 (spec 09 §4 gates in brackets):
 
 The 10k case is `pytest -m slow` (deselected by default via `addopts`, since
 generating the vault dominates its runtime); the 1k gate always runs.
+
+## Phase-2 fix-stage dispositions (architect rulings, routed 2026-08-16)
+
+- **rpc.lua normalize_params goes RECURSIVE** (the chokepoint fix): every
+  nested empty table destined for an object-typed field is normalized via
+  `vim.empty_dict()` at the one entry point. Per-call-site helpers
+  (`pickers.obj()` etc.) are then retired — defensive per-site fixes are
+  the same bug waiting in every future seat. (Core-side rider: the server
+  also accepts `[]` as `{}` for object-typed FIELDS — bundled in the
+  pending core patch.)
+- **rpc calling conventions stay asymmetric but DOCUMENTED**:
+  `Client:request(m, p, cb)` calls back `(err, result)` (node-style);
+  `request_sync` returns `(result, err)` (Lua idiom). Mandatory docstring
+  on each naming the other's order; the pin test (via real rpc.connect)
+  is the permanent regression guard. REMOVE actions.lua's defensive
+  both-order normalization once docstrings land — it masks exactly this
+  bug class.
+- **minimal_init consolidation MUST keep the in-process
+  :PlenaryBustedFile override** — plenary's spawned child nvim loads the
+  user's real config (a real-environment leak). The override is a
+  correctness requirement, not style.
+- **phc_support.lua folds into helpers.lua** (approved, mechanical).
+- **state.has_session() is a required public addition** to state.lua;
+  commands.lua's unknown-treated-as-yes gate fallback is correct fail-open
+  behavior and stays.
+- **actions.lua dispatch contract** (re-affirmed): commands.SUBCOMMANDS is
+  the contract; actions adds aliases next/prev/refresh/set_meta to its
+  existing impls and implements start/reindex/debug. The checkhealth
+  "actions missing:" check stays a permanent health ERROR.
