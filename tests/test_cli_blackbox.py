@@ -1314,3 +1314,23 @@ def test_purged_list_and_restore_round_trip(core: Core) -> None:
         emission = store.get_emission("learn", note)
     assert emission is not None and emission.status == "success"
     assert core.run("purged", "list", "--json").stdout.strip().endswith('"purged": []\n}')
+
+
+def test_a_dry_run_on_virgin_state_creates_no_database(core: Core) -> None:
+    """09 §5.6 "evaluate everything, write nothing", taken literally.
+
+    A version-0 database is CREATED rather than migrated, so the first
+    `--dry-run` used to leave a schema-v2 automations.db behind: empty, but a
+    file — the rehearsal altering the state it exists to rehearse against.
+    A second, REAL run must still create it normally.
+    """
+    core.index()
+    db = core.state_dir / "automations.db"
+    assert not db.exists(), "precondition: virgin state"
+
+    proc = core.run("--dry-run", "run-consumers")
+    assert proc.returncode == 0, proc.stderr
+    assert not db.exists(), "a rehearsal on virgin state writes no database"
+
+    assert core.run("run-consumers").returncode == 0
+    assert db.exists(), "a real run still creates it"

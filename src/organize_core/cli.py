@@ -1455,7 +1455,19 @@ def cmd_run_consumers(args: argparse.Namespace) -> int:
     index = _open_index(paths, config)
     op_context = _op_context(args, paths, config, index)
 
-    with AutomationStore(paths.automations_db) as store:
+    # "Evaluate everything, write NOTHING" (09 §5.6), taken literally. A
+    # version-0 database is created rather than migrated, so on VIRGIN state
+    # a rehearsal used to leave a schema-v2 automations.db behind — empty,
+    # but a file, so the dry run altered the very state it exists to
+    # rehearse against. With no database there is no delivery history to
+    # read, so an in-memory one answers identically and touches no disk.
+    # An EXISTING database is opened normally: a rehearsal must read the
+    # real history, and `_migrate_for_run` already refuses to migrate it.
+    store_path = (
+        Path(":memory:") if dry_run and not paths.automations_db.exists()
+        else paths.automations_db
+    )
+    with AutomationStore(store_path) as store:
         report = _migrate_for_run(store, dry_run=dry_run)
         if report.changed:
             _warn(report.summary())

@@ -158,6 +158,26 @@ def records(state: Path) -> list:
     return list(ActionRecorder(state / "actions").query(include_dry_run=True))
 
 
+# --- the frontmatter contract, spelled out --------------------------------
+
+
+def test_the_frontmatter_field_names_are_the_ones_spec_11_2_names() -> None:
+    """The ONE place these constants are compared to their literals.
+
+    Everywhere else asserts the literal instead, so flipping a constant fails
+    the suite here and names which one. Asserting ``fields[AUTO_TAG_FIELD]
+    == STATE_DONE`` reads fine but is self-referential: rename the field to
+    ``sprocket`` and the whole suite still passes while every real note in
+    the vault carries something else. These names are written into notes —
+    they are a data contract with the vault, not an implementation detail.
+    """
+    assert AUTO_TAGS_FIELD == "auto_tags"
+    assert AUTO_TAG_FIELD == "auto_tag"
+    assert AUTO_TAG_HASH_FIELD == "auto_tag_hash"
+    assert STATE_PENDING == "pending"
+    assert STATE_DONE == "done"
+
+
 # --- construction / registry (06 §1, 08 §B2) -------------------------------
 
 
@@ -237,7 +257,7 @@ def test_auto_tag_pending_forces_processing_of_an_already_tagged_note(
 ) -> None:
     """11 §2 names ``auto_tag = "pending"`` as a trigger in its own right —
     it is how Matt re-opts a note in after the done-guard has closed it."""
-    note = capture(fixture_vault, tags=["impro", "creativity"], **{AUTO_TAG_FIELD: STATE_PENDING})
+    note = capture(fixture_vault, tags=["impro", "creativity"], auto_tag="pending")
     assert make_tagger().should_process(payload_for(note)) is True
 
 
@@ -275,10 +295,11 @@ def test_done_at_the_current_body_hash_is_skipped(fixture_vault: Path) -> None:
         fixture_vault,
         body,
         tags=["running"],
-        **{AUTO_TAG_FIELD: STATE_DONE, AUTO_TAG_HASH_FIELD: body_hash("\n" + body + "\n")},
+        auto_tag="done",
+        auto_tag_hash=body_hash("\n" + body + "\n"),
     )
     payload = payload_for(note)
-    assert body_hash(payload.content) == str(payload.frontmatter[AUTO_TAG_HASH_FIELD])
+    assert body_hash(payload.content) == str(payload.frontmatter["auto_tag_hash"])
     assert make_tagger().should_process(payload) is False
 
 
@@ -287,13 +308,14 @@ def test_done_at_a_stale_body_hash_is_reprocessed(fixture_vault: Path) -> None:
         fixture_vault,
         "Ran 8k easy, felt good.",
         tags=["running"],
-        **{AUTO_TAG_FIELD: STATE_DONE, AUTO_TAG_HASH_FIELD: "0" * 16},
+        auto_tag="done",
+        auto_tag_hash="0" * 16,
     )
     assert make_tagger().should_process(payload_for(note)) is True
 
 
 def test_done_with_no_recorded_hash_does_not_nag(fixture_vault: Path) -> None:
-    note = capture(fixture_vault, tags=["running"], **{AUTO_TAG_FIELD: STATE_DONE})
+    note = capture(fixture_vault, tags=["running"], auto_tag="done")
     assert make_tagger().should_process(payload_for(note)) is False
 
 
@@ -505,9 +527,9 @@ def test_golden_run_writes_both_tags_and_auto_tags_and_records_one_action(
     assert result.status is Status.SUCCESS, result.message
     fields = fields_of(note)
     assert fields["tags"] == ["impro", "creative-flow"]
-    assert fields[AUTO_TAGS_FIELD] == ["impro", "creative-flow"]
-    assert fields[AUTO_TAG_FIELD] == STATE_DONE
-    assert fields[AUTO_TAG_HASH_FIELD] == body_hash(before_body)
+    assert fields["auto_tags"] == ["impro", "creative-flow"]
+    assert fields["auto_tag"] == "done"
+    assert fields["auto_tag_hash"] == body_hash(before_body)
     # The body is not the tagger's business and must survive byte-for-byte.
     assert frontmatter.load_file(note).body == before_body
     # Unknown/unrelated fields survive the rewrite (08 §A12).
@@ -552,7 +574,7 @@ def test_matts_own_tags_keep_their_order_and_casing_and_are_never_claimed(
     assert result.status is Status.SUCCESS, result.message
     fields = fields_of(note)
     assert fields["tags"] == ["Impro", "Journal", "creative-flow"]
-    assert fields[AUTO_TAGS_FIELD] == ["creative-flow"]
+    assert fields["auto_tags"] == ["creative-flow"]
 
 
 def test_proposals_are_normalized_through_the_one_shared_normalizer(
@@ -565,8 +587,8 @@ def test_proposals_are_normalized_through_the_one_shared_normalizer(
     make_tagger().handle(payload_for(note), ctx)
 
     fields = fields_of(note)
-    assert fields[AUTO_TAGS_FIELD] == [frontmatter.normalize_tag("Deep Work"), "solo"]
-    assert fields[AUTO_TAGS_FIELD][0] == "deep-work"
+    assert fields["auto_tags"] == [frontmatter.normalize_tag("Deep Work"), "solo"]
+    assert fields["auto_tags"][0] == "deep-work"
 
 
 def test_the_action_record_carries_the_auto_tag_provenance(
@@ -607,8 +629,8 @@ def test_a_proposal_matt_already_has_still_closes_the_note_out(
     assert result.status is Status.SUCCESS
     fields = fields_of(note)
     assert fields["tags"] == ["impro"]
-    assert fields[AUTO_TAGS_FIELD] == []
-    assert fields[AUTO_TAG_FIELD] == STATE_DONE
+    assert fields["auto_tags"] == []
+    assert fields["auto_tag"] == "done"
     assert consumer.should_process(payload_for(note)) is False
     assert len(llm.calls) == 1
 
@@ -651,7 +673,7 @@ def test_max_tags_caps_what_one_call_may_add(fixture_vault: Path, tmp_path: Path
 
     make_tagger(max_tags=2).handle(payload_for(note), ctx)
 
-    assert fields_of(note)[AUTO_TAGS_FIELD] == ["a", "b"]
+    assert fields_of(note)["auto_tags"] == ["a", "b"]
 
 
 # --- idempotence (11 §4) ----------------------------------------------------
@@ -708,8 +730,8 @@ def test_editing_the_body_re_tags_the_note(fixture_vault: Path, tmp_path: Path) 
     llm.responses[:] = [tags_response("deliberate-practice")]
     assert consumer.handle(payload_for(note), ctx).status is Status.SUCCESS
     assert len(llm.calls) == 2
-    assert "deliberate-practice" in fields_of(note)[AUTO_TAGS_FIELD]
-    assert "impro" in fields_of(note)[AUTO_TAGS_FIELD], "prior provenance must survive"
+    assert "deliberate-practice" in fields_of(note)["auto_tags"]
+    assert "impro" in fields_of(note)["auto_tags"], "prior provenance must survive"
 
 
 # --- failure modes ----------------------------------------------------------
@@ -882,7 +904,7 @@ def test_a_real_client_against_a_fake_ollama_endpoint_tags_the_note(
         assert body["format"] == "json"
         assert "impro" in body["prompt"], "the vault vocabulary must reach the wire"
 
-    assert fields_of(note)[AUTO_TAGS_FIELD] == ["impro", "creative-flow"]
+    assert fields_of(note)["auto_tags"] == ["impro", "creative-flow"]
 
 
 def test_a_no_ai_note_never_reaches_the_endpoint(fixture_vault: Path, tmp_path: Path) -> None:

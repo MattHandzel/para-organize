@@ -27,12 +27,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from organize_core.actions import ActionRecorder
 from organize_core.config import Config, ConsumerConfig, LLMConfig, VaultConfig
 from organize_core.consumers import runner as runner_mod
-from organize_core.consumers.base import RunContext
 from organize_core.consumers.store import AutomationStore
 from organize_core.fileops import OperationContext, OperationLog
 from organize_core.index import VaultIndex
@@ -97,40 +94,39 @@ def pipeline_config(vault: Path, host: str) -> Config:
     )
 
 
-def attach_op_context(
-    monkeypatch: pytest.MonkeyPatch, config: Config, paths: CorePaths
-) -> OperationContext:
-    """Stand in for the integrator's ``RunContext.op_context`` wiring.
+def root_op_context(config: Config, paths: CorePaths) -> OperationContext:
+    """The context a COMPOSITION ROOT supplies, exactly as
+    ``cli.cmd_run_consumers`` builds it.
 
-    Builds the RunContext exactly as ``runner.run_consumers`` does and hangs
-    the OperationContext a composition root would supply off it. Setting the
-    attribute (rather than passing it) is what keeps this test correct on
-    both sides of the seam landing.
+    It is handed to ``run_consumers(op_context=...)`` and travels the REAL
+    seam from there: the runner gives each consumer its own view via
+    ``dataclasses.replace(actor="consumer:<type>")``. This used to
+    monkeypatch ``runner.RunContext`` with a factory that overwrote
+    ``op_context`` AFTER construction, which meant severing the runner's
+    wiring entirely left this whole suite green — the seam it exists to
+    cover was the one thing it could not see.
     """
     index = VaultIndex(config, paths.index_path)
     index.full_reindex()
-    op_ctx = OperationContext(
+    return OperationContext(
         config=config,
         index=index,
         oplog=OperationLog(paths.operations_log),
         recorder=ActionRecorder(paths.actions_dir),
         backup_dir=Path(config.vault.root) / config.file_ops.backup_dir,
-        actor=ACTOR,
+        # NOT the per-consumer actor: the runner stamps that itself, and a
+        # test that pre-stamped it could not tell whether it still does.
+        actor="matt",
     )
-
-    def factory(**kwargs: object) -> RunContext:
-        ctx = RunContext(**kwargs)  # type: ignore[arg-type]
-        ctx.op_context = op_ctx  # type: ignore[attr-defined]
-        return ctx
-
-    monkeypatch.setattr(runner_mod, "RunContext", factory)
-    return op_ctx
 
 
 def run_once(config: Config, paths: CorePaths, *, dry_run: bool = False):
+    op_context = root_op_context(config, paths)
     with AutomationStore(paths.automations_db) as automations:
         automations.migrate()
-        return runner_mod.run_consumers(config, automations, dry_run=dry_run, paths=paths)
+        return runner_mod.run_consumers(
+            config, automations, dry_run=dry_run, paths=paths, op_context=op_context
+        )
 
 
 def vault_bytes(vault: Path) -> dict[str, bytes]:
@@ -153,7 +149,7 @@ def prompts_seen(endpoint) -> str:
 
 
 def test_the_pipeline_tags_the_untagged_capture_and_nothing_else(
-    fixture_vault: Path, core_paths: CorePaths, monkeypatch: pytest.MonkeyPatch
+    fixture_vault: Path, core_paths: CorePaths
 ) -> None:
     notes = seed(fixture_vault)
     core_paths.ensure_state_dirs()
@@ -162,7 +158,6 @@ def test_the_pipeline_tags_the_untagged_capture_and_nothing_else(
     with http_endpoint() as endpoint:
         endpoint.queue_completion(json.dumps({"tags": ["impro", "creative-flow"]}))
         config = pipeline_config(fixture_vault, endpoint.base_url)
-        attach_op_context(monkeypatch, config, core_paths)
 
         summary = run_once(config, core_paths)
 
@@ -190,7 +185,7 @@ def test_the_pipeline_tags_the_untagged_capture_and_nothing_else(
 
 
 def test_a_second_run_changes_nothing(
-    fixture_vault: Path, core_paths: CorePaths, monkeypatch: pytest.MonkeyPatch
+    fixture_vault: Path, core_paths: CorePaths
 ) -> None:
     """06 §1 checkpointing plus 11 §4's ``auto_tag: done`` guard. The store
     alone cannot carry this: the tagger's own write changes the raw-text hash
@@ -202,7 +197,6 @@ def test_a_second_run_changes_nothing(
     with http_endpoint() as endpoint:
         endpoint.queue_completion(json.dumps({"tags": ["impro"]}))
         config = pipeline_config(fixture_vault, endpoint.base_url)
-        attach_op_context(monkeypatch, config, core_paths)
 
         run_once(config, core_paths)
         after_first = vault_bytes(fixture_vault)
@@ -220,7 +214,7 @@ def test_a_second_run_changes_nothing(
 
 
 def test_a_rehearsal_spends_no_inference_and_writes_nothing(
-    fixture_vault: Path, core_paths: CorePaths, monkeypatch: pytest.MonkeyPatch
+    fixture_vault: Path, core_paths: CorePaths
 ) -> None:
     seed(fixture_vault)
     core_paths.ensure_state_dirs()
@@ -229,7 +223,6 @@ def test_a_rehearsal_spends_no_inference_and_writes_nothing(
     with http_endpoint() as endpoint:
         endpoint.queue_completion(json.dumps({"tags": ["impro"]}))
         config = pipeline_config(fixture_vault, endpoint.base_url)
-        attach_op_context(monkeypatch, config, core_paths)
 
         summary = run_once(config, core_paths, dry_run=True)
 

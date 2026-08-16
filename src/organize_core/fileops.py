@@ -170,6 +170,37 @@ HUMAN_ACTORS: frozenset[str] = frozenset({"matt", "user", "human"})
 #: literally — NEVER ``str.format`` (08 §B15: templates contain literal ``{}``).
 DEFAULT_APPEND_TEMPLATE = "## {date} — from {capture_id}\n\n{body}"
 
+#: Machine-owned append marker (CRITICAL-1 ruling). "Already delivered" is
+#: read from the VAULT, not the store, so a retry after a crash cannot append
+#: a second copy. Written in the SAME atomic write as the block it belongs
+#: to, so the marker and the content can never disagree. It is the append
+#: analog of the blessed ``auto_tag_hash`` bookkeeping: machine-owned
+#: frontmatter-equivalent that curation tooling should leave alone.
+APPEND_MARKER_PREFIX = "organize:appended"
+
+
+def append_marker(capture_id: str, route: str | None = None) -> str:
+    """The comment written beside an appended block."""
+    return f"<!-- {APPEND_MARKER_PREFIX} capture_id={capture_id} route={route or ''} -->"
+
+
+def append_delivery_token(capture_id: str) -> str:
+    """The needle the delivered-check looks for.
+
+    NOT the rendered template: ``{date}`` drifts between runs, so a
+    template-based check reads "not delivered" the next day and duplicates.
+    NOT the bare capture id either: a ``[[capture-id]]`` wikilink in the
+    target would read as "already delivered" and SILENTLY skip a real
+    append — non-delivery is the worse failure, because nothing anywhere
+    reports it.
+
+    The TRAILING SPACE is load-bearing: without it ``capture_id=cap-1``
+    substring-matches a marker for ``cap-10`` and that capture is silently
+    never appended. The marker always renders ``route=`` next, so the space
+    is always there.
+    """
+    return f"{APPEND_MARKER_PREFIX} capture_id={capture_id} "
+
 #: How many operations the in-memory recent-ops fallback keeps.
 _RECENT_LIMIT = 500
 
@@ -1817,6 +1848,7 @@ def append_to_note(
     target_path: Path,
     *,
     template: str | None = None,
+    route: str | None = None,
 ) -> OperationResult:
     """Route ``append`` mode (spec 11 §1): capture body appended under
     ``## <date> — from <capture-id>`` (per-route ``template`` override);
@@ -1827,6 +1859,13 @@ def append_to_note(
     Placeholders (``{date}``, ``{capture_id}``, ``{body}``, ``{filename}``)
     are substituted by literal replacement, never ``str.format`` — a
     template containing a literal ``{`` must not raise (08 §B15).
+
+    IDEMPOTENT against the VAULT (CRITICAL-1 ruling): the block carries an
+    :func:`append_marker`, and a target already holding this capture's
+    marker returns ``ok=True`` with ``details["already_delivered"]`` and
+    writes NOTHING. That is what makes a retried batch — after a crash, or
+    after a later destination failed — land exactly once instead of
+    appending a second copy on every attempt.
     """
     now = ctx.clock()
     source = require_in_vault(ctx.config, capture.path, "capture")

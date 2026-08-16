@@ -32,7 +32,7 @@ from typing import Any
 from organize_core import frontmatter, routes
 from organize_core.actions import ActionRecorder
 from organize_core.config import Config, RouteConfig, VaultConfig
-from organize_core.consumers.auto_tagger import AUTO_TAGS_FIELD, AutoTaggerConsumer
+from organize_core.consumers.auto_tagger import AutoTaggerConsumer
 from organize_core.consumers.base import RunContext, Status
 from organize_core.fileops import OperationContext, OperationLog
 from organize_core.index import VaultIndex
@@ -225,7 +225,7 @@ def test_machine_tags_land_where_routes_can_actually_see_them(
     assert [match.route.destination for match in matches] == ["areas/health/training-log.md"]
     # …and the provenance mirror still says the machine put it there, so the
     # ActionRecord's auto_tags_present can carry it (12 §2).
-    assert fields[AUTO_TAGS_FIELD] == ["workout"]
+    assert fields["auto_tags"] == ["workout"]
 
 
 def test_the_control_routing_finds_nothing_before_the_tagger_runs(

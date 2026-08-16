@@ -1135,12 +1135,28 @@ def _validate_route(v: _Validator, entry: dict[str, Any], i: int) -> RouteConfig
             "route interactive-only until then",
             cls=RouteConfigError,
         )
+    template = v.string(entry, "template", prefix, None, allow_empty=True)
+    # A template is the WHOLE appended block, substituted literally. One
+    # without `{body}` therefore appends a heading and silently discards the
+    # capture's text — then the capture is archived and the run exits 0, so
+    # nothing anywhere says the content is gone. Data loss must be refused at
+    # the door (03 §1 voice), not discovered later in the archive.
+    if template is not None and mode == "append" and "{body}" not in template:
+        v.fail(
+            f"{prefix}.template",
+            "has no '{body}' placeholder, so appending it would write the heading "
+            "and DISCARD the capture's text",
+            hint="add {body} to the template — e.g. \"## {date} — from "
+            '{capture_id}\\n\\n{body}"; placeholders are {date}, {capture_id}, '
+            "{body} and {filename}",
+            cls=RouteConfigError,
+        )
     return RouteConfig(
         tags=[tag.strip() for tag in tags],
         destination=destination,
         mode=mode,  # type: ignore[arg-type]
         description=v.string(entry, "description", prefix, "", allow_empty=True) or "",
-        template=v.string(entry, "template", prefix, None, allow_empty=True),
+        template=template,
         auto=auto,
         review=review,  # type: ignore[arg-type]
     )
@@ -1821,7 +1837,10 @@ tags = ["workout", "training"]   # any-of; "a+b" requires both tags
 destination = "areas/health/training-log.md"
 mode = "append"
 auto = false
-template = "## {date} — from {capture_id}"
+# The template is the WHOLE appended block, so it MUST carry {body} — without
+# it the capture's text is discarded. Validation refuses an append template
+# that omits it. Placeholders: {date}, {capture_id}, {body}, {filename}.
+template = "## {date} — from {capture_id}\\n\\n{body}"
 description = """My running/lifting training log. New entries are appended
 chronologically under a date heading. Short workout notes, PRs, and how
 sessions felt belong here — not general health research."""

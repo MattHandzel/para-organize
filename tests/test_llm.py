@@ -593,7 +593,15 @@ def test_claude_cli_json_mode_appends_a_directive_and_parses_fenced_output(
     result = client.generate("enrich this", json_mode=True)
 
     assert result.json == {"next_action": "call bob", "utility": 8}
-    assert llm_module.JSON_MODE_DIRECTIVE in record.read_text(encoding="utf-8")
+    # The LITERAL, not the constant: asserting the constant is in the prompt
+    # that was built FROM the constant passes for any value it could hold.
+    assert (
+        "Respond with a single JSON object and nothing else."
+        in record.read_text(encoding="utf-8")
+    )
+    assert llm_module.JSON_MODE_DIRECTIVE == (
+        "Respond with a single JSON object and nothing else."
+    ), "the directive the model actually receives is part of the contract"
 
 
 def test_claude_cli_invalid_utf8_stdout_does_not_crash(tmp_path: Path) -> None:

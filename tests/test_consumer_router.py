@@ -854,6 +854,42 @@ def test_golden_run_applies_the_auto_route_and_leaves_everything_else_alone(
     assert store.get_emission("router", hit.resolve()) is not None
 
 
+def test_a_custom_append_template_still_carries_the_capture_body(
+    fixture_vault: Path, paths: CorePaths, store: AutomationStore
+) -> None:
+    """The shipped example's template shape, driven through the REAL chain.
+
+    A template is the WHOLE appended block. The example config used to ship
+    ``"## {date} — from {capture_id}"`` with no ``{body}``, so following it
+    appended a heading, DROPPED the capture's text, archived the capture and
+    exited 0 — invisible at every layer. Config validation now refuses a
+    body-less append template; this proves the other half, that a template
+    carrying it actually lands the text in the destination file.
+    """
+    config = router_config(
+        fixture_vault,
+        route(
+            ["rt-workout"],
+            TRAINING_LOG,
+            auto=True,
+            template="## {date} — from {capture_id}\n\n{body}",
+        ),
+    )
+    target = write_target(fixture_vault, TRAINING_LOG)
+    capture = write_capture(
+        fixture_vault, "tpl-body", tags=["rt-workout"], body="Squatted 140kg."
+    )
+
+    summary = run_consumers(config, store, paths=paths)
+
+    assert next(c for c in summary.consumers if c.name == "router").success == 1
+    text = target.read_text(encoding="utf-8")
+    assert "Squatted 140kg." in text, "the capture's body must reach the destination"
+    assert "— from" in text, "and the template's own heading is still rendered"
+    assert not capture.exists()
+    assert len(archived_copies(fixture_vault, "tpl-body")) == 1
+
+
 def test_a_second_run_changes_nothing(
     fixture_vault: Path, paths: CorePaths, store: AutomationStore
 ) -> None:

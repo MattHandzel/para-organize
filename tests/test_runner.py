@@ -1593,3 +1593,77 @@ def test_a_consumer_whose_bind_raises_is_skipped_and_fails_the_run(
     assert summary.exit_code == 1
     assert healthy.handled, "an unrelated consumer still runs"
     assert by_name(summary, "fine").error == 0
+
+
+def test_the_failure_list_is_capped_and_says_so(fixture_vault: Path, registry: Any) -> None:
+    """06 §4 observability vs an unbounded summary: `failures` is what the
+    operator reads, and a consumer erroring on 7 500 notes would otherwise
+    put 7 500 strings in it (and in the --json payload systemd captures).
+
+    Pinned by the LITERAL 20, not by MAX_RECORDED_FAILURES — asserting
+    `len(failures) <= MAX_RECORDED_FAILURES + 1` against a cap read from the
+    same constant passes for ANY value, including a cap of 100 000 that
+    reintroduces the bloat this exists to prevent.
+    """
+    from organize_core.consumers.runner import MAX_RECORDED_FAILURES
+
+    assert MAX_RECORDED_FAILURES == 20, "the cap is part of the operator contract"
+
+    make_consumer(
+        "cap_fake",
+        result=lambda payload: ConsumerResult(status=Status.ERROR, message="boom"),
+    )
+    # The fixture vault holds fewer captures than the cap, so the cap could
+    # never be reached with it alone — seed past it.
+    raw = fixture_vault / "capture/raw_capture"
+    for i in range(30):
+        (raw / f"cap-overflow-{i:02d}.md").write_text(
+            "---\nid: overflow\n---\n\nbody\n", encoding="utf-8"
+        )
+    config = make_config(
+        fixture_vault, cc("capped", "cap_fake", include_paths=["capture/raw_capture"])
+    )
+
+    summary = run_consumers(config, FakeStore())
+
+    failures = by_name(summary, "capped").failures
+    assert len(failures) == 21, "20 recorded, then ONE line saying the rest were dropped"
+    assert failures[-1] == "… further failures suppressed (see the log)"
+    assert by_name(summary, "capped").error > 21, "more notes really did fail than were recorded"
+
+
+def test_a_note_moved_earlier_in_the_run_is_filtered_not_errored(
+    fixture_vault: Path, registry: Any
+) -> None:
+    """Two consumers, ordered: the first FILES the note (as a tag_router
+    route does — move + archive), the second still holds the path from the
+    single scan at the top of the run.
+
+    It used to reach `handle`, burn a real LLM inference and only then fail
+    "note does not exist": a paid-for error, exit 1, and an OnFailure alert
+    every ten minutes for a pipeline doing exactly what it was told. The
+    note was handled — just not by this consumer — so it is a FILTER.
+    """
+    target = fixture_vault / "capture/raw_capture/2026-07-02T10:00:00.000Z.md"
+    assert target.is_file()
+
+    def file_it(payload: NotePayload) -> ConsumerResult:
+        if payload.path == target:
+            payload.path.rename(fixture_vault / "areas/health" / payload.path.name)
+        return ConsumerResult(status=Status.SUCCESS)
+
+    make_consumer("mover_fake", result=file_it)
+    second = make_consumer("later_fake")
+    config = make_config(
+        fixture_vault,
+        cc("mover", "mover_fake", include_paths=["capture/raw_capture"]),
+        cc("later", "later_fake", include_paths=["capture/raw_capture"]),
+    )
+
+    summary = run_consumers(config, FakeStore())
+
+    later = by_name(summary, "later")
+    assert later.error == 0, later.failures
+    assert summary.exit_code == 0, "a note filed by an earlier consumer is not a failure"
+    assert target not in second.handled, "the moved note is never handed to the second consumer"
+    assert second.handled, "its siblings are still processed normally"

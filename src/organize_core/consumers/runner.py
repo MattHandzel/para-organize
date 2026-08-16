@@ -629,6 +629,24 @@ def _run_one_consumer(
             summary.filtered += 1
             continue
 
+        # 1b. still there? The payload list is scanned ONCE at the top of the
+        # run, so an earlier consumer in the SAME run may already have moved
+        # this note — a tag_router route files and archives it, and every
+        # later consumer is still holding the old path. Without this check
+        # the note reaches `handle`, which burns a real LLM inference and
+        # THEN fails "note does not exist": a paid-for error, exit 1, and an
+        # OnFailure alert every ten minutes for a pipeline that is working
+        # exactly as designed. It is a FILTER, not an error — the note was
+        # handled, just not by this consumer, and the next run rescans.
+        if not payload.path.exists():
+            summary.filtered += 1
+            logger.debug(
+                "consumer %s: %s no longer exists (moved earlier this run) — skipping",
+                entry.name,
+                rel,
+            )
+            continue
+
         # 2. central no-ai guard (spec 02 vault law / 06 §2)
         if denies_no_ai and payload.no_ai:
             # Its OWN counter, not `filtered`: an operator reading the 06 §4

@@ -819,10 +819,13 @@ def test_dry_run_evaluates_everything_and_writes_nothing(
         out = capsys.readouterr().out
 
         assert world.vault_census() == before
-        assert world.emissions() == {}
-        # EVERY table, not just emissions: `mark_seen` and the soft purge are
-        # store writes too, and a dry run performs neither (09 §5.6).
-        assert world.store_census() == {"emissions": 0, "notes": 0}
+        # On VIRGIN state the strongest form of "wrote nothing to the store"
+        # is that there is no store: a rehearsal used to leave an empty
+        # schema-v2 automations.db behind, and asserting `emissions() == {}`
+        # queried a table the dry run had itself created. EVERY table matters
+        # here, not just emissions — `mark_seen` and the soft purge are store
+        # writes too, and a dry run performs neither (09 §5.6).
+        assert not (world.state / "automations.db").exists()
         assert world.task_invocations() == []
         assert world.agent_runs() == []
         assert world.ollama.requests == []

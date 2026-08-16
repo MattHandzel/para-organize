@@ -86,13 +86,49 @@ def test_auto_and_template_are_honored() -> None:
                 "tags": ["x"],
                 "destination": "a/b.md",
                 "mode": "append",
-                "template": "## {date} — from {capture_id}",
+                "template": "## {date} — from {capture_id}\n\n{body}",
                 "auto": True,
             }
         )
     )
     assert config.routes[0].auto is True
-    assert config.routes[0].template == "## {date} — from {capture_id}"
+    assert config.routes[0].template == "## {date} — from {capture_id}\n\n{body}"
+
+
+def test_an_append_template_without_body_is_refused() -> None:
+    """It would append the heading and DISCARD the capture's text, then
+    archive the capture and exit 0 — silent data loss. Refused at the door."""
+    with pytest.raises(RouteConfigError) as excinfo:
+        validate_config(
+            raw_with(
+                {
+                    "tags": ["x"],
+                    "destination": "a/b.md",
+                    "mode": "append",
+                    "template": "## {date} — from {capture_id}",
+                }
+            )
+        )
+    message = str(excinfo.value)
+    assert "routes[0].template" in message
+    assert "{body}" in message
+    assert "{body}" in (excinfo.value.hint or "")
+
+
+def test_a_template_carrying_body_is_accepted() -> None:
+    """FIRING CONTROL for the refusal above: the same route with {body} is
+    fine, so the rejection is the placeholder and not the template key."""
+    config = validate_config(
+        raw_with(
+            {
+                "tags": ["x"],
+                "destination": "a/b.md",
+                "mode": "append",
+                "template": "{body}",
+            }
+        )
+    )
+    assert config.routes[0].template == "{body}"
 
 
 def test_folder_destination_with_append_is_rejected() -> None:
