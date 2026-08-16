@@ -417,23 +417,44 @@ def capture_from_action(record: Any) -> ActionCapture:
     )
 
 
-def destination_from_action(record: Any) -> str | None:
-    """The destination FOLDER an ActionRecord filed its capture into.
+def destinations_from_action(record: Any) -> list[str]:
+    """EVERY destination FOLDER an ActionRecord filed its capture into.
 
-    The folder, not the file: ``suggest`` scores folder candidates coming out
-    of ``VaultIndex.para_subfolders``, so an association keyed by a file path
+    Multi-file is first-class in the corpus (12 §2): one capture can be filed
+    into several folders by several routes, and each of those is a separate
+    piece of evidence about where that kind of capture belongs. Reading only
+    the first under-taught the learner on every multi-destination action.
+
+    Folders, not files: ``suggest`` scores folder candidates coming out of
+    ``VaultIndex.para_subfolders``, so an association keyed by a file path
     would never read back (spec 03 §6 "record_move fires with the target's
-    folder").
+    folder"). De-duplicated with order preserved, so two targets landing in
+    ONE folder are one piece of evidence, not two.
     """
+    out: list[str] = []
     targets = list(getattr(record, "targets", ()) or ())
     for role in _DESTINATION_ROLES:
         for target in targets:
             if getattr(target, "role", None) != role:
                 continue
             path = str(getattr(target, "path", "") or "")
-            if path:
-                return str(Path(path).parent)
-    return None
+            if not path:
+                continue
+            folder = str(Path(path).parent)
+            if folder not in out:
+                out.append(folder)
+    return out
+
+
+def destination_from_action(record: Any) -> str | None:
+    """The FIRST destination folder of an ActionRecord, or ``None``.
+
+    Kept for callers that genuinely want a single answer;
+    :func:`record_action` folds ALL of them via
+    :func:`destinations_from_action`.
+    """
+    destinations = destinations_from_action(record)
+    return destinations[0] if destinations else None
 
 
 def record_action(data: LearningData, record: Any, *, now: float) -> LearningData | None:
@@ -466,10 +487,16 @@ def record_action(data: LearningData, record: Any, *, now: float) -> LearningDat
         return None
     if str(getattr(record, "operation", "")) not in LEARNED_OPERATIONS:
         return None
-    destination = destination_from_action(record)
-    if not destination:
+    # EVERY destination, not just the first: a capture filed into two folders
+    # is two pieces of evidence about where that kind of capture goes, and
+    # folding one silently under-recorded every multi-destination action.
+    destinations = destinations_from_action(record)
+    if not destinations:
         return None
-    return record_move(data, capture_from_action(record), destination, now=now)
+    capture = capture_from_action(record)
+    for destination in destinations:
+        data = record_move(data, capture, destination, now=now)
+    return data
 
 
 # --- score readback (feeds suggest signal #3) ------------------------------

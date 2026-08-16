@@ -25,7 +25,6 @@ from typing import Any
 import pytest
 
 from conftest import QUIRK_FILES
-from organize_core import routes
 from organize_core.actions import ActionRecord, ActionRecorder
 from organize_core.config import Config, FileOpsConfig, RouteConfig, VaultConfig
 from organize_core.errors import RouteConfigError
@@ -45,23 +44,6 @@ PERFORMING = "resources/performing/"
 
 # The capture every test files: tags == ["workout"], body "leg day PR".
 WORKOUT_CAPTURE = QUIRK_FILES["context_as_string"]
-
-#: Gates for the two halves of the ARCHITECTURE Phase-4 ruling on
-#: ``fileops.move_to_destination(..., archive=)``. The kwarg is the
-#: integrator's to land; these markers make the ruling's goldens turn on by
-#: themselves the moment it does, and retire the interim ones in the same
-#: instant. Neither is a conditional assertion — each test asserts one
-#: behaviour unconditionally and only its APPLICABILITY is gated.
-seam_landed = pytest.mark.skipif(
-    not routes.MOVE_ARCHIVE_SEAM,
-    reason="fileops.move_to_destination(..., archive=) has not landed yet "
-    "(ARCHITECTURE, Phase-4 rulings, routes-apply batch)",
-)
-interim_only = pytest.mark.skipif(
-    routes.MOVE_ARCHIVE_SEAM,
-    reason="the move-archives interim shim is retired; delete this test with it",
-)
-
 
 class FakeIndex:
     """Duck-typed stand-in for VaultIndex, recording exactly what the
@@ -712,7 +694,6 @@ def test_a_mixed_batch_records_the_strongest_mutation_as_its_operation(
     assert record["context"]["route"] == "workout, exercise"
 
 
-@seam_landed
 def test_destinations_run_in_config_order(fixture_vault: Path, state: Path) -> None:
     """Spec 11 §1: "Order: config order". With the archive seam a move no
     longer consumes the capture, so nothing has to be deferred."""
@@ -732,7 +713,6 @@ def test_destinations_run_in_config_order(fixture_vault: Path, state: Path) -> N
     ]
 
 
-@seam_landed
 def test_two_move_routes_file_two_copies_and_archive_the_original_once(
     fixture_vault: Path, state: Path
 ) -> None:
@@ -757,112 +737,11 @@ def test_two_move_routes_file_two_copies_and_archive_the_original_once(
     assert len(record["targets"]) == 2
 
 
-@interim_only
-def test_interim_a_move_is_deferred_to_last_so_its_archive_is_the_final_one(
-    fixture_vault: Path, state: Path
-) -> None:
-    """INTERIM ONLY — delete with :data:`routes.MOVE_ARCHIVE_SEAM`. Without
-    the archive kwarg a move consumes the capture, so running it first would
-    archive the original out from under the append that follows it in config
-    order."""
-    config = make_config(
-        fixture_vault,
-        route(["workout"], PERFORMING, "move"),
-        route(["exercise", "workout"], IDEAS, "append"),
-    )
-    ctx = make_ctx(fixture_vault, state, config)
-
-    results = apply_all(ctx, capture_record(fixture_vault), resolve(["workout"], config))
-
-    # Results still come back in CONFIG order, whatever the execution order.
-    assert [r.operation for r in results] == ["move", "append"]
-    assert all(r.ok for r in results)
-    assert [line.split("] ")[1].split(":")[0] for line in log_lines(ctx)] == [
-        "append",
-        "archive",
-        "move",
-    ]
-
-
-@interim_only
-def test_interim_a_second_move_route_is_refused_loudly(
-    fixture_vault: Path, state: Path
-) -> None:
-    """INTERIM ONLY. Spec 11 §1 permits two move routes; this build cannot,
-    so it refuses up front rather than archiving after the first and then
-    reporting "capture does not exist" for the second."""
-    config = make_config(
-        fixture_vault,
-        route(["workout"], PERFORMING, "move"),
-        route(["exercise", "workout"], "projects/blog/", "move"),
-    )
-    ctx = make_ctx(fixture_vault, state, config)
-
-    with pytest.raises(RouteConfigError) as excinfo:
-        apply_all(ctx, capture_record(fixture_vault), resolve(["workout"], config))
-
-    assert "only one of them can be carried out" in str(excinfo.value)
-    assert (fixture_vault / WORKOUT_CAPTURE).is_file()
-    assert log_lines(ctx) == []
-
-
-@interim_only
-def test_interim_a_deferred_move_is_not_attempted_after_a_sibling_failed(
-    fixture_vault: Path, state: Path
-) -> None:
-    """INTERIM ONLY. Attempting the move would archive the capture, and spec
-    11 §1 forbids archiving when a destination failed. The skipped destination
-    is reported ``ok=False`` and named, never silently dropped."""
-    config = make_config(
-        fixture_vault,
-        route(["workout"], "projects/blog/nope.md", "append"),
-        route(["exercise", "workout"], PERFORMING, "move"),
-    )
-    ctx = make_ctx(fixture_vault, state, config)
-
-    results = apply_all(ctx, capture_record(fixture_vault), resolve(["workout"], config))
-
-    assert [r.ok for r in results] == [False, False]
-    assert results[1].details["attempted"] is False
-    assert "would archive the capture" in (results[1].error or "")
-    assert (fixture_vault / WORKOUT_CAPTURE).is_file()
-    assert not (fixture_vault / "resources/performing/context-string.md").exists()
-    assert not archived(fixture_vault).exists()
-
-
-def test_the_move_archive_seam_interim_is_gone() -> None:
-    """TRIP-WIRE, not a behaviour test.
-
-    It fails EXACTLY ONCE — on the day ``fileops.move_to_destination`` grows
-    its ``archive`` keyword — and that failure is the instruction to delete
-    the interim. Delete, in ``src/organize_core/routes.py``:
-
-    * the ``MOVE_ARCHIVE_SEAM`` constant and its comment block;
-    * the ``if MOVE_ARCHIVE_SEAM`` branch in ``apply_route`` (keep the
-      ``archive=False`` call);
-    * in ``apply_all``: the ``not MOVE_ARCHIVE_SEAM`` refusal of a second
-      move route, the ``plan`` reordering, the ``_not_attempted`` branch and
-      the ``already_archived`` computation (which becomes constantly False);
-    * ``_not_attempted`` itself, and its ``LoggedOperation``/``_iso`` imports
-      if nothing else uses them;
-
-    and in this file, every ``@interim_only`` test plus this one, leaving the
-    ``@seam_landed`` goldens (which then run unconditionally).
-    """
-    assert not routes.MOVE_ARCHIVE_SEAM, test_the_move_archive_seam_interim_is_gone.__doc__
-
-
 # ---------------------------------------------------------------------------
 # The learning reader of a multi-target record (04 §33 / 12 §2 "Uses" #2)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="learn.destination_from_action returns the FIRST destination-role target only, so "
-    "a multi-destination route action teaches learning.json about ONE of its destinations. "
-    "Owned by the learn seat; flip this to a plain test when it folds every target.",
-)
 def test_learning_folds_every_destination_of_a_multi_target_record(
     fixture_vault: Path, state: Path
 ) -> None:
@@ -892,7 +771,6 @@ def test_learning_folds_every_destination_of_a_multi_target_record(
     data = learn.record_action(learn.LearningData(), record, now=FIXED_NOW)
     assert data is not None, "an append to a real destination is a learned operation"
 
-    # Today this is {'.../projects/blog': 1} — the first target only.
     assert sorted(data.statistics.destinations) == [
         str(fixture_vault / "areas/health"),
         str(fixture_vault / "projects/blog"),

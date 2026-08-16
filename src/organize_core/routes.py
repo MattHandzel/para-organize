@@ -25,7 +25,6 @@ destinations (11 §1 load-time contract).
 
 from __future__ import annotations
 
-import inspect
 import logging
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -86,29 +85,6 @@ _PHASE_5_HINT = (
     "review gate) and lands in Phase 5. Route resolution and the suggestion list "
     "already SHOW integrate routes; 'move' and 'append' routes apply today. "
     "Use mode = \"append\" for a mechanical append until Phase 5 ships."
-)
-
-#: INTERIM SHIM — DELETE WITH EVERY ``if not MOVE_ARCHIVE_SEAM`` BRANCH.
-#:
-#: The Phase-4 routes-apply ruling (ARCHITECTURE, "Phase-4 rulings,
-#: routes-apply batch") grants ``fileops.move_to_destination(..., archive=
-#: False)``, which the INTEGRATOR lands: with it, :func:`apply_all` executes
-#: destinations in the CONFIG ORDER spec 11 §1 mandates, several ``move``
-#: routes are legal (several copies, one archive), and the single archive
-#: happens once at the end.
-#:
-#: Until that kwarg exists this seat cannot express "move without archiving"
-#: at all, so :func:`apply_all` falls back to the gated interim the ruling
-#: allows: run ``move`` destinations LAST so the move's own archive step IS
-#: the once-after-all archive, and refuse a second ``move`` route.
-#:
-#: Detected rather than assumed so the day the kwarg lands is the day the
-#: real path turns on — no coordinated edit, no window where routes call a
-#: parameter that is not there.
-#: ``tests/test_routes_apply.py::test_the_move_archive_seam_interim_is_gone``
-#: FAILS on that day and names every branch to delete.
-MOVE_ARCHIVE_SEAM: bool = (
-    "archive" in inspect.signature(move_to_destination).parameters
 )
 
 #: STRONGEST MUTATION WINS — the ``operation`` a single ActionRecord claims
@@ -313,10 +289,6 @@ def apply_route(
     test 1 ("capture archived"). Calling this function directly files the
     content and deliberately leaves the original where it was.
 
-    (Until the integrator lands ``archive=``, :data:`MOVE_ARCHIVE_SEAM` is
-    False and a ``move`` here still archives — the gated interim, whose one
-    compensating branch lives in :func:`apply_all`.)
-
     Errors follow the ARCHITECTURE error-line rule: an unusable ROUTE (an
     unknown mode, an ``integrate`` route) RAISES, because the request never
     named an operation that could be attempted; a real attempt that fails
@@ -325,9 +297,7 @@ def apply_route(
     """
     mode = (match.route.mode or "").strip()
     if mode == "move":
-        if MOVE_ARCHIVE_SEAM:
-            return move_to_destination(ctx, capture, match.destination, archive=False)
-        return move_to_destination(ctx, capture, match.destination)
+        return move_to_destination(ctx, capture, match.destination, archive=False)
     if mode == "append":
         return append_to_note(
             ctx, capture, match.destination, template=match.route.template
@@ -384,39 +354,6 @@ def _iso(now: float) -> str:
     and a fileops-written line from the same clock and compares their ``ts``
     (spec 05 §1.5 is ONE line format, not two)."""
     return datetime.fromtimestamp(now, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _not_attempted(
-    ctx: OperationContext, capture: NoteRecord, match: RouteMatch, reason: str
-) -> OperationResult:
-    """A destination :func:`apply_all` deliberately did NOT try, with its own
-    FAILED operations-log line so the log tells the whole story of the
-    action rather than going quiet on the one destination that never ran."""
-    now = ctx.clock()
-    source = str(capture.path)
-    destination = str(match.destination)
-    message = f"not attempted: {reason}"
-    if ctx.config.file_ops.log_operations:
-        ctx.oplog.append(
-            LoggedOperation(
-                ts=_iso(now),
-                type="move" if match.route.mode == "move" else "append",
-                src=source,
-                dst=destination,
-                success=False,
-                error=message,
-                dry_run=ctx.dry_run,
-            )
-        )
-    return OperationResult(
-        ok=False,
-        operation="move" if match.route.mode == "move" else "append",
-        source=source,
-        destination=destination,
-        error=message,
-        dry_run=ctx.dry_run,
-        details={"attempted": False, "route": match.route_name},
-    )
 
 
 def _described_targets(
@@ -532,18 +469,9 @@ def apply_all(
     destination runs with archiving suppressed and this function performs the
     single archive at the end.
 
-    INTERIM (:data:`MOVE_ARCHIVE_SEAM` False, i.e. before the integrator
-    lands ``move_to_destination(..., archive=)``): a ``move`` cannot be
-    performed without archiving, so ``move`` destinations are deferred to
-    LAST and their own archive step becomes the once-after-all archive, and a
-    second ``move`` route is refused with ``RouteConfigError``. Both are
-    deviations from the paragraph above and both disappear with the shim.
-
     Failure (world state, not addressing): every destination is attempted and
     logged, the ones that succeeded STAND, and the capture is NOT archived.
-    (Under the interim a deferred ``move`` after an earlier failure is the
-    one destination NOT attempted — attempting it would archive the capture
-    after a failure, the one thing spec 11 §1 forbids.) Failed destinations
+    Failed destinations
     come back ``ok=False`` with a FAILED operations-log line each; the record
     (when anything reached the vault) carries ``context.partial_failure``
     naming what did not finish, which is what keeps a half-applied route
@@ -565,43 +493,14 @@ def apply_all(
         if match.route.mode == "integrate":
             _refuse_integrate(match)
 
-    move_positions = [i for i, match in enumerate(ordered) if match.route.mode == "move"]
-    if not MOVE_ARCHIVE_SEAM and len(move_positions) > 1:
-        names = ", ".join(ordered[i].route_name for i in move_positions)
-        raise RouteConfigError(
-            f"capture {capture.path} matches {len(move_positions)} routes with mode 'move' "
-            f"({names}); this build cannot move a capture without archiving it, so only one "
-            "of them can be carried out",
-            hint="spec 11 §1 permits several move routes (several copies, one archive); this "
-            "build is missing the fileops archive= seam that makes that possible. Give all "
-            "but one of those routes mode = 'append', or narrow their tags, until it lands",
-        )
-    plan = (
-        list(range(len(ordered)))
-        if MOVE_ARCHIVE_SEAM
-        else [i for i in range(len(ordered)) if i not in move_positions] + move_positions
-    )
-
     recorder = _RouteRecorder(ctx.recorder)
     child = replace(ctx, recorder=recorder, on_record=None)
 
     results: list[OperationResult | None] = [None] * len(ordered)
     attribution: list[tuple[RouteMatch | None, ActionRecord]] = []
     failed: list[str] = []
-    for position in plan:
+    for position in range(len(ordered)):
         match = ordered[position]
-        # INTERIM ONLY (see MOVE_ARCHIVE_SEAM): without the seam a move
-        # archives, so it must not run once a sibling destination has failed.
-        # With the seam every destination is attempted, per spec 11 §1.
-        if not MOVE_ARCHIVE_SEAM and match.route.mode == "move" and failed:
-            results[position] = _not_attempted(
-                child,
-                capture,
-                match,
-                f"an earlier route destination failed ({'; '.join(failed)}) and a move "
-                "would archive the capture",
-            )
-            continue
         mark = len(recorder.records)
         result = apply_route(child, capture, match)
         results[position] = result
@@ -612,15 +511,9 @@ def apply_all(
             failed.append(f"{match.route_name} -> {match.destination}")
 
     applied = [result for result in results if result is not None and result.ok]
-    # INTERIM ONLY: with the seam, no destination ever archives, so this is
-    # always False and the archive below always runs.
-    already_archived = not MOVE_ARCHIVE_SEAM and any(
-        ordered[i].route.mode == "move" and results[i] is not None and results[i].ok  # type: ignore[union-attr]
-        for i in range(len(ordered))
-    )
 
     archive_result: OperationResult | None = None
-    if not failed and applied and not already_archived:
+    if not failed and applied:
         recorder.capturing = False
         try:
             archive_result = archive_capture(child, capture)
