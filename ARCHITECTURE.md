@@ -977,3 +977,27 @@ mirror.
   attempts came back clean). Ruling 16 converts any such crash into an
   attributable one-line error naming the note, which is what makes the next
   occurrence diagnosable; hunting it further without a repro is not a fix.
+
+## Phase-3 rulings (architect, routed 2026-08-16 — integrator applies)
+
+- **SUBPROCESS_ALLOWED (tests/test_repo_hygiene.py)**: expand to
+  `frozenset({"llm", "consumers.deep_research", "consumers.taskwarrior",
+  "consumers.learn"})`. The exemption is for spawning an EXTERNAL TOOL the
+  spec names by name (task, yt-dlp, the research agent command) — never
+  for filesystem work (no find/ls/cp/mv/rm equivalents; spec 05 §1.6 still
+  binds). ADD (not either/or) structural assertions over every allowlisted
+  module including llm: (a) no `shell=True` anywhere; (b) first arg to
+  subprocess.run/Popen is never a plain string — list argv only (08 §A28
+  injection class, made structural); (c) every subprocess.run carries
+  `timeout=` (06 §6 / B1 law, made structural). A consumer that genuinely
+  needs Popen requests a ruling.
+- **consumers/base.py NotePayload bodies** (no signature change):
+  `no_ai` MUST delegate to the frontmatter module's no-ai predicate — ONE
+  rule in the codebase (extract frontmatter.is_no_ai's field-level check
+  into a shared helper; both call it). Ambiguous truthy values (e.g. the
+  string "true") count as no_ai=True — for a do-not-touch flag,
+  over-matching is the safe error. `tags()` coerces via the shared
+  frontmatter list-coercion (scalar → [scalar], list → list, missing/None
+  → []), values stringified — never a hand-rolled re-parse (08 §B9 class).
+  Tests: no_ai for true/absent/false/"true"; tags for scalar/list/missing
+  (the fixture vault's scalar-tags quirk file is the natural input).
