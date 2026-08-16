@@ -366,12 +366,21 @@ class TaskWarriorConsumer(Consumer):
         env = os.environ.copy()
         if self.taskrc_path:
             env["TASKRC"] = str(self.taskrc_path)
-        proc = subprocess.run(
+        # Binary mode + tolerant decode: task export data can contain invalid
+        # UTF-8 (seen live 2026-08-13..16: 0xed in a task payload), and strict
+        # text-mode decoding killed every automation run for days. text=True
+        # with bytes input was also inconsistent.
+        raw = subprocess.run(
             cmd,
             input=input_text.encode("utf-8") if input_text else None,
             capture_output=True,
-            text=True,
             env=env,
+        )
+        proc = subprocess.CompletedProcess(
+            args=raw.args,
+            returncode=raw.returncode,
+            stdout=raw.stdout.decode("utf-8", errors="replace"),
+            stderr=raw.stderr.decode("utf-8", errors="replace"),
         )
         if proc.returncode != 0:
             raise TaskCommandError(
