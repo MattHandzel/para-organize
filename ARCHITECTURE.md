@@ -1273,3 +1273,33 @@ per-note ERROR at the far end of a ten-minute timer.
   skip mark someone must remember to delete. Bonus property to state in
   tests: a stub translated to Status.ERROR retries next run (06 §1), so
   pre-landing notes process automatically on the first run after.
+
+## Phase-4 rulings, auto_tagger batch (architect, routed 2026-08-16)
+
+- **CORRECTION to the seat brief**: machine tags are written to BOTH
+  `tags` AND `auto_tags` (spec 11 §2 bullet 3 + §4 acceptance). The
+  auto_tags field is the provenance MIRROR; tags-only-in-auto_tags would
+  make the tagger invisible to routes.resolve and break the
+  participation-by-construction ruling above.
+- **op_context seam (APPROVED — Phase-4 integrator lands it; shared
+  files)**: base.py RunContext gains `op_context: OperationContext | None
+  = None` (field, not factory; TYPE_CHECKING import fine; docstring:
+  populated by run_consumers, None only in pure-logic unit tests,
+  consumers MUST refuse unrecorded vault writes when None). runner.py:
+  run_consumers accepts op_context and hands each consumer a per-consumer
+  copy via dataclasses.replace(op_context, actor="consumer:<name>") — the
+  doc 12 §2 actor format is "consumer:auto_tagger", never a bare name.
+  Invariant to pin: op_context.dry_run == RunContext.dry_run, one flag
+  wired once. cli.py: cmd_run_consumers passes its existing _op_context
+  product through.
+- **No-op_context fallback**: a consumer that would write the vault with
+  op_context=None emits Status.ERROR rather than performing an unrecorded
+  write (refusing to become a second unrecorded write path is the doc-12
+  discipline; errors retry, so the run self-heals once the seam lands).
+- **PHASE-5 CHECKLIST (logged now so it isn't lost)**: (a) learn
+  consumer's SOURCE-note write-back (processing_status: learn-processed)
+  is a meta_edit in the doc-12 enum and must migrate to
+  update_frontmatter + op_context (new-output files — flashcards/answers —
+  stay store-audited, defensible as-is); (b) taskwarrior.py's redundant
+  `_note_is_no_ai` delegating helper simplifies to payload.no_ai; (c)
+  tag_router integrate-mode routes override wants_llm when Phase 5 lands.
