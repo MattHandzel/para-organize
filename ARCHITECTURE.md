@@ -1543,3 +1543,37 @@ The "already delivered" truth lives in the VAULT, not the store.
   crash-mid-batch; move retry no-_1/same-id-skip/different-id-collides;
   wikilink false-positive still receives; archive-failed-last retries
   alone.
+
+## Phase-5 integrate wire contract (architect ruling, 2026-08-16 — integrator implements)
+
+- **STATELESS proposals** (decisive reason: the idle timeout — review time
+  is exactly when the server exits; server-held state would yield
+  "unknown proposal_id" at the moment of accept). op.integrate_propose
+  returns the COMPLETE proposal: {proposal_id, diff, rationale,
+  target_snapshot (mtime+hash at propose), llm: {backend, model,
+  prompt_hash, proposed_diff}}; commit takes it back verbatim.
+  proposal_id is a CORRELATION id echoed into the ActionRecord, never a
+  server-side lookup key. Trace fidelity trusts the single-user client;
+  SAFETY never does (see below). Document both.
+- **op.integrate_commit runs on the writer queue with FRESH checks**:
+  (i) target_snapshot TOCTOU check → ConcurrentModificationError if the
+  vault moved since propose; (ii) the DELETION GUARD re-runs at commit
+  against what will actually be written — for verdict=accepted AND
+  verdict=edited ("integration adds and weaves; it never destroys" binds
+  the MODE, not just the LLM; a buggy client truncating the buffer must
+  not mass-delete under Matt's name). Guard violation on edited → a
+  distinct error directing to the MANUAL merge path (guard-free by
+  design). (iii) no-ai refusal at BOTH propose and commit.
+- **Names**: op.integrate_propose / op.integrate_commit (op.* namespace
+  beside op.merge_preview/commit; preview=deterministic seed vs
+  propose=LLM+review gate, asymmetry deliberate). CLI:
+  `organize integrate <note> <target> [--route NAME]` PROPOSES by default
+  (prints diff+rationale, writes nothing); `--apply` one-shot ONLY when
+  review setting is "auto"; scripted two-step via `--commit-from FILE
+  --verdict accepted|edited|rejected [--final-diff FILE]`. Rejected
+  verdicts COMMIT (record written, no vault write — the negative signal
+  is the point).
+- **Retry-record consistency (queued item ruled)**: a retry that changes
+  ANY state records — all-destinations-skip + archive-completes yields
+  ONE aggregate record (archive effect + every target marked
+  already-delivered); a run with zero state changes records nothing.
