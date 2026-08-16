@@ -73,8 +73,8 @@ everything ◀── cli, server (composition roots)
 | **deep_research** | `consumers/deep_research.py` | `tests/test_consumer_research*.py` | 06 §3.4, 08 §B15 | base |
 | **tag_router** *(Phase 4)* | `consumers/tag_router.py` | `tests/test_consumer_router*.py` | 11 §1 | base, routes |
 | **auto_tagger** *(Phase 4)* | `consumers/auto_tagger.py` | `tests/test_consumer_tagger*.py` | 11 §2 | base, llm, frontmatter, index |
-| **cli** | `cli.py` | `tests/test_cli*.py` | 10 §1, 06 §4, 09 §5.6 | everything (composition root) |
-| **server** | `server.py` | `tests/test_server*.py` | 10 §1-2, 09 §4 | everything (composition root) |
+| **cli+server** (integration seat) | `cli.py`, `server.py` | `tests/test_server*.py` ONLY — never `tests/test_cli*.py` | 10 §1-2, 06 §4, 09 §4/§5.6 | everything (composition root) |
+| **cli-blackbox** (test seat) | — (no src files; defects in cli.py are REPORTED to the integrator, never edited) | `tests/test_cli*.py` (subprocess-driven, real `organize` binary, fixture vault + ORGANIZE_CORE_* tmp paths) | 10 §1, 06 §4, 09 §5.6 | cli+server (behavior under test) |
 | **paths** *(integrator)* | `paths.py` | `tests/test_paths*.py` | 10 §3 | — |
 
 `cli` and `server` are integration seats — schedule them after the modules
@@ -258,3 +258,19 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
 15. **Python version**: spec says 3.11+; the system interpreter (and the
     venv) is 3.13. `requires-python = ">=3.11"` — builders must not use
     3.12+-only syntax.
+
+## Integrator rulings (post-scaffold)
+
+- **cli.py ownership (2026-08-16 collision)**: two seats independently
+  implemented `cli.py`; the combined cli+server implementation at HEAD
+  stands (it is the coherent pair). From here: `cli.py` + `server.py`
+  belong to the **cli+server** seat; ALL `tests/test_cli*.py` belong to
+  the **cli-blackbox** seat, which tests the shipped binary via subprocess
+  and reports defects to the integrator instead of editing `cli.py`.
+  Neither seat touches the other's files.
+- **`--json` flag**: the per-subcommand `--json` (machine-readable output)
+  added by the cli+server seat is an approved ADDITIVE surface change —
+  spec 10 §2 makes other frontends (Claude agents) first-class CLI
+  consumers, which needs machine-readable output. It must never change
+  human-output defaults, and `SUBCOMMANDS`/`build_parser` remain the
+  scaffold contract.
