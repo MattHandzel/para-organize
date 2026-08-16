@@ -619,27 +619,34 @@ def test_get_description_touches_no_filesystem() -> None:
 
 
 # --------------------------------------------------------------------------
-# Phase-4 surface — must fail loudly, not silently no-op
+# Phase-4 surface — RETIRED, replaced by the behaviour it was standing in for
 # --------------------------------------------------------------------------
+#
+# `test_phase_four_entry_points_raise_a_clear_not_implemented` asserted that
+# `apply_route` / `apply_all` / `set_description` raise NotImplementedError.
+# Phase 4 implemented all three, so the assertion is now a statement that the
+# feature is missing. Retired rather than weakened (09 §3): the behaviour it
+# guarded — "fail loudly, never silently no-op" — is now covered by real
+# goldens in `tests/test_routes_apply.py` (apply) and
+# `tests/test_routes_apply_describe.py` (descriptions), and the ONE surface
+# still deliberately unimplemented keeps its loud refusal below.
 
 
-@pytest.mark.parametrize(
-    ("name", "args"),
-    [
-        ("apply_route", (None, None, None)),
-        ("apply_all", (None, None, [])),
-        ("set_description", (None, Path("/vault/areas/health"), "text")),
-    ],
-)
-def test_phase_four_entry_points_raise_a_clear_not_implemented(
-    name: str, args: tuple[object, ...]
-) -> None:
+def test_the_integrate_edit_path_still_refuses_loudly(spec_config: Config) -> None:
+    """Doc 12 §1's integrate half is Phase 5. Resolution and ranking must
+    keep working for an integrate route (it is a real destination Matt can
+    see); only APPLYING one refuses, and it names the phase rather than
+    no-opping."""
+    config = make_config(route(["impro"], "resources/performing/notes.md", mode="integrate"))
+    (match,) = resolve(["impro"], config)
+    assert match.as_suggestion().score == ROUTE_SUGGESTION_SCORE
+
     with pytest.raises(NotImplementedError) as excinfo:
-        getattr(routes, name)(*args)
+        routes.apply_route(None, None, match)  # type: ignore[arg-type]
 
     message = str(excinfo.value)
-    assert name in message
-    assert "Phase 4" in message
+    assert "integrate" in message
+    assert "Phase 5" in message
 
 
 # ---------------------------------------------------------------------------
