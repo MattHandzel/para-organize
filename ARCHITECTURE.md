@@ -340,6 +340,17 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
   `$` in vault filenames resolvable (expansion-order defect, fixed); (ii)
   `set-meta` on a note with NO frontmatter block works per spec 07
   annotate-without-filing (raw AttributeError, fixed).
+- **Atomic-write triplication (architect conformance pass, LOW)**: three
+  implementations exist — `fileops.atomic_write` (vault files: perm/EXDEV
+  handling), `learn._atomic_write_text` and index's inline mkstemp+replace
+  (state files). The vault-vs-state split is INTENTIONAL for now (merging
+  would give the pure scoring module an import of the mutation layer —
+  structural decision 3). Disposition: when Phase 3 adds consumer state
+  writers, lift ONE state-file atomic-write helper into a small shared
+  module (not fileops) and migrate learn/index to it.
+- **Phase gates run `make gate`** (test + perf + lint): the spec 09 §4
+  full-scale perf tests are `-m slow` and excluded from the default suite,
+  so a bare `make test` is NOT a complete phase gate.
 - **`--json` flag**: the per-subcommand `--json` (machine-readable output)
   added by the cli+server seat is an approved ADDITIVE surface change —
   spec 10 §2 makes other frontends (Claude agents) first-class CLI
