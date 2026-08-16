@@ -689,7 +689,8 @@ def test_list_consumers_constructs_nothing_and_needs_no_config(core: Core) -> No
     env = dict(core.env, ORGANIZE_CORE_CONFIG_DIR=str(core.config_dir / "nope"))
     proc = core.run("run-consumers", "--list-consumers", env=env)
     assert proc.returncode == 0
-    assert proc.stdout.split() == [
+    names = [line.split()[0] for line in proc.stdout.splitlines() if line.strip()]
+    assert names == [
         "auto_tagger",
         "deep_research",
         "learn",
@@ -697,6 +698,29 @@ def test_list_consumers_constructs_nothing_and_needs_no_config(core: Core) -> No
         "tag_router",
         "taskwarrior",
     ]
+
+
+def test_list_consumers_marks_types_that_are_not_valid_config_values(core: Core) -> None:
+    """The listing prints registry TYPE names while ``--consumer`` takes
+    config SECTION names, so it is already a different namespace. It must at
+    least not advertise a name that config validation refuses — enabling one
+    produced an ERROR per scanned note and exit 1 on every run."""
+    from organize_core.consumers import get_consumer_types, get_implemented_consumer_types
+
+    pending = set(get_consumer_types()) - set(get_implemented_consumer_types())
+    assert pending, "no unimplemented consumer types registered — retire this test"
+
+    proc = core.run("run-consumers", "--list-consumers")
+    assert proc.returncode == 0
+    marked = {
+        line.split()[0]
+        for line in proc.stdout.splitlines()
+        if line.strip() and "not implemented" in line
+    }
+    assert marked == pending
+    for line in proc.stdout.splitlines():
+        if line.strip() and line.split()[0] in get_implemented_consumer_types():
+            assert line.strip() == line.split()[0], "a usable type must list bare"
 
 
 def test_no_command_prints_help_and_exits_two(core: Core) -> None:
@@ -1232,3 +1256,49 @@ def test_skip_dry_run_marks_the_record(core: Core) -> None:
     assert proc.returncode == 0, proc.stderr
     (record,) = _skip_records(core)
     assert record["context"]["dry_run"] is True
+
+
+# ---------------------------------------------------------------------------
+# `organize purged` — the soft-purge archive's operator door (spec 06 §1)
+# ---------------------------------------------------------------------------
+
+
+def test_purged_list_reports_an_empty_archive(core: Core) -> None:
+    proc = core.run("purged", "list", "--json")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["purged"] == []
+
+
+def test_purged_list_and_restore_round_trip(core: Core) -> None:
+    """``soft_purge`` WARNs that "restore_purged() undoes this". That promise
+    was unkeepable: ``list_purged``/``restore_purged`` had no caller anywhere
+    in ``src/`` and no CLI surface, so an operator could neither see what had
+    been archived nor put it back."""
+    from organize_core.consumers.store import AutomationStore
+
+    db = core.state_dir / "automations.db"
+    note = core.vault / "capture" / "raw_capture" / "archived.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("---\nid: archived\n---\nbody\n", encoding="utf-8")
+
+    now = 1_700_000_000
+    with AutomationStore(db) as store:
+        store.migrate()
+        store.mark_seen([note], now=now, hashes={note: "h1"})
+        store.checkpoint("learn", note, "h1", "success", now=now)
+        assert store.soft_purge(scan_dirs_ok=True, now=now + 40 * 86_400) == 1
+
+    listed = core.run("purged", "list", "--json")
+    assert listed.returncode == 0, listed.stderr
+    assert json.loads(listed.stdout)["purged"] == [str(note.resolve())]
+
+    restored = core.run("purged", "restore", "--json")
+    assert restored.returncode == 0, restored.stderr
+    payload = json.loads(restored.stdout)
+    assert payload["restored"] == 1
+    assert payload["remaining"] == []
+
+    with AutomationStore(db) as store:
+        emission = store.get_emission("learn", note)
+    assert emission is not None and emission.status == "success"
+    assert core.run("purged", "list", "--json").stdout.strip().endswith('"purged": []\n}')

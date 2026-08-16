@@ -43,6 +43,18 @@ class NotePayload:
     content: str  # body only
     raw_text: str  # full file text
     note_hash: str
+    #: Vault-relative posix path, as derived during INGESTION from the
+    #: configured ``vault.scan_dirs`` prefix plus the walk-relative subpath.
+    #:
+    #: Carried on the payload rather than re-derived from ``path`` because
+    #: ``path`` is symlink-RESOLVED: a scan dir symlinked outside the vault
+    #: root resolves to an absolute path that ``relative_to(root)`` cannot
+    #: express, and the old fallback (the absolute path) can never match a
+    #: relative ``include_paths`` prefix — so every note under such a scan
+    #: dir was silently counted ``filtered`` and never handled (08 §B18).
+    #: Empty only for payloads built by hand in tests; the runner falls back
+    #: to ``relative_to`` and WARNs when it cannot derive one.
+    rel: str = ""
 
     @property
     def no_ai(self) -> bool:
@@ -106,10 +118,41 @@ class RunContext:
 class Consumer(ABC):
     """One consumer type. Subclasses register with ``@register("name")``.
 
-    ``uses_llm = True`` subclasses are centrally denied ``no-ai`` notes by
-    the runner (spec 06 §2)."""
+    Two DIFFERENT LLM questions, deliberately kept apart:
+
+    - ``uses_llm`` (class flag) — "is this consumer's whole job an LLM
+      call?" It drives the runner's central ``no-ai`` DENIAL: a
+      ``no-ai: true`` note is never even offered to such a consumer (spec
+      02 vault law / 06 §2).
+    - :meth:`wants_llm` (instance predicate) — "does this INSTANCE need the
+      run's shared LLM client on its ``RunContext``?" It drives CLIENT
+      INJECTION only.
+
+    They differ for taskwarrior: it creates a task for EVERY matching note
+    (so a ``no-ai`` capture must still become a task — ARCHITECTURE
+    resolution #12), but with ``llm_enabled = true`` it needs a client for
+    the optional enrichment branch, which guards ``no-ai`` itself. Keying
+    injection on the class flag alone made ``llm_enabled`` inert in
+    production: ``ctx.llm`` was always ``None`` and the 06 §3.1 enrichment
+    path could never execute through the pipeline.
+    """
 
     uses_llm: ClassVar[bool] = False
+
+    #: False for a type that is REGISTERED (so the registry and config
+    #: schema are stable) but whose bodies land in a later phase. Config
+    #: validation refuses such a type by name, and ``--list-consumers``
+    #: marks it — otherwise enabling one produces an ERROR per scanned note
+    #: (7.5k on the real vault) and exit 1 forever, instead of one legible
+    #: fail-fast (08 §B2/§B14).
+    implemented: ClassVar[bool] = True
+
+    def wants_llm(self) -> bool:
+        """Does this instance need ``RunContext.llm``? Default: whatever
+        ``uses_llm`` says. Override when an OPTION (not the type) decides —
+        see ``TaskwarriorConsumer.wants_llm``. Must be pure and cheap: the
+        runner calls it once per consumer per run."""
+        return bool(type(self).uses_llm)
 
     def __init__(self, config: ConsumerConfig) -> None:
         """PURE — validate ``config.options`` against this type's schema
@@ -150,6 +193,15 @@ def register(name: str):
 
 
 def get_consumer_types() -> dict[str, type[Consumer]]:
-    """Registered name → class (used by config validation and
-    ``--list-consumers``, which must not CONSTRUCT anything — 06 §4)."""
+    """Every registered name → class, INCLUDING types whose bodies land in a
+    later phase (``implemented = False``). Used by ``--list-consumers``,
+    which must not CONSTRUCT anything (06 §4)."""
     return dict(_REGISTRY)
+
+
+def get_implemented_consumer_types() -> dict[str, type[Consumer]]:
+    """Registered types a config may actually name. Config validation uses
+    THIS, not :func:`get_consumer_types`: accepting a Phase-4 stub as a
+    valid ``type`` turned one unimplemented consumer into an error per
+    scanned note plus a permanently failing unit (08 §B2/§B14)."""
+    return {name: cls for name, cls in _REGISTRY.items() if getattr(cls, "implemented", True)}

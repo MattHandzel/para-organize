@@ -465,3 +465,118 @@ def test_systemd_analyze_verifies_every_unit(tmp_path: Path) -> None:
         if ours:
             failures.append(f"{unit.name}: " + "; ".join(ours))
     assert failures == [], "\n".join(failures)
+
+
+# ---------------------------------------------------------------------------
+# "OnFailure= on every unit that can fail" — the README's own rule (P3-V6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [pytest.param(TIMER, id="timer"), pytest.param(PATH_UNIT, id="path")],
+)
+def test_every_triggering_unit_alerts_on_failure(unit: Path) -> None:
+    """The README states the rule as applying to "every unit that can fail",
+    and these two carried no ``OnFailure=``.
+
+    They can both fail at START: the path unit's ``MakeDirectory=true``
+    against a ``%h/notes`` that is a dangling symlink while the vault is
+    unmounted, and a timer that cannot be started at all. Either leaves the
+    trigger sitting in ``failed`` with nobody told — a quieter instance of
+    the same silent-death class the whole deploy directory exists to prevent.
+    """
+    on_failure = parse_unit(unit).get("Unit", "OnFailure", fallback="")
+    assert on_failure.startswith("organize-pipeline-failure@"), (
+        f"{unit.name} has no OnFailure= (README: 'OnFailure= on every unit that can fail')"
+    )
+    assert "%n" in on_failure, "the alert must name the unit that actually failed"
+
+
+# ---------------------------------------------------------------------------
+# the cutover moves the database (spec 06 §1, 09 §5.4)
+# ---------------------------------------------------------------------------
+
+
+def test_the_cutover_relocates_the_database_to_the_path_the_service_reads() -> None:
+    """The runbook migrated ``~/.local/state/para-organize/automations.db``
+    while the shipped unit opens ``<state-dir>/automations.db`` =
+    ``~/.local/share/organize-core/automations.db``, and no step copied it.
+    Followed verbatim, that left the migrated 7 516-note / 379-checkpoint
+    history orphaned and started the pipeline on an EMPTY database — re-firing
+    every past capture through taskwarrior/learn/question_answer, the outcome
+    spec 06 §1 exists to prevent.
+    """
+    text = README.read_text(encoding="utf-8")
+    destination = "~/.local/share/organize-core/automations.db"
+    legacy = "~/.local/state/para-organize/automations.db"
+
+    assert destination in text, "the README must name the path the service actually opens"
+
+    # shell_lines() preserves indentation (these live inside a numbered list).
+    copies = [
+        line.strip()
+        for line in shell_lines(text)
+        if line.strip().startswith(("cp ", "mv ", "install "))
+    ]
+    relocation = [
+        line for line in copies if legacy in line or "state/para-organize" in line
+    ]
+    assert relocation, (
+        "no step copies the old database to the new state dir; every other "
+        "instruction then operates on a file nothing will open"
+    )
+
+    # …and the real migration must be aimed at the DESTINATION, not the old path.
+    migrations = [
+        line
+        for line in shell_lines(text)
+        if "migrate-store" in line and "--yes-live" in line
+    ]
+    assert migrations, "the cutover migration command disappeared"
+    for line in migrations:
+        assert "state/para-organize" not in line, (
+            f"the cutover still migrates the OLD path in place: {line}"
+        )
+
+
+def test_health_names_the_stranded_database_so_the_step_cannot_be_skipped() -> None:
+    """A runbook step is only a gate if something checks it."""
+    text = README.read_text(encoding="utf-8")
+    assert "organize health" in text
+    assert "ERROR" in text or "fails with an ERROR" in text
+
+
+# ---------------------------------------------------------------------------
+# the old chain is retired BEFORE the new one is enabled (09 §5.5)
+# ---------------------------------------------------------------------------
+
+
+def test_the_install_section_warns_before_the_first_enable() -> None:
+    """The architect's Phase-3 addendum: "next to the install steps, state
+    explicitly that the OLD para-automation/second-brain-automation chain
+    must be masked/removed at cutover (spec 09 §5.5) — otherwise both
+    generations run against the same vault".
+
+    Placement is the whole point. The retirement used to appear 90 lines
+    later as cutover step 5, so a reader going top-to-bottom enabled the new
+    pipeline while the old one was still wired to the same vault.
+    """
+    text = README.read_text(encoding="utf-8")
+    first_enable = text.index("systemctl --user enable")
+    caution = text.lower()
+
+    mask_at = caution.find("mask")
+    assert mask_at != -1, "the word 'mask' appears nowhere in deploy/README.md"
+    assert mask_at < first_enable, (
+        "the retire-the-old-chain caution must come BEFORE the first "
+        "`systemctl --user enable`, not 90 lines later"
+    )
+
+    warning_zone = text[:first_enable]
+    assert "second-brain-automation" in warning_zone, (
+        "the caution must name the old chain the reader has to retire"
+    )
+    assert "duplicate" in warning_zone.lower(), (
+        "say what goes wrong: duplicate tasks/flashcards/LLM spend"
+    )

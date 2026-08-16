@@ -278,3 +278,177 @@ def test_no_test_file_hardcodes_an_absolute_home_path() -> None:
         "test files must locate the repo from __file__/sys.executable, never an "
         "absolute machine path (08 §A37):\n" + "\n".join(offenders)
     )
+
+
+# --- 08 §B12: checkpointing has exactly ONE owner (the runner) -------------
+
+#: Every consumer module — the classes that do the work — excluding the two
+#: modules that ARE the store and its single owner.
+CONSUMER_MODULES: list[str] = sorted(
+    m
+    for m in MODULES
+    if m.startswith("consumers.") and m not in {"consumers.runner", "consumers.store"}
+)
+
+#: Names that only the orchestrator may execute. ``store`` is included
+#: deliberately: a ``store`` parameter, attribute or local in a consumer is
+#: the shape of the two-owner bug, whatever it is called downstream.
+STORE_NAMES: frozenset[str] = frozenset(
+    {
+        "AutomationStore",
+        "checkpoint",
+        "mark_emitted",
+        "mark_seen",
+        "needs_delivery",
+        "soft_purge",
+        "restore_purged",
+        "store",
+    }
+)
+
+
+def test_the_consumer_module_list_is_not_empty() -> None:
+    """A parametrized gate over an empty list is a green test that checks
+    nothing — the exact vacuity this file exists to prevent."""
+    assert len(CONSUMER_MODULES) >= 4, CONSUMER_MODULES
+
+
+@pytest.mark.parametrize("module", CONSUMER_MODULES)
+def test_no_consumer_reaches_for_the_store(module: str) -> None:
+    """08 §B12: the old consumer called ``store.mark_emitted`` itself AND the
+    orchestrator checkpointed — two owners, and that is how ``limit``/``error``
+    rows got persisted (B3), which silently dropped every over-cap note
+    forever.
+
+    This was gated for ``deep_research`` alone. A second owner inserted into
+    ``learn.handle`` — a real ``AutomationStore`` opened on
+    ``ctx.paths.state_dir / "automations.db"``, writing its own checkpoint —
+    passed the entire suite. Now every consumer is held to it.
+    """
+    found = _attribute_names(_tree(module)) & STORE_NAMES
+    assert found == set(), (
+        f"{module}.py reaches for the store ({sorted(found)}); checkpointing "
+        "belongs to consumers/runner.py alone (06 §1, 08 §B12)"
+    )
+
+
+@pytest.mark.parametrize("module", CONSUMER_MODULES)
+def test_no_consumer_handle_takes_a_store_parameter(module: str) -> None:
+    """The other half of the single-owner shape: a consumer that is HANDED a
+    store does not need to import one."""
+    banned = {"store", "automations", "db", "conn", "connection"}
+    for node in ast.walk(_tree(module)):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name not in {"handle", "should_process", "__init__"}:
+            continue
+        args = node.args
+        params = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+        assert params & banned == set(), (
+            f"{module}.{node.name} takes {sorted(params & banned)}; consumers "
+            "never receive persistence (06 §1, 08 §B12)"
+        )
+
+
+# --- 08 §B2: consumer CONSTRUCTORS ARE PURE --------------------------------
+
+
+def test_every_registered_consumer_constructor_does_no_io() -> None:
+    """06 §1: "Consumer constructors are pure; external I/O happens lazily on
+    first real work". 08 §B2 is the three-month outage: a ``UnicodeDecodeError``
+    in ``TaskwarriorConsumer.__init__`` took the whole pipeline down every ten
+    minutes, and constructors run BEFORE ``--consumer`` filtering can isolate
+    anything.
+
+    The per-consumer purity tests each patch a different subset — the
+    taskwarrior one, for the constructor that actually caused the outage, only
+    patched ``subprocess.run``, so filesystem I/O reintroduced there (a taskrc
+    read, a data-dir stat, a backup-dir scan) passed the whole suite. This
+    gate patches every door, for every registered type, in one place.
+
+    The patches are installed and removed by hand rather than through
+    ``monkeypatch``: ``Path.exists`` is on the list, and pytest itself calls
+    it while rendering a failure, so a patch still live at assertion time
+    turns any violation into an INTERNALERROR instead of a readable report.
+    """
+    import builtins
+    import subprocess
+    from pathlib import Path as _Path
+
+    from organize_core.config import ConsumerConfig
+    from organize_core.consumers import get_consumer_types, get_implemented_consumer_types
+    from organize_core.errors import ConfigError
+
+    calls: list[str] = []
+
+    def forbid(label: str):
+        def boom(*args: object, **kwargs: object):
+            calls.append(label)
+            raise AssertionError(f"constructor called {label}()")
+
+        return boom
+
+    targets: list[tuple[object, str]] = [
+        (subprocess, "run"),
+        (subprocess, "Popen"),
+        (subprocess, "check_output"),
+        (_Path, "read_text"),
+        (_Path, "read_bytes"),
+        (_Path, "write_text"),
+        (_Path, "exists"),
+        (_Path, "is_file"),
+        (_Path, "is_dir"),
+        (_Path, "stat"),
+        (_Path, "glob"),
+        (_Path, "iterdir"),
+        (_Path, "mkdir"),
+        (builtins, "open"),
+    ]
+
+    implemented = get_implemented_consumer_types()
+    assert implemented, "the consumer registry has no implemented types"
+
+    #: Options a type REQUIRES before its constructor will run to completion.
+    #: Kept minimal on purpose — the point is to reach the end of every
+    #: __init__, not to configure the consumer.
+    required_options: dict[str, dict[str, object]] = {
+        "deep_research": {"command": ["agent", "{path}"]},
+    }
+
+    saved = [(obj, attr, getattr(obj, attr)) for obj, attr in targets]
+    failures: list[str] = []
+    try:
+        for obj, attr in targets:
+            setattr(obj, attr, forbid(f"{getattr(obj, '__name__', obj)}.{attr}"))
+        for name, cls in sorted(get_consumer_types().items()):
+            config = ConsumerConfig(
+                name=name, type=name, options=dict(required_options.get(name, {}))
+            )
+            before = len(calls)
+            try:
+                cls(config)
+            except ConfigError:
+                # A registered-but-unimplemented type refuses loudly, and a
+                # ConfigError is a PURE refusal by construction — what matters
+                # is only whether it touched anything on the way out.
+                if name in implemented:
+                    failures.append(
+                        f"{name}: implemented type raised ConfigError on its "
+                        "minimal options (fix required_options above)"
+                    )
+            except AssertionError:
+                pass  # the recorded call below is the real report
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                failures.append(f"{name}: {type(exc).__name__}: {exc}")
+            touched = calls[before:]
+            if touched:
+                failures.append(f"{name}: constructor called {sorted(set(touched))}")
+    finally:
+        for obj, attr, original in saved:
+            setattr(obj, attr, original)
+
+    assert failures == [], (
+        "consumer constructors must be PURE — no filesystem, no subprocess, no "
+        "network (06 §1; 08 §B2 was the three-month outage, and constructors run "
+        f"before --consumer filtering can isolate anything): {failures}"
+    )

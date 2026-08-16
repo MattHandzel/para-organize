@@ -13,6 +13,13 @@
 
 [Unit]
 Description=organize — watch the vault for new captures and notes
+# README's own rule: OnFailure= on EVERY unit that can fail. A .path unit
+# can fail at START — MakeDirectory=true on a %h/notes that is a dangling
+# symlink while the vault is unmounted is the realistic case — and without
+# this the low-latency trigger sits in `failed` with nobody told. That is a
+# quieter instance of exactly the silent-death class this directory exists
+# to prevent. The alerter is templated on %n, so it needs no other change.
+OnFailure=organize-pipeline-failure@%n.service
 
 [Path]
 Unit=organize-pipeline.service

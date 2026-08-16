@@ -225,3 +225,241 @@ def test_check_vault_does_not_raise_on_a_broken_vault(tmp_path: Path) -> None:
     """Health reporting never throws — callers decide fail-vs-warn."""
     issues = check_vault(config_for(tmp_path / "gone"))
     assert all(isinstance(i, HealthIssue) for i in issues)
+
+
+# ---------------------------------------------------------------------------
+# The cutover gate: an automations.db left behind at the OLD path (06 §1)
+# ---------------------------------------------------------------------------
+
+
+def _write_automations_db(path: Path, *, emission_rows: int) -> Path:
+    import sqlite3
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE notes (path TEXT PRIMARY KEY, note_hash TEXT NOT NULL,
+                            metadata_json TEXT, seen_at INTEGER NOT NULL);
+        CREATE TABLE emissions (consumer TEXT NOT NULL, note_path TEXT NOT NULL,
+                                note_hash TEXT NOT NULL, emitted_at INTEGER NOT NULL,
+                                status TEXT NOT NULL DEFAULT 'success',
+                                metadata_json TEXT,
+                                PRIMARY KEY (consumer, note_path));
+        """
+    )
+    conn.executemany(
+        "INSERT INTO emissions(consumer, note_path, note_hash, emitted_at, status)"
+        " VALUES ('learn', ?, 'h', 1700000000, 'success')",
+        [(f"/vault/n{i}.md",) for i in range(emission_rows)],
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _paths_with_home(home: Path, state: Path):
+    from organize_core.paths import CorePaths
+
+    return CorePaths(
+        config_dir=home / ".config" / "organize-core",
+        state_dir=state,
+        runtime_dir=home / "run",
+    )
+
+
+def test_health_errors_when_the_old_automations_db_was_never_moved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cutover runbook migrated ``~/.local/state/para-organize/automations.db``
+    while the service opens ``<state-dir>/automations.db``. Followed verbatim it
+    left 7 516 notes of history orphaned and started the pipeline on an EMPTY
+    database — re-firing every past capture through its consumers, which is
+    exactly what spec 06 §1 exists to prevent. Health must say so BEFORE the
+    duplicates arrive."""
+    from organize_core import cli
+
+    home = tmp_path / "home"
+    legacy = home / ".local" / "state" / "para-organize" / "automations.db"
+    _write_automations_db(legacy, emission_rows=379)
+    state = home / ".local" / "share" / "organize-core"
+    state.mkdir(parents=True)
+    monkeypatch.setattr(cli, "default_env", lambda: {"HOME": str(home)})
+
+    issues = cli._stranded_automations_db_issues(_paths_with_home(home, state))
+
+    assert len(issues) == 1
+    assert issues[0].severity == "error"
+    assert "379" in issues[0].message
+    assert str(legacy) in issues[0].message
+    assert "cp " in (issues[0].hint or "")
+
+
+def test_health_is_silent_once_the_database_has_been_moved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from organize_core import cli
+
+    home = tmp_path / "home"
+    _write_automations_db(
+        home / ".local" / "state" / "para-organize" / "automations.db", emission_rows=379
+    )
+    state = home / ".local" / "share" / "organize-core"
+    _write_automations_db(state / "automations.db", emission_rows=379)
+    monkeypatch.setattr(cli, "default_env", lambda: {"HOME": str(home)})
+
+    assert cli._stranded_automations_db_issues(_paths_with_home(home, state)) == []
+
+
+def test_health_is_silent_on_a_fresh_install_with_no_old_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No old database means nothing to strand; a first-time user must not
+    be shown a cutover error."""
+    from organize_core import cli
+
+    home = tmp_path / "home"
+    state = home / ".local" / "share" / "organize-core"
+    state.mkdir(parents=True)
+    monkeypatch.setattr(cli, "default_env", lambda: {"HOME": str(home)})
+
+    assert cli._stranded_automations_db_issues(_paths_with_home(home, state)) == []
+
+
+def test_health_is_silent_when_the_old_database_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An old file with no emissions has no history to lose."""
+    from organize_core import cli
+
+    home = tmp_path / "home"
+    _write_automations_db(
+        home / ".local" / "state" / "para-organize" / "automations.db", emission_rows=0
+    )
+    state = home / ".local" / "share" / "organize-core"
+    state.mkdir(parents=True)
+    monkeypatch.setattr(cli, "default_env", lambda: {"HOME": str(home)})
+
+    assert cli._stranded_automations_db_issues(_paths_with_home(home, state)) == []
+
+
+# ---------------------------------------------------------------------------
+# The external toolchain an enabled consumer shells out to (spec 06 §5/§6)
+# ---------------------------------------------------------------------------
+
+
+def _config_with_consumer(root: Path, name: str, ctype: str, **options: object):
+    from organize_core.config import ConsumerConfig
+
+    config = config_for(root)
+    config.consumers.append(
+        ConsumerConfig(name=name, type=ctype, enabled=True, options=dict(options))
+    )
+    return config
+
+
+def test_health_warns_when_a_configured_external_binary_is_missing(
+    fixture_vault: Path,
+) -> None:
+    """Spec 06 §5 asked for a ``shell.nix`` to pin the toolchain; the deploy
+    seat deliberately shipped no wrapper, so the unit runs
+    ``%h/.local/bin/organize`` with no ``Environment=`` and ``task`` /
+    ``yt-dlp`` / the agent resolve against whatever PATH the systemd user
+    manager inherited. Unchecked, that surfaces as a per-note ERROR at the far
+    end of a ten-minute timer instead of a setup-time answer."""
+    from organize_core import cli
+
+    config = _config_with_consumer(
+        fixture_vault, "tw", "taskwarrior", task_binary="definitely-not-a-real-binary"
+    )
+    issues = cli._toolchain_issues(config)
+
+    assert len(issues) == 1
+    assert issues[0].severity == "warning"
+    assert "definitely-not-a-real-binary" in issues[0].message
+    assert "task_binary" in issues[0].message
+    assert "PATH" in (issues[0].hint or "")
+
+
+def test_health_accepts_an_absolute_path_that_exists(
+    fixture_vault: Path, tmp_path: Path
+) -> None:
+    """The documented fix — an absolute path in the config — must actually
+    satisfy the check."""
+    from organize_core import cli
+
+    binary = tmp_path / "task"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+
+    config = _config_with_consumer(fixture_vault, "tw", "taskwarrior", task_binary=str(binary))
+    assert cli._toolchain_issues(config) == []
+
+
+def test_health_checks_the_first_element_of_an_argv_option(fixture_vault: Path) -> None:
+    """learn's ``yt_dlp_command`` and deep_research's ``command`` are argv
+    lists; only element 0 is the binary."""
+    from organize_core import cli
+
+    config = _config_with_consumer(
+        fixture_vault, "learn", "learn", yt_dlp_command=["no-such-yt-dlp", "--flag"]
+    )
+    issues = cli._toolchain_issues(config)
+    assert len(issues) == 1
+    assert "no-such-yt-dlp" in issues[0].message
+    assert "--flag" not in issues[0].message
+
+
+def test_health_ignores_a_disabled_consumers_toolchain(fixture_vault: Path) -> None:
+    """A consumer that will not run cannot be missing anything."""
+    from organize_core import cli
+    from organize_core.config import ConsumerConfig
+
+    config = config_for(fixture_vault)
+    config.consumers.append(
+        ConsumerConfig(
+            name="tw",
+            type="taskwarrior",
+            enabled=False,
+            options={"task_binary": "definitely-not-a-real-binary"},
+        )
+    )
+    assert cli._toolchain_issues(config) == []
+
+
+def test_health_checks_the_default_binary_when_the_option_is_absent(
+    fixture_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live config does not set ``task_binary``; the default ``task`` is
+    exactly the one that has to resolve under systemd."""
+    from organize_core import cli
+
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    config = _config_with_consumer(fixture_vault, "tw", "taskwarrior")
+    issues = cli._toolchain_issues(config)
+    assert len(issues) == 1
+    assert "'task'" in issues[0].message
+
+
+def test_health_does_not_cry_cutover_at_a_scratch_state_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a REAL deployment can be mid-cutover.
+
+    A ``--state-dir`` pointed somewhere else is a developer scratch run, a
+    test, or a rehearsal on a copy. Comparing those against the operator's
+    actual ``~/.local/state/para-organize/automations.db`` made every such
+    invocation report a broken cutover — a check that cries wolf on every run
+    is a check people learn to ignore.
+    """
+    from organize_core import cli
+
+    home = tmp_path / "home"
+    _write_automations_db(
+        home / ".local" / "state" / "para-organize" / "automations.db", emission_rows=379
+    )
+    scratch = tmp_path / "scratch-state"
+    scratch.mkdir()
+    monkeypatch.setattr(cli, "default_env", lambda: {"HOME": str(home)})
+
+    assert cli._stranded_automations_db_issues(_paths_with_home(home, scratch)) == []

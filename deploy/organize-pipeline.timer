@@ -2,6 +2,10 @@
 
 [Unit]
 Description=organize — run the PARA automation pipeline every 10 minutes
+# OnFailure= on every unit that can fail (see README). A timer failing to
+# start is how a pipeline stops running without anyone noticing — the exact
+# shape of the three-month outage, one layer up.
+OnFailure=organize-pipeline-failure@%n.service
 
 [Timer]
 Unit=organize-pipeline.service

@@ -352,3 +352,120 @@ def test_the_live_db_mirror_is_still_read_only() -> None:
     if not LIVE_DB_COPY.exists():  # pragma: no cover - machine dependent
         pytest.skip("live DB mirror not present")
     assert LIVE_DB_COPY.stat().st_mode & 0o222 == 0, "the mirror must stay chmod a-w"
+
+
+# ---------------------------------------------------------------------------
+# `run-consumers` and the store migration (09 §5.4 / §5.6)
+# ---------------------------------------------------------------------------
+
+
+def _minimal_config(tmp_path: Path) -> Path:
+    vault = tmp_path / "vault"
+    (vault / "capture" / "raw_capture").mkdir(parents=True)
+    (vault / "capture" / "raw_capture" / "n.md").write_text(
+        "---\nid: n\n---\nbody\n", encoding="utf-8"
+    )
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f'[vault]\nroot = "{vault}"\nscan_dirs = ["capture/raw_capture"]\n'
+        '\n[logging]\nlevel = "WARNING"\n',
+        encoding="utf-8",
+    )
+    return config
+
+
+def _migration_census(path: Path) -> dict[str, object]:
+    """Everything a migration would change, read straight out of SQLite.
+
+    Deliberately NOT a file digest: merely OPENING the store sets
+    ``PRAGMA journal_mode = WAL``, which rewrites one header byte. That is
+    idempotent and lossless; dropping 22 497 rows and VACUUMing is not, and
+    it is the latter this asserts against.
+    """
+    with sqlite3.connect(str(path)) as conn:
+        statuses = dict(conn.execute("SELECT status, COUNT(*) FROM emissions GROUP BY status"))
+        notes = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+        meta = "meta" in {
+            r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    return {"statuses": statuses, "notes": notes, "has_meta_table": meta}
+
+
+def test_dry_run_refuses_to_migrate_the_store(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--dry-run`` documents itself as "evaluate everything, write nothing
+    (spec 09 §5.6)" — and used to irreversibly migrate the database anyway,
+    dropping 22 497 rows and VACUUMing 15.3 MB -> 5.3 MB on real data, with
+    no backup, no confirmation, and while printing ``"dry_run": true``. It
+    also walked straight past the ``--yes-live`` belt that ``migrate-store``
+    enforces on the very same file.
+    """
+    state = tmp_path / "state"
+    state.mkdir()
+    db = make_v1_db(state / "automations.db")
+    before = _migration_census(db)
+    assert before["statuses"]["filtered"] == 1  # the rows a migration destroys
+    config = _minimal_config(tmp_path)
+
+    code = run("--config", str(config), "--state-dir", str(state), "--dry-run", "run-consumers")
+
+    assert code == 1  # an OrganizeError, not a silent migration
+    err = capsys.readouterr().err
+    assert "refusing to migrate" in err
+    assert "migrate-store --backup-first" in err
+    assert _migration_census(db) == before, "a dry run migrated the database"
+
+
+def test_dry_run_is_fine_on_a_fresh_or_already_current_store(tmp_path: Path) -> None:
+    """The refusal is scoped to a REAL migration. A v0 (absent) database has
+    nothing to lose and the run needs a schema to read through; a v2 database
+    is a read-only census. Both must still rehearse."""
+    state = tmp_path / "state"
+    state.mkdir()
+    config = _minimal_config(tmp_path)
+    argv = ["--config", str(config), "--state-dir", str(state), "--dry-run", "run-consumers"]
+
+    assert run(*argv) == 0  # v0: nothing there yet
+    assert run(*argv) == 0  # v2: created by the first call, now a no-op
+
+
+def test_a_real_run_backs_the_store_up_before_migrating(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """09 §5.4 says back the database up before migrating. Leaving that to
+    the operator means the systemd unit — which is what actually reaches the
+    database first at cutover — skips it entirely."""
+    state = tmp_path / "state"
+    state.mkdir()
+    db = make_v1_db(state / "automations.db")
+    before = _migration_census(db)
+    config = _minimal_config(tmp_path)
+
+    assert run("--config", str(config), "--state-dir", str(state), "run-consumers") == 0
+
+    captured = capsys.readouterr()
+    assert "backed up before migrating" in captured.out + captured.err
+    backups = sorted(state.glob("automations.db.backup-*"))
+    assert len(backups) == 1
+    # The backup is the PRE-migration database: the dropped rows are in it.
+    assert _migration_census(backups[0]) == before
+    assert _migration_census(db) != before  # …and the live one really did migrate
+
+    with AutomationStore(db) as store:
+        assert store.schema_version() == STORE_SCHEMA_VERSION
+
+
+def test_a_real_run_on_a_current_store_takes_no_backup(tmp_path: Path) -> None:
+    """Only an actual v1->v2 step is worth a copy; every subsequent 10-minute
+    run must not litter the state dir with snapshots of an unchanged file."""
+    state = tmp_path / "state"
+    state.mkdir()
+    make_v1_db(state / "automations.db")
+    config = _minimal_config(tmp_path)
+    argv = ["--config", str(config), "--state-dir", str(state), "run-consumers"]
+
+    assert run(*argv) == 0
+    assert len(sorted(state.glob("automations.db.backup-*"))) == 1
+    assert run(*argv) == 0
+    assert len(sorted(state.glob("automations.db.backup-*"))) == 1

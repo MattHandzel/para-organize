@@ -325,12 +325,32 @@ def test_paths_with_spaces_and_unicode_roundtrip(
 # --- notes table / last_seen -------------------------------------------------
 
 
-def test_upsert_note_returns_the_previous_hash(store: AutomationStore, tmp_path: Path) -> None:
+def test_mark_seen_records_the_real_note_hash(store: AutomationStore, tmp_path: Path) -> None:
+    """``mark_seen`` is the ONLY writer of the ``notes`` table on the run
+    path. Without the hashes every v2 row carried ``note_hash = \'\'``
+    forever and the column was permanently useless."""
     path = note(tmp_path)
-    assert store.upsert_note(path, "h1", {"id": "a"}, now=NOW) is None
-    assert store.upsert_note(path, "h2", {"id": "a"}, now=NOW + 5) == "h1"
+    store.mark_seen([path], now=NOW, hashes={path: "h1"})
     row = store._db.execute("SELECT * FROM notes WHERE path = ?", (str(path),)).fetchone()
-    assert row["note_hash"] == "h2"
+    assert row["note_hash"] == "h1"
+    assert row["last_seen"] == NOW
+
+    store.mark_seen([path], now=NOW + 5, hashes={path: "h2"})
+    row = store._db.execute("SELECT * FROM notes WHERE path = ?", (str(path),)).fetchone()
+    assert row["note_hash"] == "h2"  # a changed file updates it
+    assert row["last_seen"] == NOW + 5
+
+
+def test_mark_seen_without_a_hash_never_clobbers_a_recorded_one(
+    store: AutomationStore, tmp_path: Path
+) -> None:
+    """The empty-string placeholder is conservative by construction: a caller
+    that does not know the hash leaves the stored one alone."""
+    path = note(tmp_path)
+    store.mark_seen([path], now=NOW, hashes={path: "real"})
+    store.mark_seen([path], now=NOW + 5)
+    row = store._db.execute("SELECT * FROM notes WHERE path = ?", (str(path),)).fetchone()
+    assert row["note_hash"] == "real"
     assert row["last_seen"] == NOW + 5
 
 
@@ -338,7 +358,7 @@ def test_mark_seen_updates_last_seen_and_tracks_new_paths(
     store: AutomationStore, tmp_path: Path
 ) -> None:
     known, fresh = note(tmp_path, "a.md"), note(tmp_path, "b.md")
-    store.upsert_note(known, "h1", now=NOW)
+    store.mark_seen([known], now=NOW, hashes={known: "h1"})
     store.mark_seen([known, fresh], now=NOW + DAY)
     rows = {
         row["path"]: row["last_seen"]
@@ -361,8 +381,7 @@ def test_mark_seen_empty_list_is_a_no_op(store: AutomationStore) -> None:
 
 def _seed_for_purge(store: AutomationStore, tmp_path: Path) -> tuple[Path, Path]:
     stale, current = note(tmp_path, "gone.md"), note(tmp_path, "here.md")
-    store.upsert_note(stale, "h1", now=NOW)
-    store.upsert_note(current, "h2", now=NOW)
+    store.mark_seen([stale, current], now=NOW, hashes={stale: "h1", current: "h2"})
     store.checkpoint("taskwarrior", stale, "h1", "success", now=NOW)
     store.checkpoint("taskwarrior", current, "h2", "success", now=NOW)
     return stale, current
@@ -417,7 +436,7 @@ def test_restore_never_clobbers_newer_live_state(
     store.soft_purge(scan_dirs_ok=True, now=later)
 
     # the note came back and was processed again before anyone restored
-    store.upsert_note(stale, "h9", now=later)
+    store.mark_seen([stale], now=later, hashes={stale: "h9"})
     store.checkpoint("taskwarrior", stale, "h9", "success", now=later)
     store.restore_purged()
 
@@ -428,8 +447,7 @@ def test_restore_never_clobbers_newer_live_state(
 
 def test_restore_can_target_specific_paths(store: AutomationStore, tmp_path: Path) -> None:
     a, b = note(tmp_path, "a.md"), note(tmp_path, "b.md")
-    store.upsert_note(a, "h1", now=NOW)
-    store.upsert_note(b, "h2", now=NOW)
+    store.mark_seen([a, b], now=NOW, hashes={a: "h1", b: "h2"})
     later = NOW + 90 * DAY
     assert store.soft_purge(scan_dirs_ok=True, now=later) == 2
     assert store.restore_purged([a]) == 1
@@ -448,7 +466,7 @@ def test_purge_scales_past_the_sqlite_variable_limit(
     clause — 7.5k live notes would blow SQLITE_MAX_VARIABLE_NUMBER."""
     paths = [note(tmp_path, f"n{i}.md") for i in range(2500)]
     for i, path in enumerate(paths):
-        store.upsert_note(path, f"h{i}", now=NOW)
+        store.mark_seen([path], now=NOW, hashes={path: f"h{i}"})
     assert store.soft_purge(scan_dirs_ok=True, now=NOW + 90 * DAY) == 2500
     assert store._db.execute("SELECT count(*) FROM notes").fetchone()[0] == 0
     assert store.restore_purged() == 2500
@@ -470,3 +488,34 @@ def test_a_second_connection_can_read_committed_checkpoints(
     finally:
         other.close()
     assert count == 1
+
+
+# --- the archive is reachable AND bounded (08 §B18 dead-code smell) ---------
+
+
+def test_the_purge_archive_is_swept_after_its_own_retention_window(
+    store: AutomationStore, tmp_path: Path
+) -> None:
+    """Nothing but ``restore_purged`` ever deleted from ``purged_*``, so the
+    15 MB bloat 08 §B4 removed from ``emissions`` simply moved house."""
+    stale, current = _seed_for_purge(store, tmp_path)
+    purged_at = NOW + 40 * DAY
+    store.mark_seen([current], now=purged_at)  # keep `current` alive
+    assert store.soft_purge(scan_dirs_ok=True, now=purged_at) == 1
+    assert store.list_purged() == [str(stale)]
+
+    # Inside the archive window: still restorable.
+    assert store.sweep_purged(now=purged_at + 30 * DAY) == 0
+    assert store.list_purged() == [str(stale)]
+
+    # Past it: really gone, emissions included.
+    assert store.sweep_purged(now=purged_at + 200 * DAY) == 1
+    assert store.list_purged() == []
+    assert (
+        store._db.execute("SELECT count(*) FROM purged_emissions").fetchone()[0] == 0  # noqa: SLF001
+    )
+
+
+def test_sweeping_the_archive_refuses_a_negative_window(store: AutomationStore) -> None:
+    with pytest.raises(StoreError):
+        store.sweep_purged(retention_days=-1, now=NOW)

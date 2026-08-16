@@ -555,3 +555,129 @@ def test_live_db_purge_guard_holds_on_real_data(live_copy: dict[str, object]) ->
     with AutomationStore(db) as store:
         assert store.soft_purge(scan_dirs_ok=False, now=NOW + 10**9) == 0
     assert census(db) == before
+
+
+# ---------------------------------------------------------------------------
+# A corrupt image is a DATA condition, not "a bug in organize" (09 §5.4)
+# ---------------------------------------------------------------------------
+
+
+def _corrupt(path: Path, *, offset: int, length: int = 4096) -> None:
+    """Zero a slice of the file well past the header, so the damage is only
+    reachable by a table scan — the shape that used to escape the migration's
+    pre-transaction census as a bare ``sqlite3.DatabaseError``."""
+    with path.open("r+b") as handle:
+        handle.seek(offset)
+        handle.write(b"\0" * length)
+
+
+def _bulky_v1_db(path: Path) -> Path:
+    """A v1 database big enough that corruption lands in a data page."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript(V1_SCHEMA)
+    conn.executemany(
+        "INSERT INTO notes(path, note_hash, metadata_json, seen_at) VALUES (?, ?, ?, ?)",
+        [(f"/vault/n{i}.md", f"h{i}" * 40, "x" * 400, 1_700_000_000) for i in range(4000)],
+    )
+    conn.executemany(
+        "INSERT INTO emissions(consumer, note_path, note_hash, emitted_at, status, metadata_json)"
+        " VALUES (?, ?, ?, ?, ?, NULL)",
+        [("learn", f"/vault/n{i}.md", f"h{i}" * 40, 1_700_000_000, "success") for i in range(4000)],
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_a_corrupt_database_aborts_with_a_named_restore_the_backup_error(tmp_path: Path) -> None:
+    """The failure most likely to happen during a real cutover was the one
+    that misdirected the operator: it escaped as a raw ``sqlite3.DatabaseError``
+    and the CLI reported "internal error … this is a bug in organize, not
+    something you did … report it", with no mention of the backup."""
+    db = _bulky_v1_db(tmp_path / "automations.db")
+    size = db.stat().st_size
+    assert size > 200_000, "the fixture must be big enough to corrupt a data page"
+    _corrupt(db, offset=size // 2)
+
+    with AutomationStore(db) as store:
+        with pytest.raises(StoreMigrationError) as excinfo:
+            store.migrate()
+
+    message = str(excinfo.value)
+    hint = excinfo.value.hint or ""
+    assert "automations.db" in message
+    assert "backup" in hint.lower()
+    # Emphatically NOT the "report it as a bug" taxonomy.
+    assert not isinstance(excinfo.value, (sqlite3.Error,))
+
+
+def test_a_healthy_database_passes_the_integrity_preflight(tmp_path: Path) -> None:
+    """The gate must not cost a good migration anything."""
+    db = _bulky_v1_db(tmp_path / "automations.db")
+    with AutomationStore(db) as store:
+        report = store.migrate()
+    assert report.changed is True
+    assert report.kept_success == 4000
+
+
+# ---------------------------------------------------------------------------
+# The report must reconcile against the database (09 §5.4, deploy/README)
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_statuses_are_counted_so_the_report_reconciles(tmp_path: Path) -> None:
+    """deploy/README tells the operator to paste ``summary()`` into the
+    cutover log AS the reconciliation artefact — so it has to add up.
+
+    Rows with a status this build does not recognise were preserved and named
+    in ``anomalies``, but counted in NO numeric field, so
+    ``kept_success + kept_skip + reset_retryable`` silently under-counted the
+    surviving emissions.
+    """
+    db = tmp_path / "automations.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(V1_SCHEMA)
+    conn.executemany(
+        "INSERT INTO notes(path, note_hash, metadata_json, seen_at) VALUES (?, ?, ?, ?)",
+        [(f"/vault/n{i}.md", f"h{i}", None, NOW) for i in range(12)],
+    )
+    rows = (
+        [("taskwarrior", f"/vault/n{i}.md", "success") for i in range(4)]
+        + [("learn", f"/vault/n{i}.md", "skip") for i in range(4, 6)]
+        + [("learn", f"/vault/n{i}.md", "error") for i in range(6, 7)]
+        + [("learn", f"/vault/n{i}.md", "filtered") for i in range(7, 9)]
+        + [("qa", f"/vault/n{i}.md", "deferred") for i in range(9, 11)]
+        + [("qa", "/vault/n11.md", "WEIRD/é")]
+    )
+    conn.executemany(
+        "INSERT INTO emissions(consumer, note_path, note_hash, emitted_at, status, metadata_json)"
+        " VALUES (?, ?, 'h', ?, ?, NULL)",
+        [(c, p, NOW, s) for c, p, s in rows],
+    )
+    conn.commit()
+    conn.close()
+
+    with AutomationStore(db) as store:
+        report = store.migrate()
+        actual = store._db.execute("SELECT COUNT(*) FROM emissions").fetchone()[0]  # noqa: SLF001
+
+    assert report.kept_unknown == 3  # 2 'deferred' + 1 'WEIRD/é'
+    assert report.emissions_kept == actual, (
+        "the report's numeric fields do not add up to the surviving rows"
+    )
+    assert report.deleted_filtered == 2
+    # Still named in prose too — the numbers are an addition, not a swap.
+    assert any("deferred" in a for a in report.anomalies)
+    assert "unknown_status=3" in report.summary()
+
+
+def test_a_report_with_only_known_statuses_omits_the_unknown_field(tmp_path: Path) -> None:
+    """The normal cutover line must not grow a noisy ``unknown_status=0``."""
+    db = make_v1_db(tmp_path / "automations.db")
+    with AutomationStore(db) as store:
+        report = store.migrate()
+    assert report.kept_unknown == 0
+    assert "unknown_status" not in report.summary()
+    with AutomationStore(db) as store:
+        actual = store._db.execute("SELECT COUNT(*) FROM emissions").fetchone()[0]  # noqa: SLF001
+    assert report.emissions_kept == actual

@@ -278,3 +278,99 @@ def test_full_run_over_a_thousand_notes_stays_correct_at_scale(
         f"(ceiling {FULL_RUN_CEILING_SECONDS}s; spec 09 §4 wants 7.5k in 30 s, so "
         "profile AutomationStore.checkpoint before the runner)"
     )
+
+
+# ---------------------------------------------------------------------------
+# 06 §7 acceptance: "Removing a scan dir from config does not delete its
+# emission history" (08 §B5) — against the REAL store
+# ---------------------------------------------------------------------------
+
+_DAY = 86_400
+
+
+def _two_dir_vault(tmp_path: Path) -> Path:
+    vault = tmp_path / "vault"
+    for folder in ("capture/raw_capture", "resources"):
+        (vault / folder).mkdir(parents=True)
+    (vault / "capture/raw_capture/a.md").write_text("---\nid: a\n---\nalpha\n", encoding="utf-8")
+    # A second capture keeps raw_capture non-empty after `a.md` is deleted,
+    # so the "scan dir empty ⇒ suppress the purge" guard does not mask the
+    # behaviour under test.
+    (vault / "capture/raw_capture/keep.md").write_text(
+        "---\nid: keep\n---\nkeep\n", encoding="utf-8"
+    )
+    (vault / "resources/b.md").write_text("---\nid: b\n---\nbravo\n", encoding="utf-8")
+    return vault
+
+
+def test_narrowing_scan_dirs_does_not_delete_the_removed_dirs_emission_history(
+    tmp_path: Path, registry: object, monkeypatch: object
+) -> None:
+    """The 06 §7 acceptance bullet, executed.
+
+    Run with ``scan_dirs = [A, B]`` so both notes checkpoint. Then narrow to
+    ``[A]`` and run again 40 days later. Every REMAINING dir is healthy, so
+    ``_scan_dirs_ok()`` is True and the purge is not suppressed — which used
+    to mean B's rows left ``emissions``, ``needs_delivery`` flipped back to
+    True, and re-adding B re-ran every LLM emission for those notes. That is
+    the duplicate-output harm B5 exists to prevent.
+    """
+    vault = _two_dir_vault(tmp_path)
+    make_consumer("b5_narrow_fake")
+    db = tmp_path / "automations.db"
+
+    wide = make_config(
+        vault, cc("b5", "b5_narrow_fake"), scan_dirs=["capture/raw_capture", "resources"]
+    )
+    with AutomationStore(db) as store:
+        store.migrate()
+        summary = run_consumers(wide, store)
+        assert by_name(summary, "b5").success == 3
+        assert store.needs_delivery("b5", (vault / "resources/b.md").resolve(), "different") is True
+        kept = store.get_emission("b5", (vault / "resources/b.md").resolve())
+        assert kept is not None and kept.status == "success"
+        b_hash = kept.note_hash
+
+    # …40 days later, with `resources` no longer scanned.
+    narrow = make_config(vault, cc("b5", "b5_narrow_fake"), scan_dirs=["capture/raw_capture"])
+    later = int(time.time()) + 40 * _DAY
+    monkeypatch.setattr(time, "time", lambda: later)  # type: ignore[attr-defined]
+    with AutomationStore(db) as store:
+        run_consumers(narrow, store)
+        emission = store.get_emission("b5", (vault / "resources/b.md").resolve())
+        assert emission is not None, "the removed scan dir's emission history was purged"
+        assert emission.status == "success"
+        assert emission.note_hash == b_hash
+        # …and therefore re-adding the dir does NOT re-run the LLM work.
+        assert (
+            store.needs_delivery("b5", (vault / "resources/b.md").resolve(), b_hash) is False
+        )
+
+
+def test_a_note_deleted_from_a_still_configured_scan_dir_is_purged(
+    tmp_path: Path, registry: object, monkeypatch: object
+) -> None:
+    """The purge must still DO its job for the case it exists for — a note
+    that really is gone from a directory we really are still walking. The
+    B5 bound is 'outside the configured scan dirs', not 'never'."""
+    vault = _two_dir_vault(tmp_path)
+    make_consumer("b5_gone_fake")
+    db = tmp_path / "automations.db"
+    config = make_config(
+        vault, cc("b5gone", "b5_gone_fake"), scan_dirs=["capture/raw_capture", "resources"]
+    )
+    gone = (vault / "capture/raw_capture/a.md").resolve()
+
+    with AutomationStore(db) as store:
+        store.migrate()
+        run_consumers(config, store)
+        assert store.get_emission("b5gone", gone) is not None
+
+    gone.unlink()
+    later = int(time.time()) + 40 * _DAY
+    monkeypatch.setattr(time, "time", lambda: later)  # type: ignore[attr-defined]
+    with AutomationStore(db) as store:
+        summary = run_consumers(config, store)
+        assert summary.purged == 1
+        assert store.get_emission("b5gone", gone) is None
+        assert str(gone) in store.list_purged()  # archived, not destroyed

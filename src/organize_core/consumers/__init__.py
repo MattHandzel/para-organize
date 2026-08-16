@@ -32,5 +32,6 @@ from organize_core.consumers.base import (  # noqa: F401
     NotePayload,
     Status,
     get_consumer_types,
+    get_implemented_consumer_types,
     register,
 )

@@ -86,6 +86,21 @@ ANSWER_TEXT = (
 )
 
 
+#: A phrase only the taskwarrior enrichment prompt carries (06 §3.1) — the
+#: fake backend routes on it so one server can serve all three JSON callers.
+TASKWARRIOR_PROMPT_MARKER = "enriching Taskwarrior tasks"
+
+#: What the fake backend answers that prompt with. The four keys are the
+#: 06 §3.1 UDAs; ``utility`` is deliberately off-scale (7) so the test also
+#: pins the "snapped to the Fibonacci scale" normalization.
+ENRICHMENT_RESPONSE = {
+    "next_action": "Open the draft and outline three sections",
+    "effort": "90 min",
+    "priority": "high",
+    "utility": 7,
+}
+
+
 @dataclass
 class FakeOllama:
     """127.0.0.1 stand-in for ``/api/generate`` that records what it was sent."""
@@ -103,7 +118,13 @@ class FakeOllama:
         return any(needle in blob for blob in self.prompts)
 
     def reply_for(self, payload: dict[str, Any]) -> str:
-        # learn asks for JSON mode (06 §3.2); question_answer does not (§3.3).
+        # Three JSON-mode callers are told apart by prompt content:
+        # taskwarrior enrichment carries the Fibonacci IMPORTANCE GUIDE
+        # (06 §3.1), learn asks for cards (§3.2), question_answer is plain
+        # text (§3.3).
+        prompt = str(payload.get("prompt") or "") + str(payload.get("system") or "")
+        if TASKWARRIOR_PROMPT_MARKER in prompt:
+            return json.dumps(ENRICHMENT_RESPONSE)
         if payload.get("format") == "json":
             return json.dumps(CARDS_RESPONSE)
         return ANSWER_TEXT
@@ -886,3 +907,83 @@ def test_json_output_carries_the_same_numbers_as_the_summary_lines(world: World,
     assert by_name["taskwarrior"]["success"] == 3
     assert by_name["deep_research"]["success"] == 1
     assert by_name["taskwarrior"]["filtered"] > 0
+
+
+# ---------------------------------------------------------------------------
+# 06 §3.1 LLM enrichment, THROUGH the runner (not a hand-built RunContext)
+# ---------------------------------------------------------------------------
+
+
+def _enable_taskwarrior_llm(world: World) -> None:
+    """Flip ``llm_enabled = true`` on the taskwarrior section, the way an
+    operator would."""
+    text = world.config_file.read_text(encoding="utf-8")
+    marker = "[consumers.taskwarrior]\ntype = \"taskwarrior\"\n"
+    assert marker in text
+    world.config_file.write_text(
+        text.replace(marker, marker + "llm_enabled = true\nllm_timeout_seconds = 10.0\n", 1),
+        encoding="utf-8",
+    )
+
+
+def test_taskwarrior_llm_enabled_actually_reaches_the_llm_through_the_pipeline(
+    world: World,
+) -> None:
+    """``llm_enabled = true`` was INERT in production.
+
+    The runner handed a client only to consumers whose CLASS sets
+    ``uses_llm = True``, and taskwarrior sets it False (so that a ``no-ai``
+    capture still becomes a task). ``ctx.llm`` was therefore always None:
+    every run logged "llm_enabled but no LLM client is configured", the
+    backend received zero requests, and the 06 §3.1 enrichment path could
+    not execute through the pipeline at all — only through tests that
+    hand-built a RunContext. This drives the REAL composition root.
+    """
+    _enable_taskwarrior_llm(world)
+
+    assert world.run("run-consumers") == 0
+
+    enrichment_calls = [p for p in world.ollama.prompts if TASKWARRIOR_PROMPT_MARKER in p]
+    assert enrichment_calls, "no enrichment prompt reached the backend"
+
+    imports = world.imported_tasks()
+    assert imports
+    enriched = [t for t in imports if "next_action" in t]
+    assert enriched, f"no import payload carried the 06 §3.1 UDAs: {imports}"
+    task = enriched[0]
+    assert task["next_action"] == ENRICHMENT_RESPONSE["next_action"]
+    assert task["priority_estimate"] == "high"
+    # utility is snapped to the Fibonacci scale: 7 is not on it, 8 is.
+    assert task["utility"] == 8
+    assert task["effort"]
+
+
+def test_taskwarrior_llm_disabled_sends_nothing_and_still_imports(world: World) -> None:
+    """The default (live config) path: enrichment off means no LLM traffic
+    from taskwarrior and an unenriched — but still created — task."""
+    assert world.run("run-consumers") == 0
+
+    assert not [p for p in world.ollama.prompts if TASKWARRIOR_PROMPT_MARKER in p]
+    imports = world.imported_tasks()
+    assert imports
+    assert not any("next_action" in t for t in imports)
+
+
+def test_a_no_ai_todo_still_becomes_a_task_but_is_never_enriched(world: World) -> None:
+    """Vault law and the task itself are DIFFERENT questions (ARCHITECTURE
+    resolution #12): ``no-ai: true`` must suppress the LLM call, not the
+    Taskwarrior import. Injecting the client must not have changed that."""
+    _enable_taskwarrior_llm(world)
+    note = world.vault / "capture/raw_capture/private-todo.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(
+        "---\nid: private-todo\ntags: [todo]\nno-ai: true\n---\nDo not send me to a model.\n",
+        encoding="utf-8",
+    )
+
+    assert world.run("run-consumers") == 0
+
+    descriptions = [str(t.get("description", "")) for t in world.imported_tasks()]
+    assert any("Do not send me to a model" in d for d in descriptions)
+    for blob in world.ollama.prompts:
+        assert "Do not send me to a model" not in blob

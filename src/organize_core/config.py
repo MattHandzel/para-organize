@@ -480,12 +480,29 @@ def _registered_consumer_types() -> frozenset[str]:
     module contract is "bad config is banned", and a blanket
     ``except Exception`` here quietly validated user config against a
     HARDCODED type list while the real registry was broken.
+
+    Only IMPLEMENTED types are valid config values. Types registered ahead
+    of their bodies (``implemented = False``, e.g. the Phase-4 stubs) keep
+    the registry and schema stable but must not be accepted here: enabling
+    one produced an ERROR per scanned note — 7 500 of them on the real
+    vault — plus exit 1 and an ``OnFailure=`` alert on every run, instead of
+    one legible fail-fast (08 §B2/§B14).
     """
     try:
-        from organize_core.consumers import get_consumer_types
+        from organize_core.consumers import get_implemented_consumer_types
     except ImportError:  # pragma: no cover - only while another seat is mid-build
         return _FALLBACK_CONSUMER_TYPES
-    return frozenset(get_consumer_types()) or _FALLBACK_CONSUMER_TYPES
+    return frozenset(get_implemented_consumer_types()) or _FALLBACK_CONSUMER_TYPES
+
+
+def _unimplemented_consumer_types() -> frozenset[str]:
+    """Registered-but-not-yet-implemented types, so a config naming one gets
+    "not implemented until Phase 4" rather than "did you mean …?"."""
+    try:
+        from organize_core.consumers import get_consumer_types, get_implemented_consumer_types
+    except ImportError:  # pragma: no cover - only while another seat is mid-build
+        return frozenset()
+    return frozenset(get_consumer_types()) - frozenset(get_implemented_consumer_types())
 
 
 class _Validator:
@@ -1135,6 +1152,14 @@ def _validate_consumers(v: _Validator, raw: dict[str, Any]) -> list[ConsumerConf
         ctype = v.string(section, "type", prefix, required=True)
         assert ctype is not None
         if ctype not in known_types:
+            if ctype in _unimplemented_consumer_types():
+                v.fail(
+                    f"{prefix}.type",
+                    f"{ctype!r} is registered but not implemented yet",
+                    hint="it ships in a later phase; remove this section (or the "
+                    "whole consumer) until then — usable types: "
+                    + ", ".join(sorted(known_types)),
+                )
             close = difflib.get_close_matches(ctype, sorted(known_types), n=1, cutoff=0.5)
             v.fail(
                 f"{prefix}.type",

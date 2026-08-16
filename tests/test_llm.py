@@ -56,7 +56,14 @@ class RecordedRequest:
 class Reply:
     status: int = 200
     body: bytes = b"{}"
+    #: Stall BEFORE anything is sent — urllib has not seen a response yet, so
+    #: the failure arrives wrapped in ``URLError``.
     delay: float = 0.0
+    #: Stall AFTER the headers and a slice of the body — the realistic
+    #: remote-Ollama failure (the model starts generating and wedges). urllib
+    #: raises a bare ``TimeoutError`` here, which is a DIFFERENT arm of the
+    #: client's taxonomy (08 §B11) and was never exercised.
+    stall_after_headers: float = 0.0
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -78,6 +85,19 @@ class _Handler(BaseHTTPRequestHandler):
         reply = state.next_reply()
         if reply.delay:
             threading.Event().wait(reply.delay)
+        if reply.stall_after_headers:
+            try:
+                self.send_response(reply.status)
+                self.send_header("Content-Type", "application/json")
+                # Promise more than we send, so the client keeps reading.
+                self.send_header("Content-Length", str(len(reply.body) + 64))
+                self.end_headers()
+                self.wfile.write(reply.body[: max(1, len(reply.body) // 2)])
+                self.wfile.flush()
+            except OSError:
+                return
+            threading.Event().wait(reply.stall_after_headers)
+            return
         try:
             self.send_response(reply.status)
             self.send_header("Content-Type", "application/json")
@@ -774,3 +794,36 @@ def test_both_backends_implement_the_one_shared_interface() -> None:
     assert LLMClient.__abstractmethods__ == frozenset({"generate", "available"})
     with pytest.raises(TypeError):
         LLMClient()  # type: ignore[abstract]
+
+
+def test_a_mid_stream_stall_is_a_timeout_not_an_unreachable_backend(
+    fake_ollama: FakeOllamaServer,
+) -> None:
+    """08 §B11's literal ``except TimeoutError`` arm.
+
+    The existing timeout test stalls the server BEFORE the response starts, so
+    urllib wraps the failure in ``URLError`` and a different arm handles it —
+    deleting the ``TimeoutError`` arm passed the whole suite. The realistic
+    remote-Ollama failure is the other shape: headers sent, generation wedges
+    mid-body. Handled by the wrong arm it degrades to ``LLMUnavailable``
+    ("Cannot reach Ollama") with the wrong hint, sending an operator to check
+    a server that is up and answering.
+    """
+    fake_ollama.replies = [
+        Reply(body=generate_body("half a sentence"), stall_after_headers=3.0)
+    ]
+    client = OllamaClient(
+        fake_ollama.base_url, "fake-model", config=ollama_config(timeout_seconds=0.3)
+    )
+
+    with pytest.raises(LLMError) as excinfo:
+        client.generate("hi")
+
+    # EXACTLY LLMError — LLMUnavailable is a subclass, so `isinstance` cannot
+    # tell the two arms apart, which is why the old assertion missed this.
+    assert type(excinfo.value) is LLMError, (
+        f"a mid-stream stall was reported as {type(excinfo.value).__name__}: {excinfo.value}"
+    )
+    assert "timed out" in str(excinfo.value)
+    assert "reach" not in str(excinfo.value).lower()
+    assert isinstance(excinfo.value.__cause__, (TimeoutError, OSError))

@@ -41,7 +41,7 @@ import hashlib
 import json
 import logging
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,6 +68,14 @@ V1_ONLY_STATUSES = frozenset({"filtered"})
 KNOWN_STATUSES = TERMINAL_STATUSES | RETRYABLE_STATUSES | V1_ONLY_STATUSES
 
 DEFAULT_RETENTION_DAYS = 30
+
+#: How long the soft-purge ARCHIVE keeps a row before it is really gone.
+#: Deliberately much longer than the purge window: the archive exists to
+#: survive an incident nobody noticed for a while. Bounded, though — nothing
+#: else deletes from ``purged_*``, so without a sweep the 15 MB bloat 08 §B4
+#: removed from ``emissions`` would just move house.
+ARCHIVE_RETENTION_DAYS = 180
+
 _SECONDS_PER_DAY = 86400
 
 _V1_NOTES_COLUMNS = {"path", "note_hash", "metadata_json", "seen_at"}
@@ -188,6 +196,14 @@ class MigrationReport:
     deleted_filtered: int
     reset_retryable: int  # limit/error rows now treated as retryable
     notes_kept: int = 0
+    #: Surviving emission rows whose status this build does not recognise
+    #: (a hand-edited DB, a status from a future build). They are kept and
+    #: named in ``anomalies``, but without this field they were counted in NO
+    #: numeric field, so ``kept_success + kept_skip + reset_retryable``
+    #: silently under-counted the store — and deploy/README tells the
+    #: operator to paste ``summary()`` into the cutover log AS the
+    #: reconciliation artefact.
+    kept_unknown: int = 0
     anomalies: tuple[str, ...] = ()
     created: bool = False  # fresh DB: schema created, nothing to migrate
     no_op: bool = False  # already at STORE_SCHEMA_VERSION: nothing changed
@@ -196,13 +212,26 @@ class MigrationReport:
     def changed(self) -> bool:
         return not (self.no_op or self.created)
 
+    @property
+    def emissions_kept(self) -> int:
+        """Every emission row still in the store. Reconciles exactly against
+        ``SELECT count(*) FROM emissions`` without parsing prose anomalies."""
+        return self.kept_success + self.kept_skip + self.reset_retryable + self.kept_unknown
+
     def summary(self) -> str:
-        """One structured line for the run summary / journal (06 §6)."""
+        """One structured line for the run summary / journal (06 §6), and the
+        artefact deploy/README tells the operator to paste into the cutover
+        log — so its numbers have to add up."""
         what = "no-op" if self.no_op else ("created" if self.created else "migrated")
-        return (
+        text = (
             f"automations.db {what}: v{self.from_version}->v{self.to_version} "
             f"notes={self.notes_kept} success={self.kept_success} skip={self.kept_skip} "
-            f"retryable={self.reset_retryable} filtered_dropped={self.deleted_filtered} "
+            f"retryable={self.reset_retryable}"
+        )
+        if self.kept_unknown:
+            text += f" unknown_status={self.kept_unknown}"
+        return (
+            f"{text} filtered_dropped={self.deleted_filtered} "
             f"anomalies={len(self.anomalies)}"
         )
 
@@ -218,6 +247,13 @@ class _Census:
     @property
     def retryable(self) -> int:
         return sum(n for s, n in self.by_status.items() if s in RETRYABLE_STATUSES)
+
+    @property
+    def unknown(self) -> int:
+        """Rows whose status this build does not recognise. Preserved, named
+        in ``anomalies`` — and now COUNTED, so the report reconciles against
+        ``SELECT count(*) FROM emissions``."""
+        return sum(n for s, n in self.by_status.items() if s not in KNOWN_STATUSES)
 
 
 class AutomationStore:
@@ -523,6 +559,7 @@ class AutomationStore:
         says so (``no_op=True``, ``deleted_filtered=0``).
         """
         self.open()
+        self._preflight_integrity()
         # A migration is a CUTOVER ARTEFACT (09 §5.4) — unlike a checkpoint
         # it is not cheaply redone from the vault, so it gets the durable
         # fsync that ``open()`` trades away for the per-run write path.
@@ -537,6 +574,39 @@ class AutomationStore:
                 self._db.execute("PRAGMA synchronous = NORMAL")
             except sqlite3.Error:  # pragma: no cover - env dependent
                 pass
+
+    def _preflight_integrity(self) -> None:
+        """``PRAGMA quick_check`` before a migration touches anything.
+
+        A malformed image must abort with a NAMED, actionable message. Without
+        this gate the corruption only surfaced deep inside the census pass as
+        a bare ``sqlite3.DatabaseError``, which the CLI's last-resort handler
+        reported as "internal error … this is a bug in organize, not
+        something you did" — misdirecting the operator during the one
+        operation where the right move is "restore the backup" (09 §5.4).
+
+        ``quick_check`` (not ``integrity_check``) deliberately: it skips the
+        expensive index cross-checks, so it stays cheap enough to run on
+        every ``migrate()`` — measured well under the 15 MB live database's
+        0.25 s migration.
+        """
+        try:
+            rows = self._db.execute("PRAGMA quick_check(1)").fetchall()
+        except sqlite3.Error as exc:
+            raise StoreMigrationError(
+                f"integrity check on {self.db_path} could not run: {exc}",
+                hint="the database could not be read at all; restore the "
+                "pre-migration backup (09 §5.4) and check the disk",
+            ) from exc
+        results = [str(row[0]) for row in rows if row]
+        if results and results != ["ok"]:
+            detail = "; ".join(results[:3])
+            raise StoreMigrationError(
+                f"{self.db_path} failed PRAGMA quick_check: {detail}",
+                hint="nothing was written. This is a corrupt database file, not a "
+                "schema problem — restore the pre-migration backup (09 §5.4); "
+                "if there is none, `sqlite3 <db> .recover` salvages what it can.",
+            )
 
     def _migrate_locked(self) -> MigrationReport:
         version = self._detect_version()
@@ -567,6 +637,7 @@ class AutomationStore:
                 kept_skip=census.count("skip"),
                 deleted_filtered=0,
                 reset_retryable=census.retryable,
+                kept_unknown=census.unknown,
                 notes_kept=census.notes,
                 anomalies=tuple(self._data_anomalies()),
                 no_op=True,
@@ -575,9 +646,27 @@ class AutomationStore:
             return report
 
         # --- v1 -> v2, one transaction, all-or-nothing --------------------
-        anomalies = self._assert_v1_shape()
-        anomalies.extend(self._data_anomalies(check_empty_hash=True))
-        before = self._census()
+        #
+        # The inspection pass below TABLE-SCANS the database, so it is where
+        # a partially-corrupt image first shows itself — and it runs before
+        # the transaction, where a bare `sqlite3.DatabaseError` used to
+        # escape as an unhandled exception. The CLI then told the operator
+        # "internal error … this is a bug in organize, not something you did
+        # … report it", with no mention of the backup, for the one failure
+        # most likely to occur during a real cutover. Same taxonomy as every
+        # other migration abort: a named StoreMigrationError that says
+        # restore the backup.
+        try:
+            anomalies = self._assert_v1_shape()
+            anomalies.extend(self._data_anomalies(check_empty_hash=True))
+            before = self._census()
+        except sqlite3.Error as exc:
+            raise StoreMigrationError(
+                f"reading {self.db_path} before migrating from v{version} failed: {exc}",
+                hint="nothing was written — the database could not be read, which "
+                "usually means a corrupt image. Restore the pre-migration backup "
+                "(09 §5.4) and check the disk before retrying.",
+            ) from exc
         stale_filtered = sum(n for s, n in before.by_status.items() if s in V1_ONLY_STATUSES)
 
         try:
@@ -631,6 +720,7 @@ class AutomationStore:
             kept_skip=after.count("skip"),
             deleted_filtered=deleted,
             reset_retryable=after.retryable,
+            kept_unknown=after.unknown,
             notes_kept=after.notes,
             anomalies=tuple(anomalies),
         )
@@ -726,65 +816,84 @@ class AutomationStore:
 
     # --- notes table / soft purge (06 §1) --------------------------------
 
-    def upsert_note(
+    def mark_seen(
         self,
-        path: Path,
-        note_hash: str,
-        metadata: dict[str, Any] | None = None,
+        paths: list[Path],
         *,
         now: int,
-    ) -> str | None:
-        """Record a scanned note (parity with the old ``upsert_note``);
-        returns the previously stored hash, or None if the note is new.
-        Bookkeeping only — delivery decisions go through
-        :meth:`needs_delivery`, which is per consumer."""
-        self._ensure_ready()
-        key = self._key(path)
-        row = self._db.execute("SELECT note_hash FROM notes WHERE path = ?", (key,)).fetchone()
-        previous = None if row is None else str(row["note_hash"])
-        with self._transaction() as conn:
-            conn.execute(
-                """
-                INSERT INTO notes(path, note_hash, metadata_json, seen_at, last_seen)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(path) DO UPDATE SET
-                    note_hash = excluded.note_hash,
-                    metadata_json = excluded.metadata_json,
-                    seen_at = excluded.seen_at,
-                    last_seen = excluded.last_seen
-                """,
-                (key, note_hash, self._dump_metadata(metadata), int(now), int(now)),
-            )
-        return previous
+        hashes: Mapping[Path, str] | None = None,
+    ) -> None:
+        """Record every path seen this run: ``last_seen``, and the note hash
+        when the caller has it.
 
-    def mark_seen(self, paths: list[Path], *, now: int) -> None:
-        """Update ``last_seen`` for every path seen this run.
+        Paths with no ``notes`` row are inserted so that a note the store has
+        never recorded still counts as *seen* and can never be purged.
 
-        Paths with no ``notes`` row are inserted (hash unknown, filled in by
-        :meth:`upsert_note` when the runner has it) so that a note the store
-        has never recorded still counts as *seen* and can never be purged.
+        ``hashes`` matters: this is the ONLY writer of the ``notes`` table on
+        the run path, so without it every v2 row carried ``note_hash = ''``
+        forever and the column was permanently useless for diagnostics ("did
+        this file change since we last walked it?"). It is still not a
+        delivery decision — that is :meth:`needs_delivery`, per consumer,
+        against ``emissions``.
+
+        The placeholder can never clobber a real hash: the upsert keeps the
+        stored value whenever the incoming one is empty, so a caller that
+        omits ``hashes`` is exactly as conservative as before.
+
+        One batched statement, deliberately: the runner calls this once with
+        every scanned path (7 500 on the real vault) inside a 30 s budget
+        (09 §4), so a per-note round trip is not available.
         """
         if not paths:
             return
         self._ensure_ready()
-        rows = [(self._key(p), int(now), int(now)) for p in paths]
+        lookup = {} if hashes is None else {self._key(k): v for k, v in hashes.items()}
+        rows = [
+            (key, str(lookup.get(key, "")), int(now), int(now))
+            for key in (self._key(p) for p in paths)
+        ]
         with self._transaction() as conn:
             conn.executemany(
                 """
                 INSERT INTO notes(path, note_hash, metadata_json, seen_at, last_seen)
-                VALUES (?, '', NULL, ?, ?)
-                ON CONFLICT(path) DO UPDATE SET last_seen = excluded.last_seen
+                VALUES (?, ?, NULL, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    last_seen = excluded.last_seen,
+                    note_hash = CASE
+                        WHEN excluded.note_hash = '' THEN notes.note_hash
+                        ELSE excluded.note_hash
+                    END
                 """,
                 rows,
             )
 
     def soft_purge(
-        self, *, retention_days: int = DEFAULT_RETENTION_DAYS, scan_dirs_ok: bool, now: int
+        self,
+        *,
+        retention_days: int = DEFAULT_RETENTION_DAYS,
+        scan_dirs_ok: bool,
+        now: int,
+        scan_roots: Sequence[Path] | None = None,
     ) -> int:
         """Retire rows unseen for ``retention_days`` — but ONLY when
         ``scan_dirs_ok`` (every configured scan dir existed and was
         non-empty this run); a transient mount must never forget a year of
         checkpoints (spec 06 §1, 08 §B5). Returns rows purged.
+
+        ``scan_roots`` (the resolved directories actually walked this run)
+        bounds WHICH rows are even candidates. A row is only purged if it
+        lies under one of them, because ``last_seen`` means "we looked and
+        it was not there" — and we only looked inside the scan dirs. Without
+        this bound, NARROWING ``vault.scan_dirs`` silently destroyed the
+        removed directory's emission history 30 days later (every remaining
+        dir is healthy, so ``scan_dirs_ok`` is True), and re-adding the
+        directory re-ran every LLM emission for those notes. That is the
+        duplicate-output harm 08 §B5 exists to prevent, and it is the 06 §7
+        acceptance bullet "removing a scan dir from config does not delete
+        its emission history".
+
+        ``None`` means "no bound" — every row is a candidate, the pre-
+        existing behaviour, kept for callers that are not the runner.
 
         The purge is SOFT in the sense that matters after an incident: rows
         leave ``notes``/``emissions`` (so they no longer participate in
@@ -806,13 +915,26 @@ class AutomationStore:
             return 0
         self._ensure_ready()
         cutoff = int(now) - retention_days * _SECONDS_PER_DAY
-        stale = [
+        candidates = [
             str(row["path"])
             for row in self._db.execute(
                 "SELECT path FROM notes WHERE COALESCE(last_seen, seen_at) < ?",
                 (cutoff,),
             )
         ]
+        if scan_roots is None:
+            stale = candidates
+        else:
+            prefixes = tuple(f"{self._key(root)}/" for root in scan_roots)
+            stale = [p for p in candidates if p.startswith(prefixes)]
+            withheld = len(candidates) - len(stale)
+            if withheld:
+                log.info(
+                    "purge: %d stale row(s) left alone because they sit outside the "
+                    "currently configured scan dirs — removing a scan dir must not "
+                    "delete its emission history (06 §7 / 08 §B5)",
+                    withheld,
+                )
         if not stale:
             return 0
 
@@ -854,9 +976,42 @@ class AutomationStore:
         return len(stale)
 
     def list_purged(self) -> list[str]:
-        """Paths currently sitting in the purge archive (the restore path)."""
+        """Paths currently sitting in the purge archive (the restore path).
+
+        Reachable from the CLI as ``organize purged list`` — an archive an
+        operator cannot enumerate is not a restore path, and ``soft_purge``'s
+        own WARN advertises one.
+        """
         self._ensure_ready()
         return [str(row["path"]) for row in self._db.execute("SELECT path FROM purged_notes")]
+
+    def sweep_purged(self, *, retention_days: int = ARCHIVE_RETENTION_DAYS, now: int) -> int:
+        """Hard-delete archive rows older than ``retention_days``.
+
+        Without this the archive is the only table nothing ever deletes from
+        except :meth:`restore_purged`, so the 15 MB bloat 08 §B4 removed from
+        ``emissions`` simply migrated into ``purged_*``.
+
+        Returns the number of archived NOTE rows removed.
+        """
+        if retention_days < 0:
+            raise StoreError(
+                f"retention_days must be >= 0, got {retention_days}",
+                hint="a negative window would delete rows archived in the future",
+            )
+        self._ensure_ready()
+        cutoff = int(now) - retention_days * _SECONDS_PER_DAY
+        with self._transaction() as conn:
+            cursor = conn.execute("DELETE FROM purged_notes WHERE purged_at < ?", (cutoff,))
+            removed = int(cursor.rowcount if cursor.rowcount is not None else 0)
+            conn.execute("DELETE FROM purged_emissions WHERE purged_at < ?", (cutoff,))
+        if removed:
+            log.info(
+                "purge archive: dropped %d note(s) archived more than %d days ago",
+                removed,
+                retention_days,
+            )
+        return removed
 
     def restore_purged(self, paths: list[Path] | None = None) -> int:
         """Undo :meth:`soft_purge` for ``paths`` (default: everything

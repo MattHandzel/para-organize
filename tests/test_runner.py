@@ -25,7 +25,9 @@ orchestration against the real SQLite store when it is available.
 from __future__ import annotations
 
 import copy
+import inspect
 import logging
+import textwrap
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -67,7 +69,9 @@ class FakeStore:
     def __init__(self) -> None:
         self.emissions: dict[tuple[str, str], dict[str, Any]] = {}
         self.last_seen: dict[str, int] = {}
+        self.note_hashes: dict[str, str] = {}
         self.purge_calls: list[dict[str, Any]] = []
+        self.sweep_calls: list[dict[str, Any]] = []
         self.writes: list[tuple[Any, ...]] = []
         self.fail_needs_delivery_for: set[str] = set()
         self.fail_checkpoint_for: set[str] = set()
@@ -108,16 +112,47 @@ class FakeStore:
 
     # --- notes table / soft purge ----------------------------------------
 
-    def mark_seen(self, paths: list[Path], *, now: int) -> None:
+    def mark_seen(
+        self,
+        paths: list[Path],
+        *,
+        now: int,
+        hashes: Any = None,
+    ) -> None:
+        lookup = dict(hashes or {})
         for path in paths:
             self.last_seen[str(path)] = now
+            # The real store never lets the '' placeholder clobber a
+            # recorded hash; the fake must not be more permissive.
+            recorded = lookup.get(path)
+            if recorded:
+                self.note_hashes[str(path)] = str(recorded)
+            else:
+                self.note_hashes.setdefault(str(path), "")
         self.writes.append(("mark_seen", len(paths)))
 
-    def soft_purge(self, *, retention_days: int = 30, scan_dirs_ok: bool, now: int) -> int:
+    def soft_purge(
+        self,
+        *,
+        retention_days: int = 30,
+        scan_dirs_ok: bool,
+        now: int,
+        scan_roots: Any = None,
+    ) -> int:
         self.purge_calls.append(
-            {"retention_days": retention_days, "scan_dirs_ok": scan_dirs_ok, "now": now}
+            {
+                "retention_days": retention_days,
+                "scan_dirs_ok": scan_dirs_ok,
+                "now": now,
+                "scan_roots": list(scan_roots) if scan_roots is not None else None,
+            }
         )
         self.writes.append(("soft_purge", scan_dirs_ok))
+        return 0
+
+    def sweep_purged(self, *, retention_days: int = 180, now: int) -> int:
+        self.sweep_calls.append({"retention_days": retention_days, "now": now})
+        self.writes.append(("sweep_purged", retention_days))
         return 0
 
     # --- test helpers -----------------------------------------------------
@@ -525,9 +560,54 @@ def test_no_ai_denial_is_counted_and_not_persisted(fixture_vault: Path, registry
 
     counts = by_name(summary, "ai2")
     assert counts.processed == 0
-    assert counts.filtered == summary.notes_scanned  # incl. the no-ai denial
+    # The denial has its OWN bucket — an operator must be able to tell
+    # "withheld under vault law" from "not in my include_paths" (06 §4/§6).
+    assert counts.no_ai == 1
+    assert counts.filtered == summary.notes_scanned - 1
+    assert counts.accounted == summary.notes_scanned  # every note in one bucket
     assert rec.predicated == []  # never even offered to the consumer
     assert store.emissions == {}  # a denial is never persisted
+
+
+def test_no_ai_denial_is_warned_not_merely_logged(
+    fixture_vault: Path, registry: Any, caplog: Any
+) -> None:
+    """06 §6: WARN on every skipped file. A note the vault forbids us to
+    process is the one skip that must never be INFO-level noise."""
+    make_consumer("ai2w_fake", uses_llm=True)
+    config = make_config(fixture_vault, cc("ai2w", "ai2w_fake", include_paths=[NO_AI_NOTE]))
+
+    with caplog.at_level(logging.WARNING, logger="organize_core.consumers.runner"):
+        run_consumers(config, FakeStore())
+
+    denials = [
+        r for r in caplog.records if r.levelno >= logging.WARNING and "no-ai:" in r.getMessage()
+    ]
+    assert len(denials) == 1
+    assert "private-thought.md" in denials[0].getMessage()
+
+
+def test_summary_reconciles_against_notes_scanned_when_nothing_changed(
+    fixture_vault: Path, registry: Any
+) -> None:
+    """A note that passes every filter but is already checkpointed used to
+    increment NO counter, so the 06 §4 line did not add up to
+    ``notes_scanned``. ``unchanged`` closes that hole."""
+    make_consumer("recon_fake")
+    config = make_config(fixture_vault, cc("recon", "recon_fake", include_paths=["capture"]))
+    store = FakeStore()
+
+    first = run_consumers(config, store)
+    first_counts = by_name(first, "recon")
+    assert first_counts.accounted == first.notes_scanned
+    assert first_counts.unchanged == 0
+    assert first_counts.success > 0
+
+    second = run_consumers(config, store)  # same bytes ⇒ every note is checkpointed
+    counts = by_name(second, "recon")
+    assert counts.success == 0
+    assert counts.unchanged == first_counts.success
+    assert counts.accounted == second.notes_scanned
 
 
 def test_no_ai_guard_tolerates_string_and_underscore_spellings(
@@ -913,6 +993,11 @@ def test_mark_seen_covers_every_scanned_note(fixture_vault: Path, registry: Any)
     summary = run_consumers(config, store)
 
     assert len(store.last_seen) == summary.notes_scanned
+    # …and every one of them carries its REAL hash. `mark_seen` is the only
+    # writer of the notes table on the run path, so without this every row
+    # kept `note_hash = ''` forever.
+    assert len(store.note_hashes) == summary.notes_scanned
+    assert all(store.note_hashes.values()), "a scanned note was recorded with an empty hash"
 
 
 def test_a_purge_failure_never_fails_a_good_run(fixture_vault: Path, registry: Any) -> None:
@@ -1090,3 +1175,303 @@ def test_a_second_run_over_a_large_vault_is_cheap(perf_vault: Path, registry: An
     assert len(rec.handled) == handled  # not one extra handle
     assert summary.consumers[0].processed == 0
     assert elapsed < PERF_BUDGET_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# 08 §B18: a scan dir symlinked OUT of the vault root (regression)
+# ---------------------------------------------------------------------------
+
+
+def _symlinked_scan_dir_vault(tmp_path: Path) -> Path:
+    """A vault whose ``capture/raw_capture`` is a symlink to a directory
+    OUTSIDE the vault root — the shape 08 §B18 is about (Matt's captures
+    live on a different mount).
+    """
+    vault = tmp_path / "vault"
+    (vault / "capture").mkdir(parents=True)
+    (vault / "resources").mkdir(parents=True)
+    (vault / "resources" / "inside.md").write_text("---\nid: inside\n---\nbody\n", encoding="utf-8")
+
+    outside = tmp_path / "external_capture"
+    outside.mkdir()
+    for i in range(3):
+        (outside / f"todo-{i}.md").write_text(
+            f"---\nid: todo-{i}\ntags: [todo]\n---\ntask {i}\n", encoding="utf-8"
+        )
+    (vault / "capture" / "raw_capture").symlink_to(outside, target_is_directory=True)
+    return vault
+
+
+def test_include_paths_still_match_through_a_symlinked_out_scan_dir(
+    tmp_path: Path, registry: Any
+) -> None:
+    """08 §B18, the half that was missing: the guard in ``_relative_posix``
+    stopped the crash but returned an ABSOLUTE path, which no relative
+    ``include_paths`` prefix can match — so every note under a symlinked-out
+    scan dir was counted ``filtered`` and never handled, silently, for every
+    consumer. The vault-relative path now comes from ingestion.
+    """
+    vault = _symlinked_scan_dir_vault(tmp_path)
+    rec = make_consumer("symlink_fake")
+    config = make_config(
+        vault,
+        cc("sym", "symlink_fake", include_paths=["capture/raw_capture"]),
+        scan_dirs=["capture/raw_capture", "resources"],
+    )
+
+    summary = run_consumers(config, FakeStore())
+
+    counts = by_name(summary, "sym")
+    assert counts.success == 3, "notes under a symlinked-out scan dir were dropped"
+    assert sorted(rec.handled_names) == ["todo-0.md", "todo-1.md", "todo-2.md"]
+    assert counts.filtered == 1  # resources/inside.md, correctly excluded
+    assert counts.accounted == summary.notes_scanned
+
+
+def test_exclude_paths_still_match_through_a_symlinked_out_scan_dir(
+    tmp_path: Path, registry: Any
+) -> None:
+    """The same defect made ``exclude_paths`` fail OPEN — a note the operator
+    excluded was processed anyway, because the absolute path matched no
+    exclusion prefix either. That is the dangerous direction."""
+    vault = _symlinked_scan_dir_vault(tmp_path)
+    rec = make_consumer("symlink_ex_fake")
+    config = make_config(
+        vault,
+        cc("symex", "symlink_ex_fake", exclude_paths=["capture/raw_capture"]),
+        scan_dirs=["capture/raw_capture", "resources"],
+    )
+
+    summary = run_consumers(config, FakeStore())
+
+    assert rec.handled_names == ["inside.md"]
+    assert by_name(summary, "symex").filtered == 3
+
+
+def test_payloads_carry_the_ingestion_derived_relative_path(tmp_path: Path) -> None:
+    """``NotePayload.rel`` is the walk-derived vault-relative path, not
+    ``relative_to(resolved_root)`` — the two disagree exactly when a scan dir
+    is symlinked out, and the path filters must use the former."""
+    from organize_core.consumers.runner import scan_notes
+
+    vault = _symlinked_scan_dir_vault(tmp_path)
+    config = make_config(vault, scan_dirs=["capture/raw_capture", "resources"])
+
+    rels = sorted(p.rel for p in scan_notes(config))
+
+    assert rels == [
+        "capture/raw_capture/todo-0.md",
+        "capture/raw_capture/todo-1.md",
+        "capture/raw_capture/todo-2.md",
+        "resources/inside.md",
+    ]
+    assert not any(r.startswith("/") for r in rels)
+
+
+def test_a_payload_with_no_derivable_relative_path_is_warned_about(
+    tmp_path: Path, caplog: Any
+) -> None:
+    """The last-resort fallback must be LOUD. A hand-built payload outside
+    the root cannot be matched by any relative pattern; saying nothing is how
+    B18 hid for a release."""
+    from organize_core.consumers.base import NotePayload
+    from organize_core.consumers.runner import _payload_rel
+
+    root = tmp_path / "vault"
+    root.mkdir()
+    stray = tmp_path / "elsewhere" / "note.md"
+    payload = NotePayload(
+        path=stray, frontmatter={}, content="", raw_text="", note_hash="x", rel=""
+    )
+
+    warned: set[Path] = set()
+    with caplog.at_level(logging.WARNING, logger="organize_core.consumers.runner"):
+        first = _payload_rel(root, payload, warned)
+        second = _payload_rel(root, payload, warned)
+
+    assert first == second == stray.as_posix()
+    hits = [r for r in caplog.records if "no vault-relative path" in r.getMessage()]
+    assert len(hits) == 1, "the warning must fire exactly once per note per run"
+
+
+# ---------------------------------------------------------------------------
+# 09 §5.6: a dry run must rehearse the REAL run, cap included
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_honours_max_notes_per_run(fixture_vault: Path, registry: Any) -> None:
+    """The cap gate counted ``success`` only, which a dry run never
+    increments — so ``would_process`` over-reported what a real run does, in
+    the one place 09 §5.6 tells the operator to diff intended actions against
+    expectations before enabling writes (live caps: learn 20, research 5).
+    """
+    make_consumer("cap_dry_fake")
+    config = make_config(
+        fixture_vault,
+        cc("capdry", "cap_dry_fake", include_paths=["capture/raw_capture"], max_notes_per_run=2),
+    )
+
+    dry = by_name(run_consumers(config, FakeStore(), dry_run=True), "capdry")
+    real = by_name(run_consumers(config, FakeStore()), "capdry")
+
+    assert real.success == 2, "the fixture must offer more eligible notes than the cap"
+    assert real.limit > 0
+    # The rehearsal reproduces the real run's split exactly.
+    assert (dry.would_process, dry.limit) == (real.success, real.limit)
+
+
+def test_dry_run_without_a_cap_still_reports_every_eligible_note(
+    fixture_vault: Path, registry: Any
+) -> None:
+    """The cap fix must not truncate a rehearsal that has no cap to honour."""
+    make_consumer("cap_none_fake")
+    config = make_config(
+        fixture_vault,
+        cc("capnone", "cap_none_fake", include_paths=["capture/raw_capture"], max_notes_per_run=50),
+    )
+
+    dry = by_name(run_consumers(config, FakeStore(), dry_run=True), "capnone")
+    real = by_name(run_consumers(config, FakeStore()), "capnone")
+
+    assert dry.limit == 0
+    assert dry.would_process == real.success > 2
+
+
+# ---------------------------------------------------------------------------
+# LLM client injection is an INSTANCE question, not a class flag (06 §3.1)
+# ---------------------------------------------------------------------------
+
+
+class _OptInLLMConsumer(Consumer):
+    """A consumer whose LLM use is switched on by an OPTION, like
+    taskwarrior's ``llm_enabled`` — ``uses_llm`` stays False so that its
+    non-LLM work still runs for ``no-ai`` notes."""
+
+    uses_llm = False
+    seen: list[Any] = []
+
+    def __init__(self, config: ConsumerConfig) -> None:
+        super().__init__(config)
+        self.llm_enabled = bool(config.options.get("llm_enabled", False))
+
+    def wants_llm(self) -> bool:
+        return self.llm_enabled
+
+    def should_process(self, payload: NotePayload) -> bool:
+        return True
+
+    def handle(self, payload: NotePayload, ctx: RunContext) -> ConsumerResult:
+        type(self).seen.append(ctx.llm)
+        return ConsumerResult(status=Status.SUCCESS)
+
+
+def test_wants_llm_true_gets_the_shared_client_even_with_uses_llm_false(
+    fixture_vault: Path, registry: Any, monkeypatch: Any
+) -> None:
+    """Keying injection on the ``uses_llm`` CLASS flag made taskwarrior's
+    ``llm_enabled = true`` inert: ``ctx.llm`` was always None and the 06 §3.1
+    enrichment path could not execute through the pipeline at all."""
+    import organize_core.consumers.runner as runner_mod
+
+    sentinel = object()
+    monkeypatch.setattr(runner_mod, "get_client", lambda cfg: sentinel)
+    _OptInLLMConsumer.seen = []
+    register("optin_llm_fake")(_OptInLLMConsumer)
+
+    config = make_config(
+        fixture_vault,
+        cc("optin", "optin_llm_fake", include_paths=[IDEAS_NOTE], options={"llm_enabled": True}),
+    )
+    run_consumers(config, FakeStore())
+
+    assert _OptInLLMConsumer.seen == [sentinel]
+
+
+def test_wants_llm_false_is_handed_no_client(
+    fixture_vault: Path, registry: Any, monkeypatch: Any
+) -> None:
+    """…and the option OFF still means no client, so a consumer cannot reach
+    the LLM behind its own config (09 §2: exactly one LLM path)."""
+    import organize_core.consumers.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "get_client", lambda cfg: object())
+    _OptInLLMConsumer.seen = []
+    register("optin_llm_off_fake")(_OptInLLMConsumer)
+
+    config = make_config(
+        fixture_vault,
+        cc("optinoff", "optin_llm_off_fake", include_paths=[IDEAS_NOTE], options={}),
+    )
+    run_consumers(config, FakeStore())
+
+    assert _OptInLLMConsumer.seen == [None]
+
+
+def test_a_raising_wants_llm_falls_back_to_the_class_flag(
+    fixture_vault: Path, registry: Any, monkeypatch: Any
+) -> None:
+    """One bad predicate must never kill the pipeline (08 §B12)."""
+    import organize_core.consumers.runner as runner_mod
+
+    sentinel = object()
+    monkeypatch.setattr(runner_mod, "get_client", lambda cfg: sentinel)
+    rec = make_consumer("boom_llm_fake", uses_llm=True)
+    types = consumer_base._REGISTRY["boom_llm_fake"]
+
+    def boom(self: Any) -> bool:
+        raise RuntimeError("bad predicate")
+
+    types.wants_llm = boom  # type: ignore[assignment]
+
+    config = make_config(fixture_vault, cc("boomllm", "boom_llm_fake", include_paths=[IDEAS_NOTE]))
+    summary = run_consumers(config, FakeStore())
+
+    assert by_name(summary, "boomllm").success == 1
+    assert rec.llms == [sentinel]  # fell back to uses_llm = True
+
+
+def test_a_dry_run_can_never_checkpoint_even_if_handle_is_reached(
+    fixture_vault: Path, registry: Any, monkeypatch: Any
+) -> None:
+    """Defence in depth for 09 §5.6.
+
+    The runner short-circuits before ``handle`` on a dry run, so this path is
+    unreachable today. It is gated anyway because the failure is permanent and
+    silent: three consumers carry their own ``ctx.dry_run`` guards inside
+    ``handle`` (a direct caller must not dispatch the research agent or bill
+    an LLM), and two of them return a TERMINAL status — deep_research SKIP,
+    learn SUCCESS. Reached during a rehearsal, those would be checkpointed as
+    done and the real dispatch or generation suppressed forever.
+
+    Simulated by removing the short-circuit, which is exactly the refactor
+    that would reintroduce the hazard.
+    """
+    import organize_core.consumers.runner as runner_mod
+
+    rec = make_consumer("dry_cp_fake")
+    config = make_config(fixture_vault, cc("drycp", "dry_cp_fake", include_paths=[IDEAS_NOTE]))
+    store = FakeStore()
+
+    source = inspect.getsource(runner_mod._run_one_consumer)
+    assert "if dry_run:\n            summary.would_process += 1" in source, (
+        "the dry-run short-circuit moved; re-point this test at it"
+    )
+    patched = source.replace(
+        "        if dry_run:\n"
+        "            summary.would_process += 1\n"
+        '            logger.info("[DRY-RUN] consumer %s would handle %s", entry.name, rel)\n'
+        "            continue\n",
+        "",
+        1,
+    )
+    assert patched != source
+    namespace = dict(runner_mod.__dict__)
+    exec(compile(textwrap.dedent(patched), "<no-short-circuit>", "exec"), namespace)
+    monkeypatch.setattr(runner_mod, "_run_one_consumer", namespace["_run_one_consumer"])
+
+    summary = run_consumers(config, store, dry_run=True)
+
+    assert rec.handled, "the patched runner must actually reach handle"
+    assert store.emissions == {}, "a dry run checkpointed a result"
+    assert not any(w[0] == "checkpoint" for w in store.writes)
+    assert summary.dry_run is True

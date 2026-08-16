@@ -104,6 +104,15 @@ class ConsumerSummary:
     #: (a dry run never calls ``handle``, so the four status counters stay
     #: zero and this is the "what would fire" number, 09 §5.6).
     would_process: int = 0
+    #: Notes withheld from an LLM consumer by the ``no-ai: true`` vault law
+    #: (spec 02 / 06 §2). Its OWN counter, not folded into ``filtered``: an
+    #: operator must be able to tell "the vault forbids this" from "not in
+    #: my include_paths".
+    no_ai: int = 0
+    #: Notes that passed every filter but are already checkpointed at this
+    #: hash — the steady-state majority. Counted so the line reconciles
+    #: against ``notes_scanned`` instead of silently losing them.
+    unchanged: int = 0
     duration_seconds: float = 0.0
     #: Human-readable failure lines (06 §7: failures must be visible in the
     #: summary, not only in the log stream). Capped, see MAX_RECORDED_FAILURES.
@@ -114,12 +123,36 @@ class ConsumerSummary:
         """Notes this consumer actually reached a status on."""
         return self.success + self.skip + self.limit + self.error
 
+    @property
+    def accounted(self) -> int:
+        """Every note this consumer saw, in exactly one bucket. Equals the
+        run's ``notes_scanned`` — the 06 §4 line is a reconciliation, not a
+        sample (a note that passed every filter but was already checkpointed
+        used to increment nothing at all)."""
+        return (
+            self.success
+            + self.skip
+            + self.limit
+            + self.error
+            + self.filtered
+            + self.no_ai
+            + self.unchanged
+            + self.would_process
+        )
+
     def line(self) -> str:
-        """The 06 §4 summary line for this consumer."""
+        """The 06 §4 summary line for this consumer, extended with the two
+        buckets the spec's five counters left unaccounted (``no_ai``,
+        ``unchanged``). The five spec-named fields keep their names, order
+        and meaning; the additions only appear when non-zero."""
         text = (
             f"Consumer {self.name}: success={self.success} skip={self.skip} "
             f"limit={self.limit} error={self.error} filtered={self.filtered}"
         )
+        if self.no_ai:
+            text += f" no_ai={self.no_ai}"
+        if self.unchanged:
+            text += f" unchanged={self.unchanged}"
         if self.would_process:
             text += f" would_process={self.would_process}"
         return text
@@ -284,7 +317,7 @@ def _scan_dirs_ok(config: Config) -> bool:
     return True
 
 
-def _read_payload(path: Path, resolved: Path) -> NotePayload | None:
+def _read_payload(path: Path, resolved: Path, rel: str = "") -> NotePayload | None:
     """Parse one note. Returns None (after logging) for anything unreadable
     or unparseable — a per-file failure never aborts the run (06 §1)."""
     try:
@@ -310,6 +343,12 @@ def _read_payload(path: Path, resolved: Path) -> NotePayload | None:
         # subtly different digest would orphan 376 migrated success
         # checkpoints and refire every consumer over the whole vault.
         note_hash=hash_note_text(raw_text),
+        # The vault-relative path computed by the WALK (configured scan-dir
+        # prefix + walk-relative subpath), carried rather than re-derived
+        # from `resolved`: a scan dir symlinked outside the vault root has
+        # no `relative_to(root)` answer, and the absolute-path fallback
+        # matches no relative include_paths pattern (08 §B18).
+        rel=rel,
     )
 
 
@@ -359,7 +398,7 @@ def _iter_payloads(
                 seen.add(resolved)
                 collected.append((rel, path, resolved))
 
-    for _rel, path, resolved in sorted(collected, key=lambda item: item[0]):
+    for rel, path, resolved in sorted(collected, key=lambda item: item[0]):
         if max_file_size > 0:
             try:
                 size = path.stat().st_size
@@ -374,7 +413,7 @@ def _iter_payloads(
                     max_file_size,
                 )
                 continue
-        payload = _read_payload(path, resolved)
+        payload = _read_payload(path, resolved, rel)
         if payload is not None:
             yield payload
 
@@ -420,11 +459,44 @@ def scan_notes(config: Config) -> Iterator[NotePayload]:
 
 def _relative_posix(root: Path, path: Path) -> str:
     """Vault-relative posix path, tolerant of a note reached through a
-    symlinked scan dir that resolves outside the root (08 §B18)."""
+    symlinked scan dir that resolves outside the root (08 §B18).
+
+    LAST RESORT ONLY. The absolute path this returns on failure can never
+    match a relative ``include_paths`` prefix, so a caller that relies on it
+    silently drops the note. Payloads produced by ingestion carry the
+    walk-derived :attr:`NotePayload.rel`; use :func:`_payload_rel`, which
+    prefers that and WARNs (once per run per note) when it has to fall back
+    here.
+    """
     try:
         return path.relative_to(root).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def _payload_rel(root: Path, payload: NotePayload, warned: set[Path]) -> str:
+    """The vault-relative posix path the consumer path filters run against.
+
+    Prefers the path computed during INGESTION from the configured scan-dir
+    prefix (``NotePayload.rel``). Only a hand-built payload lacks one; then
+    we re-derive it, and if that yields an absolute path — the 08 §B18
+    symlinked-out-scan-dir case — we say so ONCE, because the consequence is
+    that no relative ``include_paths`` pattern can match and the note is
+    counted ``filtered`` for every consumer rather than handled.
+    """
+    if payload.rel:
+        return payload.rel
+    rel = _relative_posix(root, payload.path)
+    if rel.startswith("/") and payload.path not in warned:
+        warned.add(payload.path)
+        logger.warning(
+            "%s has no vault-relative path under %s (reached through a symlink "
+            "out of the vault?) — consumer include_paths/exclude_paths cannot "
+            "match it and it will be counted filtered (08 §B18)",
+            payload.path,
+            root,
+        )
+    return rel
 
 
 class UnknownConsumerError(ConfigError):
@@ -535,10 +607,17 @@ def _run_one_consumer(
     include = tuple(entry.include_paths or ())
     exclude = tuple(entry.exclude_paths or ())
     cap = int(entry.max_notes_per_run)
-    uses_llm = bool(getattr(type(consumer), "uses_llm", False))
+    # The no-ai DENIAL is keyed on the class flag, not on `wants_llm()`:
+    # `uses_llm = True` means "this consumer's whole job is an LLM call", so
+    # the note must never be offered at all. taskwarrior has `uses_llm =
+    # False` and creates the task for every matching note even with
+    # enrichment on (ARCHITECTURE resolution #12); its enrichment branch
+    # guards no-ai itself. See Consumer.wants_llm for the other half.
+    denies_no_ai = bool(getattr(type(consumer), "uses_llm", False))
+    warned_rel: set[Path] = set()
 
     for payload in payloads:
-        rel = _relative_posix(root, payload.path)
+        rel = _payload_rel(root, payload, warned_rel)
 
         # 1. path filters — cheap, never persisted (08 §B4)
         if include and not _matches(rel, include):
@@ -549,9 +628,14 @@ def _run_one_consumer(
             continue
 
         # 2. central no-ai guard (spec 02 vault law / 06 §2)
-        if uses_llm and payload.no_ai:
-            summary.filtered += 1
-            logger.info(
+        if denies_no_ai and payload.no_ai:
+            # Its OWN counter, not `filtered`: an operator reading the 06 §4
+            # summary must be able to tell "withheld under vault law" from
+            # "not in my include_paths", and 06 §6 wants a WARN on every
+            # skipped file — a note the vault forbids us to process is the
+            # one skip that must never be silent.
+            summary.no_ai += 1
+            logger.warning(
                 "no-ai: %s never offered to LLM consumer %s (vault law, spec 02)",
                 rel,
                 entry.name,
@@ -574,6 +658,10 @@ def _run_one_consumer(
         #    TERMINAL emission (06 §1)
         try:
             if not store.needs_delivery(entry.name, payload.path, payload.note_hash):
+                # Already checkpointed at this hash. Counted so the summary
+                # reconciles: success+skip+limit+error+filtered+no_ai+
+                # unchanged (+would_process on a rehearsal) == notes_scanned.
+                summary.unchanged += 1
                 continue
         except Exception as exc:  # noqa: BLE001 - a store read failure is fatal for this consumer
             summary.error += 1
@@ -583,7 +671,14 @@ def _run_one_consumer(
 
         # 5. per-run cap — SUCCESSES only (06 §1); a skip must not consume
         #    the budget (08 §B13). `limit` is NOT checkpointed (08 §B3).
-        if cap > 0 and summary.success >= cap:
+        #
+        #    A dry run never increments `success` (it never calls `handle`),
+        #    so counting successes alone made the rehearsal ignore the cap
+        #    entirely and over-report `would_process` — and 09 §5.6 makes the
+        #    dry run the cutover gate you diff against expectations. Counting
+        #    would-be work here gives a rehearsal the same success/limit split
+        #    the real run produces (live caps: learn 20, deep_research 5).
+        if cap > 0 and summary.success + summary.would_process >= cap:
             summary.limit += 1
             logger.debug(
                 "consumer %s: %s over max_notes_per_run=%d — retried next run",
@@ -641,6 +736,29 @@ def _run_one_consumer(
             )
             if status is Status.ERROR:
                 _record_failure(summary, f"{rel}: {result.message or 'error'}")
+            continue
+
+        if dry_run:  # pragma: no cover - unreachable; see the comment
+            # Defence in depth, not flow control: the dry-run branch above
+            # `continue`s before `handle` is called, so nothing reaches here
+            # today. It exists because the failure it prevents is permanent
+            # and silent. Three consumers carry their own `ctx.dry_run`
+            # guards inside `handle` (a direct caller must not dispatch the
+            # research agent or bill an LLM), and two of them return a
+            # TERMINAL status — deep_research SKIP, learn SUCCESS. If a
+            # future refactor ever lets a rehearsal reach `handle`, those
+            # returns would be checkpointed as done and the real dispatch or
+            # generation would be suppressed FOREVER, with no error anywhere.
+            # A checkpoint is the one thing a rehearsal must never write
+            # (09 §5.6), so the runner refuses it here rather than trusting
+            # every consumer's dry-run return value.
+            logger.error(
+                "consumer %s returned %s for %s during a DRY RUN — not checkpointing "
+                "(a rehearsal must never mark work as done, 09 §5.6)",
+                entry.name,
+                status.value,
+                rel,
+            )
             continue
 
         try:
@@ -709,7 +827,14 @@ def run_consumers(
 
     if not dry_run:
         try:
-            store.mark_seen([p.path for p in payloads], now=now)
+            # Hashes too: this is the only writer of the `notes` table on
+            # the run path, and without them every row carried
+            # `note_hash = ''` forever.
+            store.mark_seen(
+                [p.path for p in payloads],
+                now=now,
+                hashes={p.path: p.note_hash for p in payloads},
+            )
         except Exception:  # noqa: BLE001 - bookkeeping must not abort the run
             logger.exception("mark_seen failed — continuing (soft purge will be conservative)")
 
@@ -723,12 +848,27 @@ def run_consumers(
             summary.consumers.append(failed)
             continue
         # ONE shared client per run (09 §2: exactly one LLM path), handed
-        # only to consumers that declare they use it. A fresh RunContext per
+        # only to consumers that declare they want it. A fresh RunContext per
         # consumer so no consumer can observe another's services.
+        #
+        # `wants_llm()` is an INSTANCE predicate, not the `uses_llm` class
+        # flag: taskwarrior's enrichment is switched on by an OPTION
+        # (`llm_enabled`) while its class flag stays False so that no-ai
+        # notes still become tasks. Keying injection on the class flag made
+        # `llm_enabled = true` inert in production — `ctx.llm` was always
+        # None and the 06 §3.1 enrichment path could never run.
+        try:
+            wants_llm = bool(consumer.wants_llm())
+        except Exception:  # noqa: BLE001 - a bad predicate must not kill the run
+            logger.exception(
+                "consumer %s: wants_llm() raised — falling back to the class flag",
+                entry.name,
+            )
+            wants_llm = bool(getattr(type(consumer), "uses_llm", False))
         ctx = RunContext(
             config=config,
             dry_run=dry_run,
-            llm=llm.get() if getattr(type(consumer), "uses_llm", False) else None,
+            llm=llm.get() if wants_llm else None,
             # State locations come from the composition root, never from a
             # consumer's own environment read (taskwarrior's
             # <state>/backups/taskwarrior/<UTC-ts>, 06 §3.1).
@@ -749,17 +889,31 @@ def run_consumers(
 
     if not dry_run:
         try:
+            # `scan_roots` bounds the purge to what we actually WALKED. A
+            # note under a scan dir the operator removed from config is not
+            # missing, it is unlooked-at — purging it would destroy its
+            # emission history and re-run every LLM emission when the dir is
+            # added back (06 §7 acceptance / 08 §B5).
+            _root, purge_targets, _missing = _resolve_scan_targets(config)
             summary.purged = int(
                 store.soft_purge(
                     retention_days=DEFAULT_PURGE_RETENTION_DAYS,
                     scan_dirs_ok=_scan_dirs_ok(config),
                     now=now,
+                    scan_roots=[t.base for t in purge_targets],
                 )
                 or 0
             )
         except Exception:  # noqa: BLE001 - never let housekeeping fail a good run
             logger.exception("soft purge failed — no rows removed")
             summary.purged = 0
+        try:
+            # Bound the restore archive. Nothing else deletes from `purged_*`,
+            # so without this the 15 MB bloat 08 §B4 removed from `emissions`
+            # would just move house.
+            store.sweep_purged(now=now)
+        except Exception:  # noqa: BLE001 - housekeeping, never fatal
+            logger.exception("purge-archive sweep failed — the archive keeps growing")
 
     summary.duration_seconds = time.monotonic() - started
     summary.exit_code = 1 if summary.errors else 0

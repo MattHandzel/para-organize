@@ -1204,3 +1204,44 @@ deep_research+deploy) shipped green and raised 24 seams. Dispositions:
   pragma reverted, migrate leaving `synchronous=FULL`, `shell=True`, a
   string argv, a dropped `timeout=`, a strict-UTF-8 spawn decode, a strict
   store `text_factory`, and a stale RESERVED_CONFIG_LEAVES entry.
+
+## Phase-3 fix pass — spec deviations recorded (2026-08-16)
+
+Two places where the shipped system deliberately does not match a literal
+reading of doc 06. Both were already true in the code; they are recorded
+here so the deviation is a decision rather than a discrepancy a reviewer
+rediscovers.
+
+### `[state] dir` / `[state] database` are NOT config keys (doc 06 §1/§2)
+
+Doc 06 §2's schema shows a `[state]` table and §1 says "SQLite at
+`<state.dir>/<state.database>`". `config.py` REJECTS both keys by name, with
+a hint, because state locations are resolved by organize-core through
+`CorePaths` (spec 10 §3: `~/.local/share/organize-core`, overridable with
+`$ORGANIZE_CORE_STATE_DIR` or `--state-dir`). Two sources of truth for the
+state directory is how a migrated database ends up somewhere the service
+never opens.
+
+The consequence to know: a config written verbatim from doc 06 §2 fails to
+load. That is intended, and the error names the key and points at the
+override. Doc 06 is the older document; spec 10 §3 wins.
+
+### `shell.nix` (doc 06 §5) is retired, replaced by a health check
+
+Doc 06 §5 asks for a `shell.nix` (python311 + pyyaml, taskwarrior, jq,
+ollama, yt-dlp, curl; `PARA_ORGANIZE_ROOT`, `PYTHONPATH`) as parity with the
+old `second-brain-automation.sh` wrapper. It is not shipped, and should not
+be: that requirement exists only because the old pipeline was
+`python -m scripts.automation.cli` run through `nix-shell`, and the deploy
+seat's no-wrapper design — `ExecStart=%h/.local/bin/organize`, exit codes
+propagating — was approved precisely to delete that layer. A `shell.nix`
+would reintroduce the wrapper whose failure-swallowing is 08 §B's whole
+subject, and pin a second interpreter next to the installed console script.
+
+What the requirement was really protecting — that `task`, `yt-dlp` and the
+research agent actually resolve under the systemd user manager's PATH, which
+on NixOS is not the interactive shell's — is now covered by `organize health`
+(`_toolchain_issues`): every external binary named by an ENABLED consumer is
+resolved, and a miss is a WARNING naming the consumer, the option and the
+fix (an absolute path in the config). It is a setup-time answer instead of a
+per-note ERROR at the far end of a ten-minute timer.

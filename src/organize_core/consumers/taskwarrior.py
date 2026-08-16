@@ -479,6 +479,20 @@ def _dedupe_keys(
 class TaskwarriorConsumer(Consumer):
     uses_llm = False  # enrichment is optional and guarded separately
 
+    def wants_llm(self) -> bool:
+        """This consumer needs ``ctx.llm`` iff ``llm_enabled`` is on.
+
+        ``uses_llm`` must stay False — it is the runner's no-ai DENIAL flag,
+        and a ``no-ai: true`` capture still has to become a task (the
+        enrichment branch guards the vault law itself, in
+        :meth:`enrich_with_llm`). But injection is a different question:
+        keyed on the class flag alone, ``ctx.llm`` was always None, every
+        run logged "llm_enabled but no LLM client is configured", and the
+        06 §3.1 enrichment path could not execute through the pipeline at
+        all — only through tests that hand-built a RunContext.
+        """
+        return bool(self.llm_enabled)
+
     def __init__(self, config: ConsumerConfig) -> None:
         super().__init__(config)
         opts = dict(config.options)

@@ -104,6 +104,32 @@ files in this directory, so the swallow cannot be reintroduced quietly.
 3. **`notify-send`** if you want desktop alerts (optional; the journal
    marker works without it).
 
+4. **The external tools the consumers shell out to** — `task` (taskwarrior),
+   `yt-dlp` (learn's YouTube path), and whatever `[consumers.deep_research]
+   command` names — must resolve for the *systemd user manager*, whose `PATH`
+   is not your interactive shell's. On NixOS in particular a binary that
+   works in your terminal may be absent from the unit's environment.
+
+   `ExecStart=` invokes `organize` directly with no wrapper and no
+   `Environment=` (that is the point — see the design rules above), so pin
+   the tools in the CONFIG rather than in the unit:
+
+   ```toml
+   [consumers.taskwarrior]
+   task_binary = "/run/current-system/sw/bin/task"
+   ```
+
+   `organize health` resolves every external binary named by an enabled
+   consumer and warns, by consumer and option name, about any that is
+   missing. Run it before you enable the timer:
+
+   ```sh
+   organize health
+   ```
+
+   (Spec 06 §5 asked for a `shell.nix` here; it is deliberately retired in
+   favour of the no-wrapper unit plus this check — see ARCHITECTURE.md.)
+
 ## Install
 
 ```sh
@@ -117,6 +143,24 @@ install -Dm644 -t ~/.config/systemd/user \
     organize-pipeline-failtest.service
 systemctl --user daemon-reload
 ```
+
+> **STOP — retire the old chain first (spec 09 §5.5).** Do not enable the
+> timer or the path unit until cutover step 5 below has removed the OLD
+> chain's PARA step (`second-brain-automation` /
+> `para-automation-watcher.path` / `para-automation.{service,timer}`). Both
+> generations point at the same vault, so running them together produces
+> duplicate Taskwarrior tasks, duplicate flashcards and duplicate answer
+> notes, and doubles the LLM spend — and the second generation's writes are
+> not idempotent against the first's. If you are only installing the units to
+> read them, stop after `daemon-reload`.
+>
+> Mask, do not merely stop, anything you are retiring — a stopped unit is one
+> `daemon-reload` or reboot away from coming back:
+>
+> ```sh
+> systemctl --user mask para-automation.service para-automation.timer \
+>     para-automation-watcher.path
+> ```
 
 Enable the cadence:
 
@@ -195,22 +239,52 @@ the sequence is complete; steps 5–7 are this directory's.
    `filtered` rows dropped — spec 06 §1). Do not skip the migration: without
    it every past capture re-fires its consumers.
 
-   The CLI does both, and it refuses to touch a database inside a live state
-   directory unless you say `--yes-live` — so this is the one command in the
-   repo you have to aim deliberately:
+   **4a. Move the database to where this build reads it.** The old pipeline
+   kept its state in `~/.local/state/para-organize/`; this build reads
+   `<state-dir>/automations.db`, and `<state-dir>` defaults to
+   `~/.local/share/organize-core` (spec 10 §3 — confirm with
+   `organize health --json | jq -r .state_dir`). The shipped
+   `organize-pipeline.service` passes no `--state-dir`, so it opens the
+   DEFAULT path. Migrating the old file in place therefore migrates a
+   database nothing will ever open, and the pipeline starts on an empty one —
+   re-firing all 7 516 historical captures through taskwarrior, learn and
+   question_answer. That is the outcome spec 06 §1 exists to prevent.
+
+   Copy first, migrate the copy:
 
    ```sh
+   mkdir -p ~/.local/share/organize-core
+   cp ~/.local/state/para-organize/automations.db \
+      ~/.local/share/organize-core/automations.db
+   ```
+
+   Leave the original where it is until the first real run looks right; it is
+   your rollback.
+
+   **4b. Rehearse, then migrate.** The CLI backs up and migrates, and it
+   refuses to touch a database inside a live state directory unless you say
+   `--yes-live` — so this is the one command in the repo you have to aim
+   deliberately:
+
+   ```sh
+   cp ~/.local/share/organize-core/automations.db /tmp/automations-rehearsal.db
    organize migrate-store --db /tmp/automations-rehearsal.db --json
    ```
 
    ```sh
-   organize migrate-store --db ~/.local/state/para-organize/automations.db --backup-first --yes-live
+   organize migrate-store --db ~/.local/share/organize-core/automations.db --backup-first --yes-live
    ```
 
-   Rehearse on a copy first (top command, after
-   `cp ~/.local/state/para-organize/automations.db /tmp/automations-rehearsal.db`),
-   read the report, then run the real one. `--backup-first` writes
+   Read the rehearsal report, then run the real one. `--backup-first` writes
    `<db>.backup-<UTC-ts>` next to the database before touching it.
+
+   `organize health` fails with an ERROR if you skip 4a — it notices an old
+   database holding emissions while the one this build reads is empty or
+   missing, and prints the `cp` to run. Check it before enabling the timer:
+
+   ```sh
+   organize health
+   ```
 
    Paste the report line into the cutover log. Measured on the real 15 MB
    database (2026-08-16): `v1->v2 notes=7516 success=376 skip=3 retryable=8
@@ -218,8 +292,13 @@ the sequence is complete; steps 5–7 are this directory's.
    run is a no-op and says so.
 
    With no `--db`, `organize migrate-store` targets
-   `<state-dir>/automations.db` — which is what the service unit's own
-   `run-consumers` will open, and which it migrates on every start anyway.
+   `<state-dir>/automations.db` — the same file the service unit's
+   `run-consumers` opens, which is why 4a puts the history there.
+
+   `run-consumers` also migrates on start, and takes its own
+   `<db>.backup-<UTC-ts>` before it does, so a forgotten step 4b is
+   recoverable. `--dry-run` never migrates: a rehearsal that would need one
+   refuses and points back here (09 §5.6).
 
 5. **Stop the old chain's PARA step, keep Beeper sync.** The two are welded
    together inside one vault-side script today; they must be separated, not

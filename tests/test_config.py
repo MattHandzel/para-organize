@@ -698,17 +698,55 @@ def test_consumer_type_must_be_registered() -> None:
     assert "taskwarrior" in (excinfo.value.hint or "")
 
 
-def test_every_registered_consumer_type_is_configurable() -> None:
+def test_every_implemented_consumer_type_is_configurable() -> None:
     """The check reads the live ``@register`` registry — a new consumer type
     must not require a config-module edit (06 §1)."""
-    from organize_core.consumers import get_consumer_types
+    from organize_core.consumers import get_implemented_consumer_types
 
-    names = sorted(get_consumer_types())
-    assert names, "the consumer registry is empty"
+    names = sorted(get_implemented_consumer_types())
+    assert names, "the consumer registry has no implemented types"
     raw = minimal_raw()
     raw["consumers"] = {name: {"type": name} for name in names}
     config = validate_config(raw)
     assert [c.type for c in config.consumers] == names
+
+
+def test_registered_but_unimplemented_types_are_refused_by_config() -> None:
+    """A type registered ahead of its bodies (``implemented = False``) keeps
+    the registry stable but is NOT a usable config value.
+
+    Accepting one turned a Phase-4 stub into an error per scanned note —
+    7 500 on the real vault — plus exit 1 and an ``OnFailure=`` alert on
+    every run, which is the opposite of the loud, isolated fail-fast
+    08 §B2/§B14 ask for.
+    """
+    from organize_core.consumers import get_consumer_types, get_implemented_consumer_types
+
+    pending = sorted(set(get_consumer_types()) - set(get_implemented_consumer_types()))
+    assert pending, "no unimplemented consumer types registered — retire this test"
+    for name in pending:
+        raw = minimal_raw()
+        raw["consumers"] = {name: {"type": name}}
+        with pytest.raises(ConfigError) as excinfo:
+            validate_config(raw)
+        message = str(excinfo.value)
+        assert f"'consumers.{name}.type'" in message
+        assert "not implemented" in message
+
+
+def test_unimplemented_consumer_constructors_refuse_loudly() -> None:
+    """Belt and braces: even reached directly, the stub fails ONCE with a
+    ConfigError the runner isolates — never NotImplementedError per note."""
+    from organize_core.config import ConsumerConfig
+    from organize_core.consumers import get_consumer_types, get_implemented_consumer_types
+
+    pending = sorted(set(get_consumer_types()) - set(get_implemented_consumer_types()))
+    assert pending
+    for name in pending:
+        cls = get_consumer_types()[name]
+        with pytest.raises(ConfigError) as excinfo:
+            cls(ConsumerConfig(name=name, type=name))
+        assert "not implemented" in str(excinfo.value)
 
 
 def test_consumer_type_is_required() -> None:

@@ -58,8 +58,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import shutil
+import sqlite3
 import sys
 import threading
 import time
@@ -91,7 +93,11 @@ from organize_core.config import (
 )
 from organize_core.consumers import get_consumer_types
 from organize_core.consumers.runner import UnknownConsumerError, run_consumers
-from organize_core.consumers.store import STORE_SCHEMA_VERSION, AutomationStore
+from organize_core.consumers.store import (
+    STORE_SCHEMA_VERSION,
+    AutomationStore,
+    MigrationReport,
+)
 from organize_core.errors import (
     ConfigError,
     OperationError,
@@ -328,6 +334,21 @@ def build_parser() -> argparse.ArgumentParser:
                    help="permit migrating a database inside a LIVE state directory; "
                         "without it such a path is refused (cutover belt)")
     p.add_argument("--json", action="store_true", help="machine-readable migration report")
+
+    p = sub.add_parser(
+        "purged",
+        help="inspect and undo the automation store's soft-purge archive (spec 06 §1)",
+    )
+    psub = p.add_subparsers(dest="purged_command", required=True)
+    pp = psub.add_parser("list", help="paths currently sitting in the restore archive")
+    pp.add_argument("--json", action="store_true", help="machine-readable output")
+    pp = psub.add_parser(
+        "restore",
+        help="put archived rows back into notes/emissions (never clobbers newer state)",
+    )
+    pp.add_argument("paths", nargs="*", metavar="PATH",
+                    help="specific archived paths (default: everything archived)")
+    pp.add_argument("--json", action="store_true", help="machine-readable output")
 
     p = sub.add_parser("health", help="config + vault + core diagnostics (spec 03 §2, 10)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -1327,6 +1348,53 @@ def cmd_auto_organize(args: argparse.Namespace) -> int:
     return 1
 
 
+def _migrate_for_run(store: AutomationStore, *, dry_run: bool) -> MigrationReport:
+    """The store migration a pipeline run is allowed to perform.
+
+    ``store.migrate()`` is irreversible for the v1→v2 step: it drops every
+    ``filtered`` row and VACUUMs (measured against the real database: 22 497
+    rows dropped, 15.3 MB → 5.3 MB, no backup). Two rules therefore apply
+    here and nowhere else:
+
+    * **A dry run never migrates.** ``--dry-run`` documents itself as
+      "evaluate everything, write nothing (spec 09 §5.6)", and 09 §5.6 makes
+      the rehearsal the cutover gate you diff against expectations *before*
+      enabling writes. Rewriting the history it is meant to rehearse against
+      — while printing ``"dry_run": true`` — is the opposite of that, and it
+      slipped past the ``--yes-live`` belt that ``migrate-store`` enforces on
+      the very same file. A rehearsal that needs a migration REFUSES.
+    * **A real run backs up first.** 09 §5.4 says back it up before
+      migrating. Leaving that to the operator means the systemd unit, which
+      is what actually reaches the database first at cutover, skips it.
+
+    A version-0 (absent/empty) database is not a migration: there is nothing
+    to lose, and the run needs a schema to read through. A v2 database is a
+    no-op census. Both are allowed in either mode.
+    """
+    version = store.schema_version()
+    needs_migration = 0 < version < STORE_SCHEMA_VERSION
+
+    if dry_run:
+        if needs_migration:
+            raise OperationError(
+                f"refusing to migrate {store.db_path} during a --dry-run "
+                f"(schema v{version}, this build needs v{STORE_SCHEMA_VERSION})",
+                hint="a dry run writes nothing, and the v1->v2 step is irreversible "
+                "(it drops the filtered rows and VACUUMs). Migrate deliberately "
+                "first: organize migrate-store --backup-first  (spec 09 §5.4), "
+                "then rerun the dry run.",
+            )
+        return store.migrate()  # v0 create, or v2 census — neither loses data
+
+    if needs_migration:
+        backups = _backup_database(store.db_path)
+        for made in backups:
+            _warn(f"backed up before migrating: {made}")
+        if not backups:  # pragma: no cover - the file exists if version > 0
+            _warn(f"note: nothing to back up at {store.db_path}")
+    return store.migrate()
+
+
 def cmd_run_consumers(args: argparse.Namespace) -> int:
     """One pipeline run (spec 06 §1/§4).
 
@@ -1338,6 +1406,19 @@ def cmd_run_consumers(args: argparse.Namespace) -> int:
     2. Open AND MIGRATE the store here. ``run_consumers`` never migrates (its
        docstring says so), so a run can never race a half-migrated schema,
        and every store method refuses an un-migrated v1 DB loudly.
+
+       Two guards on that migration, because it is irreversible (the v1→v2
+       step drops the ``filtered`` rows and VACUUMs — measured on real data:
+       22 497 rows, 15.3 MB → 5.3 MB):
+
+       * ``--dry-run`` NEVER migrates. "Evaluate everything, write nothing"
+         (09 §5.6) cannot mean "and silently rewrite your 7 516-note
+         history"; a rehearsal that needs a migration refuses and names
+         ``migrate-store``.
+       * A real run that DOES need the v1→v2 step takes the 09 §5.4 backup
+         itself first, so the requirement cannot be skipped just because the
+         systemd unit, rather than an operator, got there first.
+
     3. Print the 06 §4 summary lines on STDOUT (the journal gets them through
        logging as well; systemd reads stdout).
     4. Exit 0 clean, 1 if any consumer errored, 2 for an unknown
@@ -1346,15 +1427,23 @@ def cmd_run_consumers(args: argparse.Namespace) -> int:
     """
     if args.list_consumers:
         # Spec 06 §4 / 08 §B2: listing constructs nothing — no config needed.
-        for name in sorted(get_consumer_types()):
-            _emit(name)
+        # Types registered ahead of their bodies are MARKED, not hidden:
+        # `--consumer` takes config SECTION names, so this listing is already
+        # a different namespace and must not advertise a name that would
+        # error on every note if configured.
+        types = get_consumer_types()
+        for name in sorted(types):
+            if getattr(types[name], "implemented", True):
+                _emit(name)
+            else:
+                _emit(f"{name}  (registered, not implemented yet — not valid in config)")
         return 0
 
     paths, config = _load(args)
     dry_run = bool(getattr(args, "dry_run", False))
 
     with AutomationStore(paths.automations_db) as store:
-        report = store.migrate()
+        report = _migrate_for_run(store, dry_run=dry_run)
         if report.changed:
             _warn(report.summary())
         logger.info("%s", report.summary())
@@ -1525,6 +1614,8 @@ def cmd_migrate_store(args: argparse.Namespace) -> int:
                 "kept_skip": report.kept_skip,
                 "deleted_filtered": report.deleted_filtered,
                 "reset_retryable": report.reset_retryable,
+                "kept_unknown": report.kept_unknown,
+                "emissions_kept": report.emissions_kept,
                 "notes_kept": report.notes_kept,
                 "anomalies": list(report.anomalies),
                 "backups": [str(b) for b in backups],
@@ -1536,6 +1627,185 @@ def cmd_migrate_store(args: argparse.Namespace) -> int:
         _emit(report.summary())
         for anomaly in report.anomalies:
             _warn(f"anomaly: {anomaly}")
+    return 0
+
+
+#: Where the PRE-REWRITE pipeline kept its state. This build reads
+#: ``<state-dir>/automations.db`` (``~/.local/share/organize-core`` by
+#: default — spec 10 §3), so the cutover has to MOVE the database. The
+#: consequence of not moving it is invisible until it has already happened:
+#: the pipeline starts on an empty DB and re-fires every one of the 7 516
+#: historical captures through taskwarrior/learn/question_answer — exactly
+#: what 06 §1 exists to prevent ("or every past capture refires its
+#: consumers"). So health names it instead of waiting for the duplicates.
+_LEGACY_STATE_RELATIVE = (".local", "state", "para-organize", "automations.db")
+
+
+#: Consumer options that name an EXTERNAL binary the pipeline shells out to,
+#: as ``(consumer type, option key, how to read it, default)``. Read from
+#: CONFIG, never by constructing consumers: construction is pure but a
+#: registered-but-unimplemented type refuses in ``__init__`` (06 §1, 08 §B2),
+#: and health must not care.
+_EXTERNAL_BINARIES: tuple[tuple[str, str, str, str | None], ...] = (
+    ("taskwarrior", "task_binary", "scalar", "task"),
+    ("learn", "yt_dlp_command", "argv", "yt-dlp"),
+    ("deep_research", "command", "argv", None),
+)
+
+
+def _configured_binary(entry: Any, key: str, kind: str, fallback: str | None) -> str | None:
+    raw = entry.options.get(key)
+    if raw is None:
+        return fallback
+    if kind == "argv":
+        if isinstance(raw, (list, tuple)):
+            return str(raw[0]) if raw else fallback
+        return str(raw) or fallback
+    return str(raw) or fallback
+
+
+def _toolchain_issues(config: Config) -> list[HealthIssue]:
+    """Every external binary an ENABLED consumer will shell out to must
+    resolve (spec 06 §5/§6).
+
+    The shipped unit runs ``%h/.local/bin/organize`` with no ``Environment=``
+    and no wrapper, so ``task``, ``yt-dlp`` and the research agent resolve
+    against whatever ``PATH`` the systemd user manager happened to inherit.
+    On this NixOS host that is not the interactive shell's PATH, and the
+    failure mode is a per-note ERROR at the far end of a ten-minute timer
+    rather than a setup-time answer. Spec 06 §5 asked for a ``shell.nix`` to
+    pin the toolchain; the deploy seat deliberately shipped no wrapper
+    (recorded in ARCHITECTURE.md), so THIS is what replaces it: resolve the
+    binaries and say so, once, where an operator is looking.
+
+    WARNING, not ERROR: a consumer can be enabled on a machine that will not
+    run it, and health is a setup aid, not a gate. ``--strict`` fails on it.
+    """
+    issues: list[HealthIssue] = []
+    for entry in config.consumers:
+        if not entry.enabled:
+            continue
+        for ctype, key, kind, fallback in _EXTERNAL_BINARIES:
+            if entry.type != ctype:
+                continue
+            binary = _configured_binary(entry, key, kind, fallback)
+            if not binary:
+                continue
+            candidate = Path(binary)
+            if candidate.is_absolute() or os.sep in binary:
+                found = candidate.is_file() and os.access(candidate, os.X_OK)
+            else:
+                found = shutil.which(binary) is not None
+            if found:
+                continue
+            issues.append(
+                HealthIssue(
+                    severity="warning",
+                    message=(
+                        f"consumer {entry.name} ({ctype}) needs {binary!r} "
+                        f"[{key}] and it is not executable on PATH"
+                    ),
+                    hint="install it, or give an ABSOLUTE path in the config — the "
+                    "systemd unit inherits the user manager's PATH, not your "
+                    f"shell's, so {binary!r} may resolve here and not there "
+                    "(spec 06 §5)",
+                )
+            )
+    return issues
+
+
+def _stranded_automations_db_issues(paths: CorePaths) -> list[HealthIssue]:
+    """ERROR when the OLD automations.db holds history and the NEW one does not.
+
+    Fires only when there is something to lose: an old database with emission
+    rows and a new one that is absent or empty. A fresh install (no old
+    database) and a completed cutover (new one populated) are both silent.
+    """
+    home = default_env().get("HOME")
+    if not home:  # pragma: no cover - HOME is always set in practice
+        return []
+    current = paths.automations_db
+    # Only a REAL deployment can be mid-cutover. A `--state-dir` pointed
+    # somewhere else is a developer scratch run, a test, or a rehearsal on a
+    # copy — telling those "your cutover is broken" would be a false alarm on
+    # every invocation, which is how a check gets ignored.
+    if _is_live_state_path(current) is None:
+        return []
+    legacy = Path(home).joinpath(*_LEGACY_STATE_RELATIVE)
+    try:
+        if not legacy.is_file() or legacy.resolve() == current.resolve():
+            return []
+    except OSError:  # pragma: no cover - unreadable path
+        return []
+
+    def emissions(db: Path) -> int | None:
+        """Emission rows, 0 for absent/empty, None for "not readable as one"."""
+        if not db.is_file() or db.stat().st_size == 0:
+            return 0
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                row = conn.execute("SELECT COUNT(*) FROM emissions").fetchone()
+            finally:
+                conn.close()
+            return int(row[0]) if row else 0
+        except sqlite3.Error:
+            return None  # not an automations db, or unreadable — not our call
+
+    legacy_rows = emissions(legacy)
+    current_rows = emissions(current)
+    if not legacy_rows or current_rows is None or current_rows > 0:
+        return []
+    return [
+        HealthIssue(
+            severity="error",
+            message=(
+                f"{legacy} holds {legacy_rows} emission(s) but the database this "
+                f"build reads, {current}, is empty or missing"
+            ),
+            hint="the cutover did not move the database. Copy it across BEFORE "
+            "starting the pipeline, then migrate the copy — otherwise every past "
+            "capture re-fires its consumers (spec 06 §1): "
+            f"mkdir -p {current.parent} && cp {legacy} {current} && "
+            "organize migrate-store --backup-first --yes-live",
+        )
+    ]
+
+
+def cmd_purged(args: argparse.Namespace) -> int:
+    """The operator-facing door to the soft-purge archive (spec 06 §1).
+
+    ``soft_purge`` WARNs that "restore_purged() undoes this" — a promise that
+    was unkeepable, because ``list_purged``/``restore_purged`` had no caller
+    anywhere in ``src/`` and no CLI surface. An archive nobody can enumerate
+    or restore is not a restore path; it is just rows.
+    """
+    paths = _resolve_paths(args)
+    _configure_logging(args)
+
+    with AutomationStore(paths.automations_db) as store:
+        store.migrate()
+        if args.purged_command == "list":
+            archived = sorted(store.list_purged())
+            if args.json:
+                _json_out({"database": str(paths.automations_db), "purged": archived})
+            else:
+                for entry in archived:
+                    _emit(entry)
+                if not archived:
+                    _emit("purge archive is empty")
+            return 0
+
+        wanted = [expand(raw) for raw in args.paths] or None
+        restored = store.restore_purged(wanted)
+        remaining = sorted(store.list_purged())
+
+    if args.json:
+        _json_out({"restored": restored, "remaining": remaining})
+    else:
+        _emit(f"restored {restored} note(s) from the purge archive")
+        if remaining:
+            _emit(f"{len(remaining)} still archived")
     return 0
 
 
@@ -1576,6 +1846,7 @@ def _state_issues(paths: CorePaths, config: Config) -> list[HealthIssue]:
                 hint="run `organize index --full`",
             )
         )
+    issues.extend(_stranded_automations_db_issues(paths))
     orphans = find_orphaned_temp_files(config.vault.root, now=time.time())
     if orphans:
         issues.append(
@@ -1646,6 +1917,7 @@ def cmd_health(args: argparse.Namespace) -> int:
         issues.extend(check_vault(config))
         issues.extend(_state_issues(paths, config))
         issues.extend(_socket_issues(paths, config))
+        issues.extend(_toolchain_issues(config))
         if paths.index_path.exists():
             try:
                 index = _open_index(paths, config)
@@ -1740,6 +2012,7 @@ _HANDLERS = {
     "auto-organize": cmd_auto_organize,
     "run-consumers": cmd_run_consumers,
     "migrate-store": cmd_migrate_store,
+    "purged": cmd_purged,
     "health": cmd_health,
     "serve": cmd_serve,
 }
