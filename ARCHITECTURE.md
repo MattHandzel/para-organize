@@ -1303,3 +1303,45 @@ per-note ERROR at the far end of a ten-minute timer.
   stay store-audited, defensible as-is); (b) taskwarrior.py's redundant
   `_note_is_no_ai` delegating helper simplifies to payload.no_ai; (c)
   tag_router integrate-mode routes override wants_llm when Phase 5 lands.
+
+## Phase-4 rulings, routes-apply batch (architect, routed 2026-08-16)
+
+- **fileops.move_to_destination gains keyword-only `archive: bool = True`**
+  (integrator lands it): default preserves 05 §2 verbatim; routes pass
+  False; apply_all archives exactly once after ALL destinations succeed
+  (ruling #11 refined). archive=False also DEFERS the index capture-entry
+  removal (05 §2 step 8) — apply_all does both after the final archive.
+  Rationale: config-order execution is mandated by 11 §1, and multiple
+  move-mode routes are spec-permitted (two copies + one archive).
+- **Multi-target recording via a collecting facade** (approved, preferred
+  over any record:bool knob — recording stays structurally unavoidable:
+  redirectable, never suppressible): facade implements the recorder
+  interface, never touches JSONL; per-target diffs are fileops' own;
+  EXACTLY one aggregate record reaches the real recorder; on_record fires
+  once with the aggregate. PIN the latent bug: learn.record_action must
+  fold EVERY destination-role target of a multi-target record, not
+  targets[0]. Mixed-mode operation name: strongest-mutation-wins
+  (move > integrate > append). context.route for multi-route =
+  comma-joined route names (schema-compatible; targets[] carries detail).
+  routes→actions import edge approved (acyclic).
+- **set_description on a folder with no index note CREATES
+  `<folder>/index.md`** (description frontmatter + heading) through the
+  ordinary recorded path — but ONLY for actor "matt" (explicit keystroke;
+  11 §3 names index.md as primary storage). Automated actors refuse
+  creation. The `[descriptions]` config table is READ-ONLY from the core
+  (hand-maintained fallback; stdlib has no TOML writer and the dep budget
+  bars adding one). OperationError only for actual write failures.
+
+## Record correction (orchestrator, 2026-08-16)
+
+Two Phase-3 fixer decisions shipped in code at 0f9e634 but were never
+recorded here; they ARE binding precedent:
+- **wants_llm instance predicate**: `Consumer.wants_llm()` (defaults to
+  `uses_llm`) drives LLM CLIENT INJECTION only; the class-level `uses_llm`
+  remains the runner's no-ai DENIAL flag. TaskwarriorConsumer returns
+  `self.llm_enabled`. Runner wraps the predicate call in try/except
+  falling back to the class flag.
+- **Phase-boundary stubs rejected by config**: consumer types whose
+  implementations are stubs for a FUTURE phase are rejected at config
+  validation until implemented (was: auto_tagger/tag_router in Phase 3;
+  Phase-4 integrator flips those two and re-pins the next boundary).
