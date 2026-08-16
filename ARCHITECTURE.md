@@ -1001,3 +1001,25 @@ mirror.
   → []), values stringified — never a hand-rolled re-parse (08 §B9 class).
   Tests: no_ai for true/absent/false/"true"; tags for scalar/list/missing
   (the fixture vault's scalar-tags quirk file is the natural input).
+
+## Phase-3 rulings, addendum (routed 2026-08-16 — integrator applies with the batch above)
+
+- **Templated alerter APPROVED (deviation from the brief)**:
+  `organize-pipeline-failure@.service` with
+  `OnFailure=organize-pipeline-failure@%n.service` — one alerter serves the
+  timer run, the path-triggered run, and the failtest, and every alert
+  names its failing unit. Record in deploy/README. The deep_research
+  seat's drift-guard test (parsing every documented `organize …`
+  invocation against the live build_parser) is the PATTERN for any future
+  doc embedding CLI invocations.
+- **RESERVED_CONFIG_LEAVES**: remove `integrate.review` and
+  `vault.scan_dirs` — Phase 3 landed their readers (scan_dirs in
+  runner/store; review in routes + three consumers), so the entries are
+  stale by the gate's own rule.
+- **De-dup obligation**: when the base.py `no_ai` property lands (ruling
+  above), DELETE both interim fallbacks — `runner._note_is_no_ai` and
+  `deep_research.payload_no_ai`.
+- **Cutover note for deploy/README**: next to the install steps, state
+  explicitly that the OLD para-automation/second-brain-automation chain
+  must be masked/removed at cutover (spec 09 §5.5) — otherwise both
+  generations run against the same vault.
