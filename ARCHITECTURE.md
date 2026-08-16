@@ -326,6 +326,44 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
   destination) and is uncapped; capping is `suggest.for_note`'s job. The
   `EXTRA_METHODS` set in `tests/test_server_protocol.py` pins the list and
   fails on any further addition — that failure IS the approval step.
+- **`op.skip` approved — the one WRITING addition beyond spec 10 §2.** Spec
+  03 §2/§6 makes skip a first-class session decision and doc 12 §2 already
+  lists `skip` in the ActionRecord operation enum, but spec 10 §2 named no
+  method for it, so the decision was unrecordable from a thin client: every
+  press of `s` silently discarded the counterfactual that `actions stats`
+  measures acceptance rate AGAINST.
+
+  Contract: `op.skip {note, session_id REQUIRED, suggestions_shown?,
+  durations_ms?}` → `{ok: true, outcome: "skipped"}`. The param is `note`,
+  NOT `path` — it names the capture being decided about rather than a file
+  being operated on. `session_id` is required because 03 §6 scopes "skipped"
+  to a session; a skip belonging to none is not a decision anyone can read
+  back. An unresolvable id raises `SessionError` (sessions are in-memory, so
+  a core restart legitimately invalidates every id a client holds), as does
+  a note absent from that session's capture list — while an unknown PATH is
+  a `VaultError` from `_record_for`, before the session is consulted.
+
+  Three deliberate asymmetries, each pinned by a test:
+  1. **ActionRecord yes, oplog line NO.** The operation log records what
+     happened to the VAULT; an OK line for an operation that touched nothing
+     would claim a mutation that never happened.
+  2. **In `MUTATING_METHODS`, NOT in `INDEX_CHANGING_METHODS`.** It is
+     queued through the one writer because it appends to the actions corpus
+     (a state file), but it moves no note — an `index-updated` per skip
+     would make every client refetch on a keystroke that changed nothing.
+  3. **No learning signal, positive or negative** (04 §3). Load-bearing
+     rather than incidental: `fileops.skip_capture` goes through the SAME
+     `_record_action` path as a move, so the only thing stopping a skip from
+     teaching the learner is `learn.record_action` returning `None` for it.
+     A TRAP TEST asserts the actions corpus gains exactly one record while
+     `learning.json` stays BYTE-identical; both halves were checked against
+     firing controls (a move does change those bytes, and the count does
+     move), so the trap cannot pass vacuously.
+
+  Dry-run records with `context.dry_run = true` and leaves session state
+  alone, so a rehearsal cannot silently consume the backlog. Session
+  membership is validated on BOTH paths, so a dry run cannot succeed where
+  the real call would raise.
 - **Known divergence for the integrator**: fileops/cli docstrings still
   say dry-run means "no log mutation" — reconcile docstrings to ruling (a)
   post-hold.
