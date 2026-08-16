@@ -1112,3 +1112,89 @@ def test_a_malformed_decision_context_flag_is_loud(core: Core) -> None:
     assert proc.returncode == 1
     assert "ConfigError:" in proc.stderr
     assert (core.vault / CAPTURE).is_file(), "a rejected flag must not half-perform the move"
+
+
+# --- skip (spec 03 §2/§6 + 12 §2, the CLI door onto op.skip) ---------------
+
+
+def _skip_records(core: Core) -> list[dict]:
+    months = list((core.state_dir / "actions").glob("*.jsonl"))
+    return [
+        json.loads(line)
+        for month in months
+        for line in month.read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line)["operation"] == "skip"
+    ]
+
+
+def test_skip_records_the_decision_with_its_session(core: Core) -> None:
+    """Doc 10: every capability is scriptable. The CLI door records the same
+    doc-12 skip the RPC door does."""
+    core.index()
+    proc = core.run(
+        "skip", CAPTURE, "--session", "ses_cli_1",
+        "--suggestions-json", '[{"path": "/vault/projects/blog", "score": 3.1, "rank": 1}]',
+        "--durations-json", '{"decision": 8400}',
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    (record,) = _skip_records(core)
+    assert record["operation"] == "skip"
+    assert record["actor"] == "matt", "the core fills the actor"
+    assert record["capture"]["path"] == str(core.vault / CAPTURE)
+    assert record["capture"]["content_hash"], "the core fills the capture state"
+    assert record["context"]["session_id"] == "ses_cli_1"
+    assert record["context"]["dry_run"] is False
+    assert record["context"]["durations_ms"] == {"decision": 8400}
+    assert record["context"]["suggestions_shown"][0]["rank"] == 1
+    assert record["context"]["vault_stats"], "the core fills vault_stats"
+    assert record["targets"] == [], "a skip touches no file, so no targets"
+
+    assert (core.vault / CAPTURE).is_file(), "skip never moves the note"
+    log = core.state_dir / "operations.log"
+    log_text = log.read_text(encoding="utf-8") if log.exists() else ""
+    assert "skip" not in log_text, "no operations.log line: nothing happened to the vault"
+
+
+def test_skip_without_a_session_is_a_session_error(core: Core) -> None:
+    """Semantic failure, not an argparse usage error: 03 §6 scopes "skipped"
+    to a session, so the message has to say WHY."""
+    core.index()
+    proc = core.run("skip", CAPTURE)
+    assert proc.returncode == 1
+    assert "SessionError:" in proc.stderr
+    assert "session" in proc.stderr
+    assert "hint:" in proc.stderr and "--session" in proc.stderr
+    assert not list((core.state_dir / "actions").glob("*.jsonl")), "nothing recorded"
+
+
+def test_skip_from_the_cli_never_touches_learning(core: Core) -> None:
+    """TRAP at the SECOND door (04 §3). `cli._learn_from_action` is a
+    SEPARATE `on_record` wiring from the server's, so the no-learning-signal
+    guarantee has to be pinned here too — a skip folded in at this door
+    would be just as wrong and is not covered by the RPC-side trap.
+
+    A real move runs first so learning.json EXISTS with content; asserting an
+    absent file stays absent would pass even if the guarantee broke.
+    """
+    core.index()
+    assert core.run("move", CAPTURE, "resources/performing").returncode == 0
+    learning_path = core.state_dir / "learning.json"
+    before = learning_path.read_bytes()
+    assert before, "the move must have written learning.json"
+
+    other = QUIRK_FILES["scalar_tags"]
+    assert core.run("skip", other, "--session", "ses_cli_2").returncode == 0
+
+    assert len(_skip_records(core)) == 1, "the skip IS recorded"
+    assert learning_path.read_bytes() == before, (
+        "a skip carries no learning signal, positive or negative (04 §3)"
+    )
+
+
+def test_skip_dry_run_marks_the_record(core: Core) -> None:
+    core.index()
+    proc = core.run("--dry-run", "skip", CAPTURE, "--session", "ses_cli_3")
+    assert proc.returncode == 0, proc.stderr
+    (record,) = _skip_records(core)
+    assert record["context"]["dry_run"] is True

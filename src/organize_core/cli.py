@@ -82,7 +82,13 @@ from organize_core.config import (
     metadata_fields_by_key,
 )
 from organize_core.consumers import get_consumer_types
-from organize_core.errors import ConfigError, OperationError, OrganizeError, VaultError
+from organize_core.errors import (
+    ConfigError,
+    OperationError,
+    OrganizeError,
+    SessionError,
+    VaultError,
+)
 from organize_core.fileops import (
     OperationContext,
     OperationLog,
@@ -91,6 +97,7 @@ from organize_core.fileops import (
     find_orphaned_temp_files,
     merge_into_note,
     move_to_destination,
+    skip_capture,
     update_frontmatter,
 )
 from organize_core.frontmatter import load_file
@@ -110,6 +117,7 @@ SUBCOMMANDS: tuple[str, ...] = (
     "move",
     "merge",
     "archive",
+    "skip",
     "set-meta",
     "meta-fields",
     "session",
@@ -206,6 +214,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("archive", help="archive a capture now (spec 05 §3)")
     p.add_argument("note")
+
+    p = sub.add_parser(
+        "skip", help="record that a capture was skipped for a session (spec 03 §2/§6)"
+    )
+    p.add_argument("note")
+    p.add_argument(
+        "--session",
+        metavar="ID",
+        help="the session this skip belongs to, as `organize session list --json` reports it",
+    )
+    _add_decision_context_flags(p)
 
     p = sub.add_parser("set-meta", help="set frontmatter fields (spec 05 §5, 07)")
     p.add_argument("note")
@@ -844,6 +863,38 @@ def cmd_archive(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_skip(args: argparse.Namespace) -> int:
+    """``organize skip <note> --session <id>`` — the CLI door onto ``op.skip``
+    (spec 10: every capability is scriptable).
+
+    ``--session`` is required, and its absence is a ``SessionError`` rather
+    than an argparse usage error, because the reason is semantic, not a typo:
+    spec 03 §6 scopes "skipped" to a session, so a skip belonging to none is
+    not a decision anyone can read back.
+
+    WHAT THIS DOOR CANNOT DO: sessions live only in the running core's
+    memory (there is no session store on disk), so this process cannot
+    resolve the id to a live ``Session`` and cannot update its ``skipped``
+    set — that accounting stays core-owned and happens over RPC. The id is
+    recorded as the client's claim, exactly as ``--chosen-rank`` and
+    ``--suggestions-json`` already are. What this door DOES give you is the
+    doc-12 record: a scripted agent that ranks and then declines can say so.
+    """
+    paths, config = _load(args)
+    index = _open_index(paths, config)
+    record = _record_for(index, config, args.note)
+    session_id = (getattr(args, "session", None) or "").strip()
+    if not session_id:
+        raise SessionError(
+            "skip is a session action: it needs the session it belongs to",
+            hint="pass --session <id>; `organize session list --json` reports the id",
+        )
+    ctx = _op_context(args, paths, config, index, session_id=session_id)
+    skip_capture(ctx, record)
+    _emit(f"skipped {_rel(record.path, config)} (session {session_id})")
+    return 0
+
+
 def _metadata_fields(config: Config) -> dict[str, MetadataFieldConfig]:
     """Kept as a thin alias so this module's readers see one name; the rule
     itself is ``config.metadata_fields_by_key`` (spec 10 §3 — core config, so
@@ -1443,6 +1494,7 @@ _HANDLERS = {
     "move": cmd_move,
     "merge": cmd_merge,
     "archive": cmd_archive,
+    "skip": cmd_skip,
     "set-meta": cmd_set_meta,
     "meta-fields": cmd_meta_fields,
     "session": cmd_session,
