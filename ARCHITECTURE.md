@@ -1517,3 +1517,29 @@ own write — flush on success, read-back pinned.
   fold unattended route firings into learning. The conversion rides WITH
   the filter (see the designed-tripwire note above). Its dead
   unbound-inert branch + stale comment clean up in the same change.
+
+## CRITICAL-1 ruling: retry idempotency, vault-as-truth (architect, 2026-08-16)
+
+The "already delivered" truth lives in the VAULT, not the store.
+- **Append marker (machine-owned, template-independent)**: each append
+  writes one namespaced HTML comment with the block, same atomic write:
+  `<!-- organize:appended capture_id=<id> route=<name> -->`. Delivered
+  check = exact match on `organize:appended capture_id=<id>` (never the
+  rendered template — {date} drift duplicates; never the bare id — a
+  [[capture-id]] wikilink false-positive means SILENT NON-DELIVERY).
+  Append-side analog of the blessed auto_tag_hash bookkeeping.
+- **Move-mode idempotency (id-based)**: dest/<filename> exists with
+  frontmatter id == capture's id ⇒ already delivered, skip; different id
+  ⇒ genuine collision, _1 as today (also kills retry-manufactured _1).
+- **CRITICAL-2 consequence**: append-template validation requires {body}
+  ONLY; {capture_id} stays recommended-not-mandatory (marker is
+  independent).
+- **Record honesty**: on retry the aggregate record lists targets
+  actually WRITTEN this run; already-delivered skips visible in record
+  metadata, never silent.
+- apply_all becomes resumable at EVERY step (skip-if-delivered
+  destinations; failed final archive retries alone).
+- Required regressions: 5-run duplicate reproducer ⇒ exactly-once + heal;
+  crash-mid-batch; move retry no-_1/same-id-skip/different-id-collides;
+  wikilink false-positive still receives; archive-failed-last retries
+  alone.
