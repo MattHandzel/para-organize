@@ -1345,3 +1345,33 @@ recorded here; they ARE binding precedent:
   implementations are stubs for a FUTURE phase are rejected at config
   validation until implemented (was: auto_tagger/tag_router in Phase 3;
   Phase-4 integrator flips those two and re-pins the next boundary).
+
+## Phase-4 rulings, bind + actor batch (architect, routed 2026-08-16)
+
+- **Consumer.bind(ctx) hook APPROVED** (integrator lands base.py+runner.py
+  together with op_context — one pass): routes must be visible to
+  should_process so no-match stays a FILTER (re-evaluated every run;
+  adding a [[routes]] entry applies retroactively to the backlog — the
+  08 §B4 lesson). AMENDMENTS: (a) bind() raising ⇒ consumer SKIPPED for
+  the run, counted as an error in the summary, exit 1 — never "continue
+  unbound" (an unbound tag_router silently filters everything: the
+  silent-outage class); other consumers unaffected. (b) cheapness
+  contract in the docstring: bind grants CONFIG reads for should_process;
+  should_process stays cheap (path + parsed frontmatter + config
+  predicates — no I/O, no LLM). Interim (bind on the consumer's own
+  class; unbound ⇒ inert False + one warning) approved until the hook
+  lands.
+- **Record-level actor for routes** (addendum to the facade contract):
+  OperationContext actor stays "consumer:tag_router"; the AGGREGATE
+  record's actor is "route:<name>" when exactly one route fired (doc 12
+  §2's enum member for unattended route firing); multi-route aggregate
+  falls back to ctx.actor with context.route = comma-joined names.
+  ROUTES sets it (the facade builds the record).
+- **LEARNING FOLDS ONLY MATT-DECIDED ACTIONS** (principle recorded for
+  Phase 5's learn.record_action filter): a route firing is config, not a
+  decision — folding it would make routes self-reinforcing and corrupt
+  the accept-rate corpus. The routed-run learning-byte-identical trap
+  test (with firing control) is permanent. Phase-5 nuances deferred:
+  interactive route acceptance in the UI (actor matt) folds as a normal
+  accept; integrate records use the verdict-based reading (verdict
+  accepted/edited = Matt-decided even though actor is claude-integrate).
