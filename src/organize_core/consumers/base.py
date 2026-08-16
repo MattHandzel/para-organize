@@ -23,12 +23,17 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from organize_core.config import Config, ConsumerConfig
 from organize_core.frontmatter import Frontmatter, fields_are_no_ai
 from organize_core.llm import LLMClient
 from organize_core.paths import CorePaths
+
+if TYPE_CHECKING:
+    # Type-only: `fileops` imports the consumer framework nowhere, and a
+    # runtime import here would put the mutation layer under every consumer.
+    from organize_core.fileops import OperationContext
 
 
 @dataclass(frozen=True)
@@ -114,6 +119,21 @@ class RunContext:
     #: by hand.
     paths: CorePaths | None = None
 
+    #: The RECORDED write path (spec 12 §2) for a consumer that touches the
+    #: vault. Populated by ``run_consumers`` from the composition root's
+    #: single context, handed to each consumer with
+    #: ``actor="consumer:<type>"``. ``None`` only in pure-logic unit tests
+    #: that build a context by hand.
+    #:
+    #: A consumer that would write the vault with this ``None`` MUST emit
+    #: ``Status.ERROR`` instead of writing. Becoming a second, UNRECORDED
+    #: write path is the one thing doc 12 exists to prevent, and an error is
+    #: retried next run — so the pipeline self-heals once the seam is wired
+    #: instead of leaving an untraceable mutation behind. A field, not a
+    #: factory: the composition root owns the lifecycle of what it carries
+    #: (index, oplog, recorder), never a consumer.
+    op_context: OperationContext | None = None
+
 
 class Consumer(ABC):
     """One consumer type. Subclasses register with ``@register("name")``.
@@ -153,6 +173,33 @@ class Consumer(ABC):
         see ``TaskwarriorConsumer.wants_llm``. Must be pure and cheap: the
         runner calls it once per consumer per run."""
         return bool(type(self).uses_llm)
+
+    def bind(self, ctx: RunContext) -> None:
+        """Once-per-run hook, called by the runner immediately after the
+        ``RunContext`` is built and BEFORE any ``should_process`` call.
+        Default: no-op.
+
+        WHY IT EXISTS: ``should_process`` receives only a ``NotePayload``,
+        so a consumer whose filter question is about CONFIG — "does this
+        note match an ``auto = true`` route?" — cannot answer it. Deciding
+        in ``handle`` instead would write a TERMINAL checkpoint for every
+        non-matching note, and a route added later would then never fire on
+        an already-seen note at an unchanged hash (the 08 §B3/§B4 class).
+        A filter miss is never persisted, so the answer is re-derived every
+        run and config changes stay retroactive (06 §1).
+
+        CHEAPNESS CONTRACT: binding grants CONFIG READS to the predicate and
+        nothing more. ``should_process`` stays cheap — path, already-parsed
+        frontmatter, pure config predicates; no I/O, no LLM. Expensive
+        services belong on the first real ``handle``, not here.
+
+        FAILURE SEMANTICS: an implementation that RAISES means the consumer
+        is SKIPPED for the run, counted as an error in the 06 §4 summary,
+        and the run exits 1 — never "continue unbound", because an unbound
+        filter silently drops every note, which is the silent-outage class.
+        Other consumers are unaffected.
+        """
+        return None
 
     def __init__(self, config: ConsumerConfig) -> None:
         """PURE — validate ``config.options`` against this type's schema

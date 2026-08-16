@@ -1207,14 +1207,19 @@ def cmd_routes(args: argparse.Namespace) -> int:
     # describe
     target = _vault_path(config, args.path)
     if args.text is not None:
-        try:
-            result = routes_mod.set_description(_op_context(args, paths, config, index), target, args.text)
-        except NotImplementedError as exc:
-            raise OrganizeError(
-                f"routes describe cannot write yet: {exc}",
-                hint="reading a description works today; writing arrives with the routes phase (spec 11 §3)",
-            ) from exc
+        # `set_description` landed with the routes phase; the
+        # NotImplementedError wrapper that used to sit here is gone with it
+        # (it could no longer fire, and its hint told you to wait for a
+        # phase that had arrived).
+        ctx = _op_context(args, paths, config, index)
+        result = routes_mod.set_description(ctx, target, args.text)
         _print_result(result, config)
+        if result.ok and not ctx.dry_run:
+            # The description is READ back through the index (11 §3 prefers
+            # the folder note's frontmatter), so without this the very next
+            # `routes describe <folder>` still reports the old text — the
+            # command would not be able to see its own write.
+            index.flush()
         return 0
     description = routes_mod.get_description(target, index, config)
     if description is None:
@@ -1442,6 +1447,14 @@ def cmd_run_consumers(args: argparse.Namespace) -> int:
     paths, config = _load(args)
     dry_run = bool(getattr(args, "dry_run", False))
 
+    # The composition root builds the ONE recorded write path (spec 12 §2)
+    # and owns the index lifecycle; the runner hands each consumer a copy
+    # actored to it. Built here, outside the store block, so the single
+    # end-of-run flush below can reach the same index the consumers wrote
+    # through.
+    index = _open_index(paths, config)
+    op_context = _op_context(args, paths, config, index)
+
     with AutomationStore(paths.automations_db) as store:
         report = _migrate_for_run(store, dry_run=dry_run)
         if report.changed:
@@ -1454,6 +1467,7 @@ def cmd_run_consumers(args: argparse.Namespace) -> int:
                 only=args.consumer,
                 dry_run=dry_run,
                 paths=paths,
+                op_context=op_context,
             )
         except UnknownConsumerError as exc:
             # 06 §4: unknown --consumer is a USAGE error → exit 2, not the
@@ -1462,6 +1476,15 @@ def cmd_run_consumers(args: argparse.Namespace) -> int:
             if exc.hint:
                 print(f"hint: {exc.hint}", file=sys.stderr)
             return 2
+
+    if not dry_run:
+        # ONE flush for the whole run. A consumer that applied a route moved
+        # notes through `op_context.index`, so without this the snapshot on
+        # disk still describes the pre-run vault and the next reader — the
+        # server, `organize suggest` — ranks against stale paths. Per-note
+        # flushing was rejected: the snapshot is rewritten whole, so it
+        # would rewrite the entire index once per applied note.
+        index.flush()
 
     if args.json:
         _json_out(

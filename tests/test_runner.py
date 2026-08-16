@@ -1475,3 +1475,121 @@ def test_a_dry_run_can_never_checkpoint_even_if_handle_is_reached(
     assert store.emissions == {}, "a dry run checkpointed a result"
     assert not any(w[0] == "checkpoint" for w in store.writes)
     assert summary.dry_run is True
+
+
+# --- op_context + bind seams (Phase-4 consolidated checklist items 1-2) ----
+
+
+def _root_op_context(tmp_path: Path, config: Config, *, dry_run: bool) -> Any:
+    """A composition-root context, as `cmd_run_consumers` builds one."""
+    from organize_core.actions import ActionRecorder
+    from organize_core.fileops import OperationContext, OperationLog
+    from organize_core.index import VaultIndex
+
+    return OperationContext(
+        config=config,
+        index=VaultIndex(config, tmp_path / "index.json"),
+        oplog=OperationLog(tmp_path / "operations.log"),
+        recorder=ActionRecorder(tmp_path / "actions"),
+        backup_dir=tmp_path / "backups",
+        dry_run=dry_run,
+        actor="matt",
+    )
+
+
+def _context_capturing_consumer(type_name: str) -> list[Any]:
+    """Register a fake that records the RunContext it was bound with."""
+    seen: list[Any] = []
+
+    class _Fake(Consumer):
+        def bind(self, ctx: RunContext) -> None:
+            seen.append(ctx)
+
+        def should_process(self, payload: NotePayload) -> bool:
+            return False
+
+        def handle(self, payload: NotePayload, ctx: RunContext) -> ConsumerResult:
+            return ConsumerResult(status=Status.SUCCESS)
+
+    _Fake.__name__ = f"Fake_{type_name}"
+    register(type_name)(_Fake)
+    return seen
+
+
+def test_each_consumer_gets_an_op_context_actored_to_its_type(
+    fixture_vault: Path, tmp_path: Path, registry: Any
+) -> None:
+    """12 §2's actor format is ``consumer:<type>``, never a bare name — and
+    never the config SECTION name, which is the operator's label."""
+    first = _context_capturing_consumer("ctx_fake_a")
+    second = _context_capturing_consumer("ctx_fake_b")
+    config = make_config(
+        fixture_vault,
+        cc("alpha", "ctx_fake_a", include_paths=["capture/raw_capture"]),
+        cc("beta", "ctx_fake_b", include_paths=["capture/raw_capture"]),
+    )
+    root = _root_op_context(tmp_path, config, dry_run=False)
+
+    run_consumers(config, FakeStore(), op_context=root)
+
+    assert [c.op_context.actor for c in first + second] == [
+        "consumer:ctx_fake_a",
+        "consumer:ctx_fake_b",
+    ], "the actor names the TYPE, not the section ('alpha'/'beta')"
+    assert root.actor == "matt", "the root's own context is never mutated"
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_op_context_dry_run_always_matches_the_run(
+    fixture_vault: Path, tmp_path: Path, registry: Any, dry_run: bool
+) -> None:
+    """One flag, wired ONCE. The per-consumer copy takes the RUN's dry_run
+    even when the caller hands in a context that disagrees — a rehearsal can
+    never be given a context that writes."""
+    seen = _context_capturing_consumer("dry_fake")
+    config = make_config(
+        fixture_vault, cc("dry", "dry_fake", include_paths=["capture/raw_capture"])
+    )
+    # Deliberately the OPPOSITE of the run, so agreement cannot be luck.
+    root = _root_op_context(tmp_path, config, dry_run=not dry_run)
+
+    run_consumers(config, FakeStore(), dry_run=dry_run, op_context=root)
+
+    (ctx,) = seen
+    assert ctx.dry_run is dry_run
+    assert ctx.op_context.dry_run == ctx.dry_run
+
+
+def test_a_consumer_whose_bind_raises_is_skipped_and_fails_the_run(
+    fixture_vault: Path, registry: Any
+) -> None:
+    """Never "continue unbound": an unbound filter silently drops every note,
+    which is the silent-outage class. The consumer is skipped, counted as an
+    error and the run exits 1 — while its siblings run untouched."""
+    healthy = make_consumer("bind_ok_fake")
+
+    class _Broken(Consumer):
+        def bind(self, ctx: RunContext) -> None:
+            raise RuntimeError("no routes for you")
+
+        def should_process(self, payload: NotePayload) -> bool:  # pragma: no cover
+            raise AssertionError("a consumer that failed to bind must not be asked")
+
+        def handle(
+            self, payload: NotePayload, ctx: RunContext
+        ) -> ConsumerResult:  # pragma: no cover
+            raise AssertionError("a consumer that failed to bind must not run")
+
+    register("bind_boom_fake")(_Broken)
+    config = make_config(
+        fixture_vault,
+        cc("boom", "bind_boom_fake", include_paths=["capture/raw_capture"]),
+        cc("fine", "bind_ok_fake", include_paths=["capture/raw_capture"]),
+    )
+
+    summary = run_consumers(config, FakeStore())
+
+    assert by_name(summary, "boom").error == 1
+    assert summary.exit_code == 1
+    assert healthy.handled, "an unrelated consumer still runs"
+    assert by_name(summary, "fine").error == 0

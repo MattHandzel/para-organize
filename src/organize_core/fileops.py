@@ -1226,6 +1226,8 @@ def move_to_destination(
     ctx: OperationContext,
     capture: NoteRecord,
     destination_folder: Path,
+    *,
+    archive: bool = True,
 ) -> OperationResult:
     """Spec 05 §2, exactly its 8 steps: validate source; ensure destination
     (mkdir -p iff ``auto_create_folders``); backup source; collision-free
@@ -1236,6 +1238,16 @@ def move_to_destination(
     Takes the metadata RECORD (canonical decision, 05 §2; 08 §A14 — one
     signature, never a bare string); a path-only convenience lookup lives in
     the CLI layer.
+
+    ``archive=False`` files the copy and STOPS: the original stays in the
+    capture folder and its index entry stays too — step 8's removal is
+    DEFERRED, not skipped. Only ``routes.apply_all`` passes it, because 11
+    §1 mandates config-order execution and several move-mode routes may
+    match one capture: spec-permitted, and the answer is N copies plus ONE
+    archive. Archiving on the first route would leave every later route
+    looking for a source that had already moved. The caller owes both
+    halves — the archive and the index removal — after its final
+    destination succeeds; skipping them strands the capture.
     """
     now = ctx.clock()
     source = require_in_vault(ctx.config, capture.path, "note")
@@ -1442,6 +1454,30 @@ def move_to_destination(
             now,
             backup=backup,
             details=details,
+        )
+
+    if not archive:
+        # Deferred half (see the docstring): the copy is filed and indexed;
+        # the original AND its capture-entry in the index are left exactly
+        # as they were, for the caller to finish after its last destination.
+        _index_update(ctx, dest_path)
+        _log(ctx, "move", source, dest_path, success=True, now=now, backup=backup)
+        _record_action(
+            ctx,
+            op_type="move",
+            capture=capture_state,
+            targets=[
+                _target_state(dest_path, None, new_text, "destination", description=description)
+            ],
+            now=now,
+        )
+        return OperationResult(
+            ok=True,
+            operation="move",
+            source=str(source),
+            destination=str(dest_path),
+            backup_path=str(backup) if backup else None,
+            details={**details, "archived": False},
         )
 
     archived, archive_error = _archive_file(source, archive_path)

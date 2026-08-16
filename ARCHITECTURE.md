@@ -1500,3 +1500,20 @@ actions); when that lands, on_record becomes safely wireable globally and
 this connection-pin WILL fail BY DESIGN — swap it for the callee-side pin
 (wired on_record + route-actor record ⇒ learning.json unchanged) in the
 same change that lands the filter.
+
+## Phase-4 integration landing (recorded by orchestrator, 2026-08-16)
+
+Checklist items 1-6 landed (op_context + bind with skip-on-raise; actor =
+consumer TYPE not section name — section-name would misattribute every
+doc-12 record; dry_run re-WIRED onto the copy, not asserted; end-of-run
+index flush; auto+integrate config rejection; example block; gate
+re-points; archive kwarg with deferred capture-entry removal). All three
+acceptance signals fired; 3/3 seam-pin mutation audit. Bonus defect fixed:
+`routes describe` never flushed the index so it could not read back its
+own write — flush on success, read-back pinned.
+- **Omission ACCEPTED as a Phase-5 rider**: tag_router keeps its own
+  OperationContext (on_record=None) until the learn.record_action
+  actor filter lands — delegating to the shared op_context today would
+  fold unattended route firings into learning. The conversion rides WITH
+  the filter (see the designed-tripwire note above). Its dead
+  unbound-inert branch + stale comment clean up in the same change.

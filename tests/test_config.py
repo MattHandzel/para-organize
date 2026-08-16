@@ -295,9 +295,18 @@ FULL_RAW: dict[str, Any] = {
             "mode": "integrate",
             "description": "d",
             "template": "## {date}",
-            "auto": True,
             "review": "auto",
-        }
+        },
+        # `auto` cannot ride on the integrate route above: unattended
+        # integrate is refused at validation until Phase 5 lands it. It gets
+        # its own append route instead, so FULL_RAW still carries a
+        # non-default value for every leaf.
+        {
+            "tags": ["blog-idea"],
+            "destination": "projects/blog/ideas.md",
+            "mode": "append",
+            "auto": True,
+        },
     ],
     "consumers": {
         "tw": {
@@ -377,7 +386,10 @@ def test_every_config_key_is_honored() -> None:
         auto_create_folders=False,
     )
     assert [f.key for f in config.metadata_fields] == ["energy"]
-    assert config.routes[0].auto is True
+    # `auto` lives on the second (append) route: unattended integrate is
+    # refused at validation until Phase 5.
+    assert config.routes[0].auto is False
+    assert config.routes[1].auto is True
     assert config.routes[0].template == "## {date}"
     assert config.routes[0].description == "d"
     assert config.routes[0].review == "auto"  # spec 12 §1 per-route opt-in
@@ -711,7 +723,45 @@ def test_every_implemented_consumer_type_is_configurable() -> None:
     assert [c.type for c in config.consumers] == names
 
 
-def test_registered_but_unimplemented_types_are_refused_by_config() -> None:
+SYNTHETIC_STUB_TYPE = "zz_synthetic_stub"
+
+
+@pytest.fixture()
+def synthetic_stub_type() -> Any:
+    """Register an UNIMPLEMENTED consumer type for one test.
+
+    These gates used to key on "whatever is currently pending" — the real
+    Phase-4 stubs. That made them self-destructing: the moment auto_tagger
+    and tag_router landed, the pending set emptied and the gate had nothing
+    left to assert. A synthetic type keeps the refusal pinned PERMANENTLY,
+    for every future consumer registered ahead of its bodies.
+    """
+    from organize_core.consumers import base as consumer_base
+
+    class _SyntheticStub(consumer_base.Consumer):
+        implemented = False
+
+        def __init__(self, config: Any) -> None:  # noqa: ARG002 - never reached
+            raise ConfigError(
+                f"{SYNTHETIC_STUB_TYPE!r} is registered but not implemented yet"
+            )
+
+        def should_process(self, payload: Any) -> bool:  # pragma: no cover - unreachable
+            raise AssertionError("an unimplemented consumer must never run")
+
+        def handle(self, payload: Any, ctx: Any) -> Any:  # pragma: no cover - unreachable
+            raise AssertionError("an unimplemented consumer must never run")
+
+    consumer_base._REGISTRY[SYNTHETIC_STUB_TYPE] = _SyntheticStub
+    try:
+        yield _SyntheticStub
+    finally:
+        consumer_base._REGISTRY.pop(SYNTHETIC_STUB_TYPE, None)
+
+
+def test_registered_but_unimplemented_types_are_refused_by_config(
+    synthetic_stub_type: Any,
+) -> None:
     """A type registered ahead of its bodies (``implemented = False``) keeps
     the registry stable but is NOT a usable config value.
 
@@ -722,31 +772,45 @@ def test_registered_but_unimplemented_types_are_refused_by_config() -> None:
     """
     from organize_core.consumers import get_consumer_types, get_implemented_consumer_types
 
-    pending = sorted(set(get_consumer_types()) - set(get_implemented_consumer_types()))
-    assert pending, "no unimplemented consumer types registered — retire this test"
-    for name in pending:
-        raw = minimal_raw()
-        raw["consumers"] = {name: {"type": name}}
-        with pytest.raises(ConfigError) as excinfo:
-            validate_config(raw)
-        message = str(excinfo.value)
-        assert f"'consumers.{name}.type'" in message
-        assert "not implemented" in message
+    pending = set(get_consumer_types()) - set(get_implemented_consumer_types())
+    assert SYNTHETIC_STUB_TYPE in pending
+
+    raw = minimal_raw()
+    raw["consumers"] = {SYNTHETIC_STUB_TYPE: {"type": SYNTHETIC_STUB_TYPE}}
+    with pytest.raises(ConfigError) as excinfo:
+        validate_config(raw)
+    message = str(excinfo.value)
+    assert f"'consumers.{SYNTHETIC_STUB_TYPE}.type'" in message
+    assert "not implemented" in message
 
 
-def test_unimplemented_consumer_constructors_refuse_loudly() -> None:
+def test_unimplemented_consumer_constructors_refuse_loudly(
+    synthetic_stub_type: Any,
+) -> None:
     """Belt and braces: even reached directly, the stub fails ONCE with a
     ConfigError the runner isolates — never NotImplementedError per note."""
     from organize_core.config import ConsumerConfig
+
+    with pytest.raises(ConfigError) as excinfo:
+        synthetic_stub_type(
+            ConsumerConfig(name=SYNTHETIC_STUB_TYPE, type=SYNTHETIC_STUB_TYPE)
+        )
+    assert "not implemented" in str(excinfo.value)
+
+
+def test_every_registered_consumer_type_is_now_implemented() -> None:
+    """The Phase-4 boundary, re-pinned. auto_tagger and tag_router were the
+    last two stubs; nothing ships unimplemented today. When a future phase
+    registers a type ahead of its bodies, this fails and names it — the
+    reminder to re-read the gate above rather than let a stub go unnoticed.
+    """
     from organize_core.consumers import get_consumer_types, get_implemented_consumer_types
 
     pending = sorted(set(get_consumer_types()) - set(get_implemented_consumer_types()))
-    assert pending
-    for name in pending:
-        cls = get_consumer_types()[name]
-        with pytest.raises(ConfigError) as excinfo:
-            cls(ConsumerConfig(name=name, type=name))
-        assert "not implemented" in str(excinfo.value)
+    assert pending == [], (
+        f"registered but unimplemented: {pending} — confirm the refusal gate "
+        "still covers them, then update this pin"
+    )
 
 
 def test_consumer_type_is_required() -> None:

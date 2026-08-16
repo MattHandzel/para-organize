@@ -41,6 +41,7 @@ this module (06 §1 single-owner rule).
 
 from __future__ import annotations
 
+import dataclasses
 import fnmatch
 import logging
 import os
@@ -69,6 +70,7 @@ from organize_core.paths import CorePaths
 
 if TYPE_CHECKING:  # the runner needs the store's CLASS, never its module state
     from organize_core.consumers.store import AutomationStore
+    from organize_core.fileops import OperationContext
 
 logger = logging.getLogger(__name__)
 
@@ -786,6 +788,7 @@ def run_consumers(
     only: list[str] | None = None,
     dry_run: bool = False,
     paths: CorePaths | None = None,
+    op_context: OperationContext | None = None,
 ) -> RunSummary:
     """One full run (spec 06 §1 orchestration rules):
 
@@ -813,6 +816,19 @@ def run_consumers(
     handed to every consumer through ``RunContext.paths`` so a consumer
     needing a STATE location derives it instead of reading the environment
     (structural decision 4).
+
+    ``op_context`` is the composition root's ONE recorded write path (spec
+    12 §2). Each consumer receives its own view via
+    ``dataclasses.replace(actor="consumer:<type>")`` — the doc 12 §2 actor
+    format, never a bare name — so a record names the consumer that wrote
+    it while there is still exactly one construction site. ``dry_run`` is
+    RE-WIRED onto that copy rather than trusted to agree: one flag, set
+    once, so a rehearsal can never be handed a context that writes.
+
+    ``Consumer.bind(ctx)`` runs once per consumer before any
+    ``should_process``. A bind that RAISES skips that consumer for the run,
+    counts one error and makes the run exit 1 — never "continue unbound",
+    since an unbound filter silently drops every note.
     """
     started = time.monotonic()
     now = int(time.time())
@@ -873,7 +889,29 @@ def run_consumers(
             # consumer's own environment read (taskwarrior's
             # <state>/backups/taskwarrior/<UTC-ts>, 06 §3.1).
             paths=paths,
+            # Per-consumer view of the ONE recorded write path. `dry_run` is
+            # re-wired here rather than trusted to match: one flag, set
+            # once, so a rehearsal cannot be handed a writing context.
+            op_context=(
+                None
+                if op_context is None
+                else dataclasses.replace(
+                    op_context, actor=f"consumer:{entry.type}", dry_run=dry_run
+                )
+            ),
         )
+        # BEFORE any should_process: the predicate's config view is what
+        # bind() exists to grant. A raise skips this consumer (error + exit
+        # 1) instead of running it unbound, because an unbound filter drops
+        # every note silently — the outage class this hook prevents.
+        try:
+            consumer.bind(ctx)
+        except Exception as exc:  # noqa: BLE001 - isolated, like construction
+            logger.exception("consumer %s: bind() raised — skipping it this run", entry.name)
+            failed = ConsumerSummary(name=entry.name, error=1)
+            _record_failure(failed, f"bind failed: {exc}")
+            summary.consumers.append(failed)
+            continue
         summary.consumers.append(
             _run_one_consumer(
                 entry,

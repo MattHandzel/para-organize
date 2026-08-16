@@ -86,6 +86,7 @@ def test_example_demonstrates_every_pluralised_section() -> None:
         "learn",
         "question_answer",
         "deep_research",
+        "auto_tagger",
     ]
     assert config.consumers[3].env == {"NOTES_DIR": "~/Obsidian/Main"}
     assert sorted(config.descriptions) == ["areas/health", "projects/blog"]

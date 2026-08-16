@@ -475,12 +475,14 @@ def test_routes_describe_reads_the_folder_description(core: Core) -> None:
     assert proc.stdout.strip() == "no description for projects/kms"
 
 
-def test_routes_describe_write_is_phase_4(core: Core) -> None:
+def test_routes_describe_writes_the_description(core: Core) -> None:
+    """Replaces the Phase-4 stub gate: `set_description` has landed, so the
+    write path works instead of refusing (spec 11 §3)."""
     core.index()
     proc = core.run("routes", "describe", "areas/health", "new text")
-    assert proc.returncode == 1
-    assert "cannot write yet" in proc.stderr
+    assert proc.returncode == 0, proc.stderr
     assert "Traceback" not in proc.stderr
+    assert core.run("routes", "describe", "areas/health").stdout.strip() == "new text"
 
 
 # --- record / actions ------------------------------------------------------
@@ -704,11 +706,19 @@ def test_list_consumers_marks_types_that_are_not_valid_config_values(core: Core)
     """The listing prints registry TYPE names while ``--consumer`` takes
     config SECTION names, so it is already a different namespace. It must at
     least not advertise a name that config validation refuses — enabling one
-    produced an ERROR per scanned note and exit 1 on every run."""
+    produced an ERROR per scanned note and exit 1 on every run.
+
+    Stated as an INVARIANT over whatever is registered, not over a
+    particular phase's stubs: keyed on "whatever is pending" it emptied
+    itself the moment auto_tagger and tag_router landed. The in-test
+    synthetic stub the unit-level gates use cannot help here either, because
+    the listing runs in a SUBPROCESS with its own registry import. So this
+    asserts the halves that hold in every phase, including one — like now —
+    where nothing is pending.
+    """
     from organize_core.consumers import get_consumer_types, get_implemented_consumer_types
 
     pending = set(get_consumer_types()) - set(get_implemented_consumer_types())
-    assert pending, "no unimplemented consumer types registered — retire this test"
 
     proc = core.run("run-consumers", "--list-consumers")
     assert proc.returncode == 0
@@ -717,7 +727,9 @@ def test_list_consumers_marks_types_that_are_not_valid_config_values(core: Core)
         for line in proc.stdout.splitlines()
         if line.strip() and "not implemented" in line
     }
-    assert marked == pending
+    assert marked == pending, "exactly the unusable types carry the marker"
+    listed = {line.split()[0] for line in proc.stdout.splitlines() if line.strip()}
+    assert listed >= set(get_consumer_types()), "every registered type is listed"
     for line in proc.stdout.splitlines():
         if line.strip() and line.split()[0] in get_implemented_consumer_types():
             assert line.strip() == line.split()[0], "a usable type must list bare"

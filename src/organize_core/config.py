@@ -1120,13 +1120,28 @@ def _validate_route(v: _Validator, entry: dict[str, Any], i: int) -> RouteConfig
             hint='set mode = "integrate" for this destination, or drop `review`',
             cls=RouteConfigError,
         )
+    auto = v.boolean(entry, "auto", prefix, False)
+    # Fail ONCE, at the door (03 §1 voice). The per-note ERROR branch in the
+    # router stays as unreachable defence-in-depth, but it cannot be the
+    # primary surface: an unattended integrate route would raise one error
+    # per matching note, exit 1, and fire the OnFailure alert every ten
+    # minutes for a config that is merely early — which trains the operator
+    # to ignore the channel. Lift this check when Phase 5 lands integrate.
+    if auto and mode == "integrate":
+        v.fail(
+            f"{prefix}.auto",
+            'is true with mode = "integrate", which cannot run unattended yet',
+            hint="integrate ships in Phase 5; set auto = false to keep this "
+            "route interactive-only until then",
+            cls=RouteConfigError,
+        )
     return RouteConfig(
         tags=[tag.strip() for tag in tags],
         destination=destination,
         mode=mode,  # type: ignore[arg-type]
         description=v.string(entry, "description", prefix, "", allow_empty=True) or "",
         template=v.string(entry, "template", prefix, None, allow_empty=True),
-        auto=v.boolean(entry, "auto", prefix, False),
+        auto=auto,
         review=review,  # type: ignore[arg-type]
     )
 
@@ -1904,6 +1919,26 @@ timeout_seconds = 900
 # Generic environment passthrough for the research subprocess (spec 06 §3.4).
 [consumers.deep_research.env]
 NOTES_DIR = "~/Obsidian/Main"
+
+# Machine tagging (spec 11 §2). Tags are written to BOTH `tags` and
+# `auto_tags`: `tags` is what routes and search read, `auto_tags` is the
+# provenance mirror, so a machine tag can always be told from one of yours.
+# There is no `backend` key here — the ONE shared client is [llm] below
+# (09 §2). A tagged note carries `auto_tag: done` plus an `auto_tag_hash`
+# (a BODY digest): blessed machine bookkeeping, not stray frontmatter, so
+# curation tooling should leave both alone. `auto_tag: done` with no hash is
+# honored as FINAL.
+[consumers.auto_tagger]
+type = "auto_tagger"
+enabled = false
+include_paths = ["capture/raw_capture"]
+max_notes_per_run = 20
+min_tags = 1              # only tag captures with fewer than this many tags
+max_tags = 5              # cap on tags the model may add to one note
+max_chars = 4000          # body truncated to this before prompting
+vocabulary_size = 50      # top-N existing vault tags offered as grounding
+extra_vocabulary = []     # always-offered candidates a young vault lacks
+llm_timeout_seconds = 60.0
 
 # The ONE shared LLM client (spec 09 §2). Hosts and models are config-required
 # — there are no hardcoded fallbacks in code (06 §2).

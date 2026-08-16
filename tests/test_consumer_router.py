@@ -42,8 +42,6 @@ from organize_core.config import (
     RouteConfig,
     VaultConfig,
 )
-from organize_core.consumers import base as consumer_base
-from organize_core.consumers import runner as runner_mod
 from organize_core.consumers.base import NotePayload, RunContext, Status
 from organize_core.consumers.runner import run_consumers, scan_notes
 from organize_core.consumers.store import AutomationStore
@@ -256,48 +254,6 @@ def test_an_all_of_route_reaches_the_consumer(fixture_vault: Path) -> None:
     router = consumer(config)
     assert router.should_process(payload_for(config, both)) is True
     assert router.should_process(payload_for(config, one)) is False
-
-
-# --- the unbound interim (retires itself when the bind hook lands) ---------
-
-BIND_IS_WIRED = hasattr(consumer_base.Consumer, "bind")
-
-
-@pytest.mark.skipif(BIND_IS_WIRED, reason="the framework now binds; the interim is over")
-def test_an_unbound_consumer_is_inert_rather_than_wrong(
-    fixture_vault: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Until ``base.Consumer.bind`` + the runner call land, the consumer has
-    no way to see ``[[routes]]`` in ``should_process``. Inert (filter miss,
-    nothing persisted) is the ONLY safe interim: the alternative — deciding
-    in ``handle`` — writes a terminal checkpoint for every non-matching
-    capture, and a route added later then never fires at an unchanged hash.
-
-    This test retires automatically: it skips the moment ``bind`` exists on
-    the base class.
-    """
-    config = make_config(fixture_vault, route(["rt-workout"], TRAINING_LOG, auto=True))
-    path = write_capture(fixture_vault, "unbound", tags=["rt-workout"])
-    payload = payload_for(config, path)
-
-    unbound = TagRouterConsumer(ConsumerConfig(name="router", type="tag_router"))
-    with caplog.at_level("WARNING"):
-        assert unbound.should_process(payload) is False
-        assert unbound.should_process(payload) is False
-
-    # Filter on the LOGGER, not on the message text: pytest's tmp_path is
-    # named after the test, so "unbound" appears inside every unrelated log
-    # line that happens to quote a path under it.
-    warnings = [
-        r
-        for r in caplog.records
-        if r.name.endswith("tag_router") and "unbound" in r.getMessage()
-    ]
-    assert len(warnings) == 1, "the seam warning must be once per run, not per note"
-    # and the same consumer, once bound, says yes to the very same payload —
-    # so "False" above is the seam, not a broken predicate.
-    unbound.bind(RunContext(config=config))
-    assert unbound.should_process(payload) is True
 
 
 def test_bind_is_idempotent_and_drops_stale_run_services(fixture_vault: Path) -> None:
@@ -853,47 +809,6 @@ def store(tmp_path: Path):  # noqa: ANN201 - same shape as the runner suites
         yield opened
 
 
-@pytest.fixture()
-def wire_bind(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stand in for the not-yet-landed ``runner`` half of the bind hook.
-
-    ARCHITECTURE ruling 4ffef89 approves ``base.Consumer.bind`` plus one call
-    in the runner right after ``RunContext`` is built. The consumer half has
-    landed; the framework half has not. Rather than skip every runner-driven
-    golden until it does — which would leave the whole unattended path
-    unproven at the one seam that matters — this shim performs exactly that
-    one call, against the REAL runner, REAL store, REAL consumer and REAL
-    vault. It is deleted by ``test_the_bind_shim_is_retired_once_the_runner_
-    wires_it``, which fails the moment the shim is redundant.
-    """
-    if BIND_IS_WIRED:
-        return
-    original = runner_mod._run_one_consumer
-
-    def patched(entry, instance, payloads, **kwargs):  # noqa: ANN001, ANN003
-        bind = getattr(instance, "bind", None)
-        if callable(bind):
-            bind(kwargs["ctx"])
-        return original(entry, instance, payloads, **kwargs)
-
-    monkeypatch.setattr(runner_mod, "_run_one_consumer", patched)
-
-
-def test_the_bind_shim_is_retired_once_the_runner_wires_it() -> None:
-    """Self-cleaning gate: when ``base.Consumer`` grows ``bind``, the shim
-    above is dead weight that could mask a broken wiring. Delete both."""
-    if BIND_IS_WIRED:
-        source = Path(runner_mod.__file__).read_text(encoding="utf-8")
-        assert ".bind(" in source, (
-            "base.Consumer has bind() but runner never calls it — the hook is "
-            "half-landed and tag_router is silently inert in production"
-        )
-        pytest.fail(
-            "base.Consumer.bind has landed: delete the wire_bind fixture and "
-            "the unbound-interim test from tests/test_consumer_router.py"
-        )
-
-
 def router_config(vault: Path, *routes: RouteConfig) -> Config:
     return make_config(
         vault,
@@ -907,7 +822,7 @@ def router_config(vault: Path, *routes: RouteConfig) -> Config:
 
 
 def test_golden_run_applies_the_auto_route_and_leaves_everything_else_alone(
-    fixture_vault: Path, paths: CorePaths, store: AutomationStore, wire_bind: None
+    fixture_vault: Path, paths: CorePaths, store: AutomationStore
 ) -> None:
     """The 06 §7 golden run for this consumer: one auto-routed capture is
     filed and archived, an unmatched capture is FILTERED (no store row at
@@ -940,7 +855,7 @@ def test_golden_run_applies_the_auto_route_and_leaves_everything_else_alone(
 
 
 def test_a_second_run_changes_nothing(
-    fixture_vault: Path, paths: CorePaths, store: AutomationStore, wire_bind: None
+    fixture_vault: Path, paths: CorePaths, store: AutomationStore
 ) -> None:
     """Rerun idempotency. The applied capture is archived, so it leaves the
     scan set entirely — the strongest possible form of "does not re-fire",
@@ -961,7 +876,7 @@ def test_a_second_run_changes_nothing(
 
 
 def test_flipping_auto_true_fires_at_an_unchanged_note_hash(
-    fixture_vault: Path, paths: CorePaths, store: AutomationStore, wire_bind: None
+    fixture_vault: Path, paths: CorePaths, store: AutomationStore
 ) -> None:
     """THE retroactivity property, and the reason a non-auto match must be a
     FILTER rather than a proposal emission (ruling 8c86c8a).
@@ -991,7 +906,7 @@ def test_flipping_auto_true_fires_at_an_unchanged_note_hash(
 
 
 def test_a_failing_route_does_not_stop_the_run(
-    fixture_vault: Path, paths: CorePaths, store: AutomationStore, wire_bind: None
+    fixture_vault: Path, paths: CorePaths, store: AutomationStore
 ) -> None:
     """A route pointing at a nonexistent destination is an ERROR emission and
     the run CONTINUES to the next capture (06 §1 isolation, 08 §B12). The
@@ -1019,7 +934,7 @@ def test_a_failing_route_does_not_stop_the_run(
 
 
 def test_a_dry_run_touches_neither_the_vault_nor_the_store(
-    fixture_vault: Path, paths: CorePaths, store: AutomationStore, wire_bind: None
+    fixture_vault: Path, paths: CorePaths, store: AutomationStore
 ) -> None:
     """09 §5.6: a rehearsal evaluates everything and writes nothing. Both
     store tables are asserted, not just ``emissions`` — a ``mark_seen``-only
@@ -1048,7 +963,7 @@ def test_a_dry_run_touches_neither_the_vault_nor_the_store(
 
 
 def test_a_no_ai_capture_survives_a_full_run_untouched(
-    fixture_vault: Path, paths: CorePaths, store: AutomationStore, wire_bind: None
+    fixture_vault: Path, paths: CorePaths, store: AutomationStore
 ) -> None:
     """End-to-end vault law: a route that matches the no-ai fixture note fires
     for nobody, writes nothing, and leaves no checkpoint. The control is the
