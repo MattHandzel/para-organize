@@ -780,6 +780,32 @@ def collision_free_path(dest: Path) -> Path:
     )
 
 
+def already_moved(dest: Path, capture_id: str) -> bool:
+    """Has THIS capture already been filed to ``dest``? (CRITICAL-1)
+
+    Identity is the frontmatter ``id``, not the filename: a destination
+    holding a note with the SAME id is this capture, already delivered by an
+    earlier attempt, so a retry must skip it. A DIFFERENT id under the same
+    filename is a genuine collision and still gets the ``_1`` suffix.
+
+    This is also what stops a retry from MANUFACTURING ``_1`` copies: before
+    it, every re-run of a partially-applied batch filed another numbered
+    duplicate of a note it had already filed.
+
+    Unreadable frontmatter answers False — the safe direction, because it
+    falls through to the existing collision behaviour rather than skipping a
+    delivery that may never have happened.
+    """
+    if not capture_id or not dest.is_file():
+        return False
+    try:
+        doc = _parse_named(_read_text(dest), dest)
+    except Exception:  # noqa: BLE001 - a bad destination is a collision, not a crash
+        return False
+    existing = _fields(doc).get("id")
+    return existing is not None and str(existing) == capture_id
+
+
 def _discard_unverified_copy(dest_path: Path, source: Path) -> Path | None:
     """Remove a destination copy THIS operation just created and then failed
     to verify. Returns the path when it could NOT be removed (so the caller
@@ -1373,7 +1399,34 @@ def move_to_destination(
     doc, text, snapshot = _read_document(source)
     _refuse_no_ai(ctx, source, doc, "move")
 
-    dest_path = collision_free_path(dest_folder / source.name)
+    # Vault-as-truth delivered check, BEFORE any write (CRITICAL-1): a
+    # destination already holding a note with THIS capture's id was filed by
+    # an earlier attempt, so a retry skips it instead of writing a numbered
+    # duplicate beside it.
+    # Identity comes from the SOURCE's own frontmatter, not from the
+    # NoteRecord: both sides of this comparison are then read from the vault,
+    # which is the whole point of vault-as-truth. An index record can be
+    # stale, and a stale id here would either skip a delivery that never
+    # happened or duplicate one that did.
+    capture_id = str(_fields(doc).get("id") or capture.capture_id or capture.id or "")
+    natural_dest = dest_folder / source.name
+    if already_moved(natural_dest, capture_id):
+        return OperationResult(
+            ok=True,
+            operation="move",
+            source=str(source),
+            destination=str(natural_dest),
+            dry_run=ctx.dry_run,
+            details={
+                "capture_id": capture_id,
+                "archived": False,
+                # Visible, never silent: the caller keeps this OUT of the
+                # record's targets, because nothing was written this run.
+                "already_delivered": True,
+            },
+        )
+
+    dest_path = collision_free_path(natural_dest)
     fields_after, tag = _organized_fields(doc, dest_folder, ctx.config, now)
     new_text = _rendered(fields_after, _style(doc), doc.body)
     archive_path = get_archive_path(source.name, ctx.config, now=now)
@@ -1883,6 +1936,29 @@ def append_to_note(
     # another file, so a no-ai capture refuses an automated actor here too.
     _refuse_no_ai(ctx, source, capture_doc, "append from")
     capture_id = capture.capture_id or capture.id or source.stem
+
+    # Vault-as-truth delivered check, BEFORE any write (CRITICAL-1). The
+    # target itself says whether this capture already landed, so a retry is
+    # a no-op rather than a second copy.
+    if append_delivery_token(capture_id) in target_text:
+        # No operations-log line: nothing was written, and the oplog is the
+        # record of what happened to the VAULT (same rule op.skip follows).
+        return OperationResult(
+            ok=True,
+            operation="append",
+            source=str(source),
+            destination=str(target_path),
+            dry_run=ctx.dry_run,
+            details={
+                "capture_id": capture_id,
+                "archived": False,
+                # Visible, never silent (record-honesty half of the ruling):
+                # the caller keeps this OUT of the record's targets, because
+                # nothing was written this run.
+                "already_delivered": True,
+            },
+        )
+
     block = _render_template(
         template or DEFAULT_APPEND_TEMPLATE,
         {
@@ -1894,6 +1970,10 @@ def append_to_note(
     )
     if not block.endswith("\n"):
         block += "\n"
+    # SAME atomic write as the block: a marker written separately could
+    # survive a block that did not, or vice versa, and the vault would then
+    # lie about what it holds.
+    block += f"{append_marker(capture_id, route)}\n"
     base_body = target_doc.body
     if base_body and not base_body.endswith("\n"):
         base_body += "\n"

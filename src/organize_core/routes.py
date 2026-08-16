@@ -300,7 +300,13 @@ def apply_route(
         return move_to_destination(ctx, capture, match.destination, archive=False)
     if mode == "append":
         return append_to_note(
-            ctx, capture, match.destination, template=match.route.template
+            ctx,
+            capture,
+            match.destination,
+            template=match.route.template,
+            # Names the route in the delivered marker, so a human reading the
+            # target can tell WHICH route put the block there.
+            route=match.route_name,
         )
     if mode == "integrate":
         _refuse_integrate(match)

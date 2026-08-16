@@ -25,10 +25,16 @@ from typing import Any
 import pytest
 
 from conftest import QUIRK_FILES
+from organize_core import routes as routes_mod
 from organize_core.actions import ActionRecord, ActionRecorder
 from organize_core.config import Config, FileOpsConfig, RouteConfig, VaultConfig
 from organize_core.errors import RouteConfigError
-from organize_core.fileops import OperationContext, OperationLog
+from organize_core.fileops import (
+    OperationContext,
+    OperationLog,
+    append_to_note,
+    move_to_destination,
+)
 from organize_core.index import NoteRecord
 from organize_core.routes import apply_all, apply_route, merge_route_suggestions, resolve
 from organize_core.suggest import Suggestion
@@ -176,7 +182,10 @@ def test_a_single_append_route_files_the_body_and_archives_the_capture_once(
     assert [r.ok for r in results] == [True, True]
 
     after = target.read_text(encoding="utf-8")
-    assert after.endswith(f"## {TODAY} — from context-string\n\nleg day PR\n")
+    assert f"## {TODAY} — from context-string\n\nleg day PR\n" in after
+    assert after.rstrip("\n").endswith(
+        "<!-- organize:appended capture_id=context-string route=workout -->"
+    ), "the delivered marker rides in the same write as the block (CRITICAL-1)"
     # Frontmatter: only `last_edited_date` moved (11 §1 "target's frontmatter
     # untouched except last_edited_date").
     assert after.split("---\n")[1] == (
@@ -244,9 +253,9 @@ def test_a_route_template_overrides_the_default_append_heading(
 
     apply_all(ctx, capture_record(fixture_vault), resolve(["workout"], config))
 
-    assert (fixture_vault / IDEAS).read_text(encoding="utf-8").endswith(
-        f"- leg day PR ({TODAY})\n"
-    )
+    # `in`, not `endswith`: the delivered marker (CRITICAL-1) is written
+    # after the block, in the same atomic write.
+    assert f"- leg day PR ({TODAY})\n" in (fixture_vault / IDEAS).read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -282,8 +291,9 @@ def test_a_capture_matching_two_routes_lands_in_both_and_archives_exactly_once(
     ]
 
     for rel in (IDEAS, HEALTH_INDEX):
-        assert (fixture_vault / rel).read_text(encoding="utf-8").endswith(
+        assert (
             f"## {TODAY} — from context-string\n\nleg day PR\n"
+            in (fixture_vault / rel).read_text(encoding="utf-8")
         ), rel
 
     assert not source.exists()
@@ -370,7 +380,7 @@ def test_an_unwritable_second_destination_leaves_the_first_standing_and_no_archi
     assert "could not write" in (results[1].error or "")
 
     # The destination that worked STANDS.
-    assert (fixture_vault / IDEAS).read_text(encoding="utf-8").endswith("leg day PR\n")
+    assert "leg day PR\n" in (fixture_vault / IDEAS).read_text(encoding="utf-8")
     # The capture is NOT archived and is exactly where it was.
     assert source.is_file()
     assert not archived(fixture_vault).exists()
@@ -684,7 +694,7 @@ def test_a_mixed_batch_records_the_strongest_mutation_as_its_operation(
     results = apply_all(ctx, capture_record(fixture_vault), resolve(["workout"], config))
 
     assert all(r.ok for r in results)
-    assert (fixture_vault / IDEAS).read_text(encoding="utf-8").endswith("leg day PR\n")
+    assert "leg day PR\n" in (fixture_vault / IDEAS).read_text(encoding="utf-8")
     assert (fixture_vault / "resources/performing/context-string.md").is_file()
     assert archived(fixture_vault).is_file()
 
@@ -775,3 +785,228 @@ def test_learning_folds_every_destination_of_a_multi_target_record(
         str(fixture_vault / "areas/health"),
         str(fixture_vault / "projects/blog"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL-1: retry idempotency, vault-as-truth
+# ---------------------------------------------------------------------------
+
+
+def marker_count(path: Path, capture_id: str) -> int:
+    return path.read_text(encoding="utf-8").count(
+        f"organize:appended capture_id={capture_id} "
+    )
+
+
+def test_five_runs_of_a_failing_batch_deliver_exactly_once_and_then_heal(
+    fixture_vault: Path, state: Path
+) -> None:
+    """THE reproducer. A batch whose SECOND destination fails leaves the
+    capture unarchived, so the pipeline retries it next run — and every
+    retry used to append another copy to the destination that had already
+    succeeded. Five runs, five copies, silently.
+
+    Vault-as-truth (CRITICAL-1): the first destination's delivered marker
+    makes each retry a no-op there, so after five failing runs the body is
+    present exactly ONCE. Then the obstruction is removed and the sixth run
+    HEALS — the second destination lands and the capture is archived.
+    """
+    config = multi_config(fixture_vault)
+    ctx = make_ctx(fixture_vault, state, config)
+    source = fixture_vault / WORKOUT_CAPTURE
+    capture_id = capture_record(fixture_vault).capture_id or "context-string"
+    ideas = fixture_vault / IDEAS
+
+    os.chmod(fixture_vault / "areas/health", 0o555)
+    try:
+        for attempt in range(5):
+            results = apply_all(ctx, capture_record(fixture_vault), resolve(["workout"], config))
+            assert [r.ok for r in results] == [True, False], attempt
+            assert source.is_file(), "a failed batch never archives the capture"
+    finally:
+        os.chmod(fixture_vault / "areas/health", 0o755)
+
+    text = ideas.read_text(encoding="utf-8")
+    assert text.count("leg day PR") == 1, "EXACTLY ONCE after five attempts"
+    assert marker_count(ideas, capture_id) == 1
+
+    # …and the run after the obstruction clears completes the batch.
+    healed = apply_all(ctx, capture_record(fixture_vault), resolve(["workout"], config))
+    assert [r.ok for r in healed] == [True, True, True], "append, append, archive"
+    assert healed[0].details.get("already_delivered") is True, "the first was already there"
+    assert "leg day PR" in (fixture_vault / HEALTH_INDEX).read_text(encoding="utf-8")
+    assert ideas.read_text(encoding="utf-8").count("leg day PR") == 1
+    assert not source.exists() and archived(fixture_vault).exists()
+
+
+def test_a_batch_that_crashes_mid_way_resumes_without_duplicating(
+    fixture_vault: Path, state: Path
+) -> None:
+    """Crash-mid-batch: the first destination is written, then the process
+    dies before the second. The next run must finish the job, not redo it."""
+    config = multi_config(fixture_vault)
+    ctx = make_ctx(fixture_vault, state, config)
+    capture = capture_record(fixture_vault)
+    capture_id = capture.capture_id or "context-string"
+    ideas = fixture_vault / IDEAS
+
+    boom = RuntimeError("power cut between destinations")
+    real_append = routes_mod.append_to_note
+    calls = {"n": 0}
+
+    def crash_after_first(*args: Any, **kwargs: Any):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise boom
+        return real_append(*args, **kwargs)
+
+    routes_mod.append_to_note = crash_after_first  # type: ignore[assignment]
+    try:
+        with pytest.raises(RuntimeError):
+            apply_all(ctx, capture, resolve(["workout"], config))
+    finally:
+        routes_mod.append_to_note = real_append  # type: ignore[assignment]
+
+    assert marker_count(ideas, capture_id) == 1, "the first destination did land"
+    assert (fixture_vault / WORKOUT_CAPTURE).is_file(), "the crash left it unarchived"
+
+    results = apply_all(ctx, capture_record(fixture_vault), resolve(["workout"], config))
+
+    assert results[0].details.get("already_delivered") is True
+    assert marker_count(ideas, capture_id) == 1, "resumed, not redone"
+    assert "leg day PR" in (fixture_vault / HEALTH_INDEX).read_text(encoding="utf-8")
+    assert archived(fixture_vault).exists()
+
+
+def test_a_move_retry_skips_the_same_id_and_never_manufactures_a_numbered_copy(
+    fixture_vault: Path, state: Path
+) -> None:
+    """Move mode is id-based (CRITICAL-1): re-running a move whose
+    destination already holds THIS capture is a skip, not a ``_1`` copy."""
+    config = make_config(fixture_vault, route(["workout"], "resources/performing/", "move"))
+    ctx = make_ctx(fixture_vault, state, config)
+    dest_dir = fixture_vault / "resources/performing"
+    name = Path(WORKOUT_CAPTURE).name
+
+    # `archive=False` is how a route files a capture, so the source stays put
+    # — exactly the state a retried batch starts from.
+    first = move_to_destination(ctx, capture_record(fixture_vault), dest_dir, archive=False)
+    assert first.ok and (dest_dir / name).is_file()
+    assert (fixture_vault / WORKOUT_CAPTURE).is_file(), "the archive is deferred"
+
+    retried = move_to_destination(ctx, capture_record(fixture_vault), dest_dir, archive=False)
+
+    assert retried.ok is True
+    assert retried.details.get("already_delivered") is True
+    assert not (dest_dir / f"{Path(name).stem}_1.md").exists(), "no retry-manufactured _1"
+
+
+def test_a_different_note_with_the_same_filename_still_collides_into__1(
+    fixture_vault: Path, state: Path
+) -> None:
+    """FIRING CONTROL for the skip above: same filename, DIFFERENT id is a
+    genuine collision and must still get its own numbered file — the skip
+    must be keyed on identity, not on the name."""
+    config = make_config(fixture_vault, route(["workout"], "resources/performing/", "move"))
+    ctx = make_ctx(fixture_vault, state, config)
+    dest_dir = fixture_vault / "resources/performing"
+    name = Path(WORKOUT_CAPTURE).name
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    (dest_dir / name).write_text(
+        "---\nid: a-completely-different-note\n---\n\nnot the same capture\n",
+        encoding="utf-8",
+    )
+
+    result = move_to_destination(ctx, capture_record(fixture_vault), dest_dir, archive=False)
+
+    assert result.ok is True
+    assert result.details.get("already_delivered") is not True
+    assert (dest_dir / f"{Path(name).stem}_1.md").is_file(), "a real collision still gets _1"
+    assert "not the same capture" in (dest_dir / name).read_text(encoding="utf-8")
+
+
+def test_a_wikilink_to_the_capture_id_does_not_suppress_the_append(
+    fixture_vault: Path, state: Path
+) -> None:
+    """The delivered check must not match a BARE id. A target that merely
+    LINKS to the capture ([[<capture-id>]]) has not received it, and reading
+    that as "already delivered" is silent non-delivery — the failure nobody
+    ever notices."""
+    config = make_config(fixture_vault, route(["workout"], IDEAS, "append"))
+    ctx = make_ctx(fixture_vault, state, config)
+    capture_id = capture_record(fixture_vault).capture_id or "context-string"
+    ideas = fixture_vault / IDEAS
+    ideas.write_text(
+        ideas.read_text(encoding="utf-8") + f"\nsee also [[{capture_id}]]\n", encoding="utf-8"
+    )
+
+    results = apply_all(ctx, capture_record(fixture_vault), resolve(["workout"], config))
+
+    assert results[0].ok is True
+    assert results[0].details.get("already_delivered") is not True
+    assert "leg day PR" in ideas.read_text(encoding="utf-8"), "the append REALLY happened"
+    assert marker_count(ideas, capture_id) == 1
+
+
+def test_a_failed_final_archive_retries_alone_without_re_appending(
+    fixture_vault: Path, state: Path
+) -> None:
+    """Every destination succeeded and only the ARCHIVE failed. The retry
+    must archive alone — not append everything a second time first."""
+    config = make_config(fixture_vault, route(["workout"], IDEAS, "append"))
+    ctx = make_ctx(fixture_vault, state, config)
+    capture_id = capture_record(fixture_vault).capture_id or "context-string"
+    ideas = fixture_vault / IDEAS
+    archive_dir = fixture_vault / "archive/capture/raw_capture"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    os.chmod(archive_dir, 0o555)
+    try:
+        first = apply_all(ctx, capture_record(fixture_vault), resolve(["workout"], config))
+    finally:
+        os.chmod(archive_dir, 0o755)
+
+    assert first[0].ok is True, "the destination landed"
+    assert not first[-1].ok, "the archive did not"
+    assert (fixture_vault / WORKOUT_CAPTURE).is_file()
+    assert marker_count(ideas, capture_id) == 1
+
+    retried = apply_all(ctx, capture_record(fixture_vault), resolve(["workout"], config))
+
+    assert retried[0].details.get("already_delivered") is True, "the append is not redone"
+    assert marker_count(ideas, capture_id) == 1, "still exactly one copy"
+    assert archived(fixture_vault).exists(), "the archive completes on its own"
+    assert not (fixture_vault / WORKOUT_CAPTURE).exists()
+
+
+def test_a_capture_id_that_prefixes_another_is_not_read_as_delivered(
+    fixture_vault: Path, state: Path
+) -> None:
+    """`cap-1` must not mistake `cap-10`'s marker for its own.
+
+    The delivered token ends with a space for exactly this reason. Without
+    it the shorter id substring-matches the longer one's marker and that
+    capture is SILENTLY never appended — the worst failure shape here,
+    because non-delivery reports nothing anywhere.
+    """
+    config = make_config(fixture_vault, route(["workout"], IDEAS, "append"))
+    ctx = make_ctx(fixture_vault, state, config)
+    raw = fixture_vault / "capture/raw_capture"
+    for stem in ("cap-10", "cap-1"):
+        (raw / f"{stem}.md").write_text(
+            f"---\nid: {stem}\ntags:\n- workout\n---\nbody of {stem}\n", encoding="utf-8"
+        )
+    target = fixture_vault / IDEAS
+
+    # The LONGER id lands first, so its marker is what the shorter one meets.
+    longer = capture_record(fixture_vault, "capture/raw_capture/cap-10.md")
+    shorter = capture_record(fixture_vault, "capture/raw_capture/cap-1.md")
+    assert append_to_note(ctx, longer, target).ok is True
+    result = append_to_note(ctx, shorter, target)
+
+    assert result.details.get("already_delivered") is not True
+    text = target.read_text(encoding="utf-8")
+    assert "body of cap-1\n" in text and "body of cap-10\n" in text
+    assert marker_count(target, "cap-1") == 1
+    assert marker_count(target, "cap-10") == 1

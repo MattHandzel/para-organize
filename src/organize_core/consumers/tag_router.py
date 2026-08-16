@@ -392,6 +392,14 @@ class TagRouterConsumer(Consumer):
                 "operation": str(result.operation),
                 "destination": result.destination,
                 "error": result.error,
+                # CRITICAL-1 record honesty: a destination this run SKIPPED
+                # because the vault already held it is visible here, never
+                # silent. Without it a retried batch reports the same
+                # successes as the first attempt and nothing distinguishes
+                # "wrote it" from "found it already written".
+                "already_delivered": bool(
+                    (result.details or {}).get("already_delivered", False)
+                ),
             }
             for result in results
         ]

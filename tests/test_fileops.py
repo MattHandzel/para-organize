@@ -1009,6 +1009,10 @@ def test_append_uses_the_default_template_and_does_not_archive(
         "\n"
         "## Content\n"
         "An idea about improv warmups and creative flow.\n"
+        # The machine-owned delivered marker rides in the SAME write
+        # (CRITICAL-1): it is what makes a retry a no-op instead of a
+        # second copy.
+        "<!-- organize:appended capture_id=2026-06-10T21:33:05.379Z route= -->\n"
     )
     # target frontmatter untouched except last_edited_date
     assert text.startswith(
