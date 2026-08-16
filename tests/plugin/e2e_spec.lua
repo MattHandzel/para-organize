@@ -353,6 +353,69 @@ describe("E2E: a real organize session in headless Neovim (spec 09 §3)", functi
     end, 30000, "advance after archive")
   end)
 
+  it("skip emits exactly ONE ActionRecord and touches nothing else (op.skip)", function()
+    local session = start_session()
+    local source = session.captures[session.current].path
+    assert.is_truthy(session.session_id, "session.start must issue a session_id")
+    local top = session.suggestions[1]
+    local shown_count = #session.suggestions
+    assert.is_truthy(top and top.path, "the fixture capture should have suggestions")
+
+    -- Baselines BEFORE the skip.
+    local actions_dir = sb.state_dir .. "/actions"
+    local learning_path = sb.state_dir .. "/learning.json"
+    local oplog_path = sb.state_dir .. "/operations.log"
+    local learning_before = exists(learning_path) and read(learning_path) or false
+    local oplog_before = exists(oplog_path) and read(oplog_path) or false
+    local records_before = #read_dir_lines(actions_dir)
+
+    actions.skip()
+
+    -- Session-local effects are instant — skip never waits on the wire.
+    assert.are.equal(2, session.current)
+    assert.are.same({ source }, session.skipped)
+
+    -- The fire-and-forget op.skip lands ONE record with operation "skip"
+    -- (spec 12 §2: "these suggestions were on screen and the user chose
+    -- none of them" is the counterfactual a skip carries).
+    local skip_record
+    until_true(function()
+      for _, line in ipairs(read_dir_lines(actions_dir)) do
+        local ok, decoded = pcall(vim.json.decode, line)
+        if ok and type(decoded) == "table" and decoded.operation == "skip" then
+          skip_record = decoded
+          skip_record._line = line
+          return true
+        end
+      end
+      return false
+    end, 30000, "the op.skip ActionRecord")
+    assert.are.equal(records_before + 1, #read_dir_lines(actions_dir))
+
+    -- The client-sent decision context round-trips into the record.
+    local ctx = skip_record.context or {}
+    assert.are.equal(session.session_id, ctx.session_id)
+    assert.are.equal(shown_count, #(ctx.suggestions_shown or {}))
+    assert.are.equal(top.path, ctx.suggestions_shown[1].path)
+    assert.are.equal(1, ctx.suggestions_shown[1].rank)
+    assert.are.equal("number", type((ctx.durations_ms or {}).decision))
+    -- Nothing was chosen — chosen_rank is the wire's null, never a number.
+    assert.are_not.equal("number", type(ctx.chosen_rank))
+    assert.is_truthy(ctx.dry_run == false or ctx.dry_run == vim.NIL or ctx.dry_run == nil)
+    assert.is_truthy(skip_record._line:find(basename(source), 1, true), skip_record._line)
+
+    -- Skip changes NO file and is NOT a learning signal:
+    -- the capture stays put…
+    assert.is_true(exists(source))
+    -- …learning.json is byte-identical (doc 04 §3 gives a skip no weight)…
+    local learning_after = exists(learning_path) and read(learning_path) or false
+    assert.are.equal(learning_before, learning_after)
+    -- …and the operations log records vault mutations only — no skip line.
+    local oplog_after = exists(oplog_path) and read(oplog_path) or false
+    assert.are.equal(oplog_before, oplog_after)
+    -- (op.skip is deliberately NOT index-changing — nothing to wait on.)
+  end)
+
   it("`:ParaOrganize reindex` and `:ParaOrganize debug` talk to the real core", function()
     -- Both are session-free (spec 03 §2), so they must work before `start`.
     local seen = {}

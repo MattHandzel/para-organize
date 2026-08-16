@@ -468,12 +468,23 @@ function M.skip()
   end
   -- Context is captured BEFORE advance() — it reads THIS capture's
   -- suggestions and shown-at clock, which advance() resets.
-  local params = vim.tbl_extend(
-    "force",
-    { path = record.path },
-    M.decision_context({ chosen_rank = M.NONE })
-  )
-  rpc("op.skip", params, nil, { quiet = true })
+  --
+  -- `session_id` is REQUIRED by the core: op.skip records against a live
+  -- in-memory session, so with no id — injected unit state, or an id a core
+  -- restart invalidated — there is nothing to record against and no request
+  -- is sent, rather than one doomed to -32602.
+  local s = state()
+  if s and s.session_id then
+    -- The one op.* asymmetry: the capture param is `note`, NOT `path`.
+    -- `filters` is trimmed because op.skip's wire contract names only
+    -- session_id / suggestions_shown / durations_ms / dry_run.
+    local params = vim.tbl_extend(
+      "force",
+      { note = record.path },
+      M.decision_context({ chosen_rank = M.NONE, filters = M.NONE })
+    )
+    rpc("op.skip", params, nil, { quiet = true })
+  end
   mark("skipped", record.path)
   M.advance()
 end

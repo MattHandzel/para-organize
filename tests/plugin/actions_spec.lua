@@ -269,10 +269,21 @@ describe("para-organize.actions", function()
     it("has no file effect, counts, advances — and emits ONE op.skip signal", function()
       -- Architect's op.skip ruling (spec 12 §2: "a skip is signal too"): the
       -- one RPC skip may fire is `op.skip`, carrying the decision context.
+      state.session_id = "ses_skip"
       actions.skip()
       assert.are.same({ "op.skip" }, vim.tbl_filter(function(method)
         return method:match("^op%.") ~= nil
       end, client:methods()))
+      assert.are.same({ "/vault/capture/one.md" }, state.skipped)
+      assert.are.equal(2, state.current)
+    end)
+
+    it("sends NO op.skip when the session has no core-issued id", function()
+      -- `session_id` is REQUIRED on the wire; without one (injected state, or
+      -- an id a core restart invalidated) the request would only earn a
+      -- -32602, so none is sent — and the skip itself is unaffected.
+      actions.skip()
+      assert.are.equal(0, client:count("op.skip"))
       assert.are.same({ "/vault/capture/one.md" }, state.skipped)
       assert.are.equal(2, state.current)
     end)
@@ -282,7 +293,11 @@ describe("para-organize.actions", function()
       state.shown_at = (vim.uv or vim.loop).now()
       actions.skip()
       local call = client:first("op.skip")
-      assert.are.equal("/vault/capture/one.md", call.params.path)
+      -- The one op.* asymmetry: the capture travels as `note`, never `path`.
+      assert.are.equal("/vault/capture/one.md", call.params.note)
+      assert.is_nil(call.params.path)
+      -- Trimmed to the wire contract: no filters key on op.skip.
+      assert.is_nil(call.params.filters)
       assert.are.equal("ses_skip", call.params.session_id)
       -- Both rendered suggestions, with their on-screen ranks…
       assert.are.equal(2, #call.params.suggestions_shown)
@@ -296,6 +311,7 @@ describe("para-organize.actions", function()
 
     it("still advances instantly on an older core with no op.skip", function()
       setup_with({ ["op.skip"] = false })
+      state.session_id = "ses_skip"
       local seen = {}
       local original = vim.notify
       vim.notify = function(msg, level)
