@@ -24,6 +24,7 @@ from organize_core.config import (
     AutoOrganizeConfig,
     Config,
     FileOpsConfig,
+    IntegrateConfig,
     LearningConfig,
     LLMConfig,
     MetadataFieldConfig,
@@ -74,7 +75,12 @@ def test_example_demonstrates_every_pluralised_section() -> None:
         "areas/health/training-log.md",
         "projects/blog/ideas.md",
         "resources/performing/",
+        "projects/kms/design-notes.md",
     ]
+    # All three route modes are demonstrated, including `integrate` — the
+    # quality-sensitive doc 12 §1 path (previously absent from the example).
+    assert [r.mode for r in config.routes] == ["append", "append", "move", "integrate"]
+    assert [r.review for r in config.routes] == ["diff", "diff", "diff", "diff"]
     assert [c.name for c in config.consumers] == [
         "taskwarrior",
         "learn",
@@ -102,6 +108,7 @@ SECTION_FIELDS: list[tuple[str, type, tuple[str, ...]]] = [
     ("suggestions.learning", LearningConfig, ()),
     ("file_ops", FileOpsConfig, ()),
     ("llm", LLMConfig, ()),
+    ("integrate", IntegrateConfig, ()),
     ("auto_organize", AutoOrganizeConfig, ()),
     ("server", ServerConfig, ()),
 ]

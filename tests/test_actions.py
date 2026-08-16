@@ -146,6 +146,10 @@ def test_to_json_block_fields_match_the_spec_field_for_field() -> None:
         "before_hash",
         "after_hash",
         "diff",
+        # spec 12 §2 annotates `diff` with "full before-text stored when the
+        # file is new or small (<64 KB)"; that text is a field of its own,
+        # next to the diff it completes.
+        "before_text",
         "description",
     ]
     assert list(payload["context"]) == [
@@ -157,6 +161,7 @@ def test_to_json_block_fields_match_the_spec_field_for_field() -> None:
         "auto_tags_present",
         "vault_stats",
         "durations_ms",
+        "dry_run",
     ]
     assert list(payload["context"]["suggestions_shown"][0]) == ["path", "score", "rank", "reasons"]
     assert list(payload["llm"]) == [

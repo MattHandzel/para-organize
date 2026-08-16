@@ -11,9 +11,12 @@ or legacy JSON DEGRADES TO EMPTY DATA with a loud warning — it never
 crashes scoring (04 §3 ⚠). The live file is virgin (total_moves: 0); no
 migration (09 §5.3).
 
-One write path, two readers (spec 12 §2 "Uses" #2): in the integrated
-system, ``record_move`` is driven from the ActionRecord pipeline — the
-action log is the source of truth; learning.json is a derived view.
+One write path, two readers (spec 12 §2 "Uses" #2): ``record_move`` is
+driven from the ActionRecord pipeline — the action log is the source of
+truth, learning.json is a derived view. :func:`record_action` is that entry
+point, and the composition roots call it from the recorder's own success
+callback, never in parallel with it. ``record_move`` itself stays public and
+pure for tests and for callers that already hold a ``NoteRecord``.
 
 Implementation notes (deviations from the scaffold, disclosed to the
 integrator):
@@ -31,6 +34,13 @@ integrator):
   at record time, so a negative age can only come from clock skew or
   imported data; without the clamp ``recency_decay ** negative_days``
   *inflates* the learned signal without bound.
+* Spec 04 §6 says ``import(data)`` "returns boolean". :func:`import_data`
+  returns ``LearningData | None`` instead — a strict WIDENING of that
+  contract (``None`` is the falsey failure value, so every boolean-style
+  caller still works) which additionally hands back the parsed data, so the
+  caller does not have to re-parse the same dict to use it. Disclosed here
+  rather than silently diverging; ``clear()`` from the same §6 list is
+  implemented literally.
 * :func:`save_learning` writes atomically via a private helper rather than
   ``fileops.atomic_write`` — importing ``fileops`` here would add an edge
   the ARCHITECTURE dependency table does not grant ``learn`` (see
@@ -59,6 +69,11 @@ LEARNING_SCHEMA_VERSION = 1
 GENERIC_KEY = "generic"  # association key when all feature parts are empty
 
 SECONDS_PER_DAY = 24 * 60 * 60
+
+#: How often :func:`maybe_apply_decay` lets decay actually run — spec 04 §3
+#: step 6 says "at most once per session or per day", and a day is the
+#: cheaper of the two to define without holding session state.
+DECAY_INTERVAL_SECONDS = SECONDS_PER_DAY
 
 # Pattern-count normalizer and the weight the learned score gives the
 # pattern term (spec 04 §4: "count / 100, capped at 1.0" and "+ 0.5 *
@@ -341,6 +356,111 @@ def _record_patterns(
         pattern.last_seen = now
 
 
+# --- the ActionRecord pipeline is the write path (spec 12 §2 "Uses" #2) ----
+
+#: Operations that put a capture somewhere and therefore teach the ranker
+#: (spec 03 §6's outcome table, spec 04 §3 "every successful accept/move/merge").
+LEARNED_OPERATIONS: frozenset[str] = frozenset({"move", "merge", "append", "integrate"})
+
+#: ``targets[].role`` values that name where the capture LANDED, best first.
+_DESTINATION_ROLES: tuple[str, ...] = ("destination", "merge_target", "append_target")
+
+
+@dataclass(frozen=True)
+class ActionCapture:
+    """A :class:`CaptureLike` rebuilt from an ActionRecord's ``capture`` block.
+
+    The association key depends only on ``tags``/``sources``/``modalities``
+    (see :func:`create_association_key`), and all three come straight from
+    the record's ``frontmatter_before`` — so a key derived here is
+    byte-identical to one derived from the ``NoteRecord``, provided the same
+    scalar⇒list coercion is applied. That coercion is `index._string_list`'s
+    rule, reproduced by :func:`_frontmatter_list` rather than imported so
+    this module keeps its "pure over LearningData" shape.
+    """
+
+    tags: tuple[str, ...] = ()
+    sources: tuple[str, ...] = ()
+    modalities: tuple[str, ...] = ()
+    context: tuple[str, ...] = ()
+    title: str = ""
+
+
+def _frontmatter_list(fields: Any, key: str) -> tuple[str, ...]:
+    """``Frontmatter.get_list`` + ``index._string_list``, over a plain dict."""
+    if not isinstance(fields, dict) or key not in fields:
+        return ()
+    value = fields[key]
+    if value is None:
+        return ()
+    items = list(value) if isinstance(value, (list, tuple)) else [value]
+    out: list[str] = []
+    for item in items:
+        if item is None:
+            continue
+        text = (item if isinstance(item, str) else str(item)).strip()
+        if text:
+            out.append(text)
+    return tuple(out)
+
+
+def capture_from_action(record: Any) -> ActionCapture:
+    """The :class:`CaptureLike` view of an ActionRecord's capture block."""
+    capture = getattr(record, "capture", None)
+    fields = getattr(capture, "frontmatter_before", None)
+    return ActionCapture(
+        tags=_frontmatter_list(fields, "tags"),
+        sources=_frontmatter_list(fields, "sources"),
+        modalities=_frontmatter_list(fields, "modalities"),
+        context=_frontmatter_list(fields, "context"),
+        title=str((fields or {}).get("title") or "") if isinstance(fields, dict) else "",
+    )
+
+
+def destination_from_action(record: Any) -> str | None:
+    """The destination FOLDER an ActionRecord filed its capture into.
+
+    The folder, not the file: ``suggest`` scores folder candidates coming out
+    of ``VaultIndex.para_subfolders``, so an association keyed by a file path
+    would never read back (spec 03 §6 "record_move fires with the target's
+    folder").
+    """
+    targets = list(getattr(record, "targets", ()) or ())
+    for role in _DESTINATION_ROLES:
+        for target in targets:
+            if getattr(target, "role", None) != role:
+                continue
+            path = str(getattr(target, "path", "") or "")
+            if path:
+                return str(Path(path).parent)
+    return None
+
+
+def record_action(data: LearningData, record: Any, *, now: float) -> LearningData | None:
+    """Fold one ActionRecord into ``data``; ``None`` when it teaches nothing.
+
+    THE learning write path (spec 12 §2 "Uses" #2: "doc 04's learning layer
+    records through this same pipeline — one write path, two readers"). The
+    op handlers used to call ``record_move`` directly, in parallel with and
+    independent of ``ActionRecorder.record``, so the two stores could
+    disagree: a move whose ActionRecord was LOST still updated learning.json,
+    and a move fed in through ``organize record`` never reached the learner
+    at all.
+
+    Skipped: dry runs (a rehearsal is not a precedent — the same rule every
+    other corpus reader applies), operations outside
+    :data:`LEARNED_OPERATIONS`, and records with no destination target.
+    """
+    if bool(getattr(getattr(record, "context", None), "dry_run", False)):
+        return None
+    if str(getattr(record, "operation", "")) not in LEARNED_OPERATIONS:
+        return None
+    destination = destination_from_action(record)
+    if not destination:
+        return None
+    return record_move(data, capture_from_action(record), destination, now=now)
+
+
 # --- score readback (feeds suggest signal #3) ------------------------------
 
 
@@ -363,36 +483,48 @@ def get_association_score(
                 + 0.5 * pattern_score
 
     Unknown destination ⇒ exactly 0. Malformed entries ⇒ 0, never raise.
+
+    ``total_moves == 0`` short-circuits the WHOLE function, pattern term
+    included. §4's pseudocode adds the pattern term unconditionally, but
+    §7 bullet 6 is an acceptance gate and says "``total_moves==0`` ⇒
+    association score contributes **exactly 0 to every candidate**"; the
+    gate wins (CLAUDE.md: the acceptance lists are mandatory). This state
+    is reachable in production — ``load_learning`` degrades a corrupt
+    ``statistics`` block to ``Statistics()`` while keeping parsed patterns —
+    so without the short-circuit a vault with a damaged learning.json still
+    scored learned destinations.
     """
     score = 0.0
     total_moves = _as_int(getattr(data.statistics, "total_moves", 0))
 
     # 08 §A22: log(1 + 0) == 0 ⇒ division by zero ⇒ NaN poisoning every
     # candidate.  Guard the DENOMINATOR, not the result.
-    if total_moves > 0:
-        key = create_association_key(extract_features(capture))
-        association = data.associations.get(key)
-        stat = association.destinations.get(dest_path) if association is not None else None
-        if stat is not None:
-            try:
-                count = _as_int(stat.count)
-                if count > 0:
-                    denominator = math.log(1 + total_moves)
-                    frequency_score = math.log(1 + count) / denominator
-                    days = max(0.0, (now - _as_float(stat.last_used)) / SECONDS_PER_DAY)
-                    recency_multiplier = float(config.recency_decay) ** days
-                    frequency_multiplier = (
-                        float(config.frequency_boost)
-                        if count > _FREQUENCY_BOOST_THRESHOLD
-                        else 1.0
-                    )
-                    score = frequency_score * recency_multiplier * frequency_multiplier
-            except (ArithmeticError, TypeError, ValueError):
-                # "Malformed entries ⇒ 0, never raise" (spec 04 §4).
-                _log.warning(
-                    "learning: unusable association entry for %s — contributing 0", dest_path
+    if total_moves <= 0:
+        return 0.0
+
+    key = create_association_key(extract_features(capture))
+    association = data.associations.get(key)
+    stat = association.destinations.get(dest_path) if association is not None else None
+    if stat is not None:
+        try:
+            count = _as_int(stat.count)
+            if count > 0:
+                denominator = math.log(1 + total_moves)
+                frequency_score = math.log(1 + count) / denominator
+                days = max(0.0, (now - _as_float(stat.last_used)) / SECONDS_PER_DAY)
+                recency_multiplier = float(config.recency_decay) ** days
+                frequency_multiplier = (
+                    float(config.frequency_boost)
+                    if count > _FREQUENCY_BOOST_THRESHOLD
+                    else 1.0
                 )
-                score = 0.0
+                score = frequency_score * recency_multiplier * frequency_multiplier
+        except (ArithmeticError, TypeError, ValueError):
+            # "Malformed entries ⇒ 0, never raise" (spec 04 §4).
+            _log.warning(
+                "learning: unusable association entry for %s — contributing 0", dest_path
+            )
+            score = 0.0
 
     score += _PATTERN_TERM_WEIGHT * get_pattern_score(data, capture, dest_path)
     if not math.isfinite(score):  # belt-and-braces: never let NaN/inf escape
@@ -454,6 +586,35 @@ def apply_decay(data: LearningData, config: LearningConfig, *, now: float) -> Le
             del data.associations[key]
 
     return data
+
+
+def maybe_apply_decay(data: LearningData, config: LearningConfig, *, now: float) -> LearningData:
+    """Spec 04 §3 step 6: apply decay **at most once per session or per day**,
+    never per move. THE scheduling owner — every composition root calls this
+    (not :func:`apply_decay`) right before it records a move, so the 90-day
+    eviction and the ``max_history`` cap actually run in production instead of
+    being a function only the unit tests ever call (08 §A23).
+
+    The gate is ``statistics.last_updated``, which ``record_move`` sets to
+    ``now``; call this BEFORE recording or the gate never opens. A virgin
+    file has ``last_updated == 0`` and therefore decays on the first move,
+    which is a no-op on empty data.
+    """
+    last_updated = _as_float(getattr(data.statistics, "last_updated", 0.0))
+    if now - last_updated < DECAY_INTERVAL_SECONDS:
+        return data
+    return apply_decay(data, config, now=now)
+
+
+def clear() -> LearningData:
+    """Spec 04 §6 ``clear()`` — a fresh, empty :class:`LearningData`.
+
+    Returns new state rather than mutating in place because everything in
+    this module is pure over ``LearningData`` (spec 09 §3); the caller
+    persists with :func:`save_learning`, exactly as with
+    :func:`record_move` / :func:`apply_decay`.
+    """
+    return LearningData()
 
 
 # --- introspection API (spec 04 §6 parity) ---------------------------------
@@ -607,9 +768,18 @@ def _sorted_by_count(counts: dict[str, int]) -> list[tuple[str, int]]:
 
 
 def _as_int(value: Any) -> int:
+    """Coerce to int, degrading to 0 for anything unusable.
+
+    ``OverflowError`` is caught alongside ``TypeError``/``ValueError``
+    because ``json.loads`` happily produces ``float('inf')`` for a literal
+    ``Infinity`` or an out-of-range ``1e400``, and ``int(inf)`` raises
+    ``OverflowError`` — which used to escape ``load_learning`` as a raw
+    traceback, violating spec 04 §3 ⚠ ("loading malformed/legacy JSON must
+    degrade to empty data, never crash scoring").
+    """
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 

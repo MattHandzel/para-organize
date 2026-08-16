@@ -28,10 +28,13 @@ Two wiring facts worth stating once:
 
 - **Learning is persisted here.** ``learn.record_move`` is pure by design
   (ARCHITECTURE resolution #5) and ``fileops`` never touches learning.json —
-  so the caller persists. A successful, non-dry-run ``move`` is the one
-  filing decision the CLI records, keyed by the SAME destination string that
-  ``suggest`` scores against (``VaultIndex.para_subfolders`` output), or the
-  association would never read back.
+  so the caller persists. Every successful, non-dry-run ``move`` AND
+  ``merge`` is recorded (spec 03 §6's outcome table; 04 §3 "on every
+  successful accept/move/merge"), keyed by the SAME destination string that
+  ``suggest`` scores against (``VaultIndex.para_subfolders`` output) — the
+  destination folder for a move, the TARGET'S FOLDER for a merge — or the
+  association would never read back. ``maybe_apply_decay`` runs on the same
+  path, once a day.
 - **Dry-run is not silent.** ``OperationContext.dry_run`` still writes an
   operations.log ``[DRY-RUN]`` line and an ActionRecord flagged
   ``context.filters.dry_run`` (fileops' decision); the vault is untouched
@@ -50,6 +53,7 @@ import json
 import logging
 import re
 import sys
+import threading
 import time
 import traceback
 from collections.abc import Sequence
@@ -60,28 +64,36 @@ from typing import Any
 from organize_core import __version__
 from organize_core import learn as learn_mod
 from organize_core import routes as routes_mod
-from organize_core.actions import ActionRecord, ActionRecorder, ActionSchemaError, new_action_id
+from organize_core.actions import (
+    ActionRecord,
+    ActionRecorder,
+    ActionSchemaError,
+    SuggestionShown,
+    new_action_id,
+)
 from organize_core.config import (
     Config,
     HealthIssue,
     MetadataFieldConfig,
     check_vault,
+    coerce_metadata_value,
     example_config_toml,
     load_config,
+    metadata_fields_by_key,
 )
 from organize_core.consumers import get_consumer_types
 from organize_core.errors import ConfigError, OperationError, OrganizeError, VaultError
 from organize_core.fileops import (
-    DRY_RUN_FILTER_KEY,
     OperationContext,
     OperationLog,
     OperationResult,
     archive_capture,
+    find_orphaned_temp_files,
     merge_into_note,
     move_to_destination,
     update_frontmatter,
 )
-from organize_core.frontmatter import load_file, normalize_tag
+from organize_core.frontmatter import load_file
 from organize_core.index import NoteRecord, QueryCriteria, VaultIndex
 from organize_core.paths import CorePaths, expand
 from organize_core.session import start_session
@@ -99,6 +111,7 @@ SUBCOMMANDS: tuple[str, ...] = (
     "merge",
     "archive",
     "set-meta",
+    "meta-fields",
     "session",
     "routes",
     "record",
@@ -113,8 +126,33 @@ _FILTER_TOKEN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
 # Frontmatter keys are not identifiers (`no-ai`, `created_date`, Obsidian
 # properties with spaces) — set-meta takes anything up to the first '='.
 _CHANGE_TOKEN = re.compile(r"^([^=]+)=(.*)$", re.DOTALL)
-_TRUE_WORDS = {"true", "yes", "on", "1"}
-_FALSE_WORDS = {"false", "no", "off", "0"}
+
+
+def _add_decision_context_flags(parser: argparse.ArgumentParser) -> None:
+    """Spec 12 §2's ``context`` block, for a scripted/agent caller.
+
+    "The counterfactual is stored, not just the choice" — an agent that ranks
+    destinations and then files one knows which rank it took, and without a
+    way to say so every record it produced stored a null ``chosen_rank``.
+    The RPC door takes the same three as op params.
+    """
+    parser.add_argument(
+        "--chosen-rank",
+        type=int,
+        metavar="N",
+        help="which suggestion this action took; 1 means the engine was right (spec 12 §2)",
+    )
+    parser.add_argument(
+        "--suggestions-json",
+        metavar="JSON",
+        help='the ranked list that was shown, as `organize suggest --json` emits it '
+        "(a JSON array of {path, score, rank, reasons} or that command's whole payload)",
+    )
+    parser.add_argument(
+        "--durations-json",
+        metavar="JSON",
+        help='e.g. \'{"decision": 8400, "operation": 120}\' — milliseconds (spec 12 §2)',
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -159,10 +197,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("move", help="move a capture to a destination folder (spec 05 §2)")
     p.add_argument("note")
     p.add_argument("destination", help="folder path, vault-relative or absolute")
+    _add_decision_context_flags(p)
 
     p = sub.add_parser("merge", help="merge a capture into an existing note (spec 05 §4)")
     p.add_argument("note")
     p.add_argument("target", help="target note path")
+    _add_decision_context_flags(p)
 
     p = sub.add_parser("archive", help="archive a capture now (spec 05 §3)")
     p.add_argument("note")
@@ -170,6 +210,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("set-meta", help="set frontmatter fields (spec 05 §5, 07)")
     p.add_argument("note")
     p.add_argument("changes", nargs="+", metavar="KEY=VALUE")
+
+    p = sub.add_parser(
+        "meta-fields",
+        help="the configured metadata fields + their completion values (spec 07)",
+    )
+    p.add_argument(
+        "--key",
+        metavar="KEY",
+        help="print only the distinct existing values of one frontmatter key",
+    )
+    p.add_argument("--json", action="store_true", help="machine-readable output")
 
     p = sub.add_parser("session", help="organizing sessions (spec 03 §2)")
     ssub = p.add_subparsers(dest="session_command", metavar="ACTION")
@@ -321,10 +372,65 @@ def _op_context(
         dry_run=bool(args.dry_run),
         actor=actor,
         session_id=session_id,
+        **_decision_context(args),
+        # spec 12 §2 `targets[].description`. fileops cannot import routes
+        # (routes already imports fileops), so the composition root supplies
+        # the lookup; without it every record stored `description: null`
+        # even for folders that demonstrably have one.
+        describe=lambda folder: routes_mod.get_description(folder, index, config),
+        on_record=lambda record: _learn_from_action(paths, config, record),
     )
 
 
-def _vault_path(config: Config, raw: str) -> Path:
+def _decision_context(args: argparse.Namespace) -> dict[str, Any]:
+    """Parse the spec 12 §2 decision-context flags into OperationContext kwargs."""
+    out: dict[str, Any] = {}
+    rank = getattr(args, "chosen_rank", None)
+    if rank is not None:
+        out["chosen_rank"] = int(rank)
+
+    raw_suggestions = getattr(args, "suggestions_json", None)
+    if raw_suggestions:
+        payload = _decision_json(raw_suggestions, "--suggestions-json")
+        # Accept `organize suggest --json` verbatim, or just its list.
+        items = payload.get("suggestions") if isinstance(payload, dict) else payload
+        if not isinstance(items, list):
+            raise ConfigError(
+                "--suggestions-json must be a JSON array of suggestions",
+                hint="pass `organize suggest <note> --json` output, or just its "
+                '"suggestions" array (spec 12 §2)',
+            )
+        shown: list[SuggestionShown] = []
+        for position, item in enumerate(items, start=1):
+            if not isinstance(item, dict):
+                raise ConfigError(f"--suggestions-json entry {position} is not an object")
+            shown.append(
+                SuggestionShown(
+                    path=str(item.get("path") or item.get("relative_path") or ""),
+                    score=float(item.get("score") or 0.0),
+                    rank=int(item.get("rank") or position),
+                    reasons=tuple(str(r) for r in (item.get("reasons") or ())),
+                )
+            )
+        out["suggestions_shown"] = tuple(shown)
+
+    raw_durations = getattr(args, "durations_json", None)
+    if raw_durations:
+        payload = _decision_json(raw_durations, "--durations-json")
+        if not isinstance(payload, dict):
+            raise ConfigError("--durations-json must be a JSON object of phase -> milliseconds")
+        out["durations_ms"] = {str(k): int(v) for k, v in payload.items()}
+    return out
+
+
+def _decision_json(raw: str, flag: str) -> Any:
+    try:
+        return json.loads(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{flag} is not valid JSON: {exc}", hint="see spec 12 §2") from exc
+
+
+def _vault_path(config: Config, raw: str, *, what: str = "path") -> Path:
     """Vault-relative or absolute (spec 03 §2 ``move <path>``); ``~``/``$VAR``
     go through paths.expand so this module never reads the environment.
 
@@ -334,34 +440,58 @@ def _vault_path(config: Config, raw: str) -> Path:
     literal vault-relative hit ALWAYS wins over env expansion; expansion is
     the fallback, not the first guess. Without this order, every capture
     whose name contains ``$`` resolves against the caller's cwd and reports
-    "note not found" for a file that is sitting in the vault.
+    "note not found" for a file that is sitting in the vault. That rule now
+    covers ``~`` as well — it used to short-circuit to ``expanduser`` before
+    the literal probe, so a note named ``~inbox.md`` was addressable through
+    the RPC door and unreachable from the CLI.
+
+    The result is CONTAINED: a path that resolves outside the vault root is
+    a ``VaultError`` here, matching ``server._vault_path``. Without it
+    ``organize move <note> ../OUTSIDE`` wrote note content outside the vault
+    and exited 0 while the RPC door refused the identical destination
+    (ARCHITECTURE ruling #19 — the two doors must agree). ``fileops``
+    re-checks as the backstop; this layer exists to name the mistake in the
+    user's own words.
     """
     text = str(raw)
-    if text.startswith("~"):
-        return expand(text).resolve()
+    root = Path(config.vault.root).resolve()
+
+    def contained(candidate: Path) -> Path:
+        resolved = candidate.resolve()
+        if resolved != root and root not in resolved.parents:
+            raise VaultError(
+                f"{resolved} is outside the vault {root}",
+                hint=f"the {what} must be inside the vault; pass a vault-relative path "
+                "or an absolute path inside the vault root",
+            )
+        return resolved
 
     literal = Path(text)
     if literal.is_absolute():
-        return literal.resolve()
+        return contained(literal)
 
-    in_vault = (config.vault.root / literal).resolve()
+    in_vault = (root / literal).resolve()
     if in_vault.exists():
-        return in_vault
+        return contained(in_vault)
+    if text.startswith("~"):
+        expanded = expand(text)
+        if expanded.exists():
+            return contained(expanded)
     if "$" in text:
         # Vault-relative WITH variables first (``$PROJECT/notes.md``), then
         # the bare expansion (``$HOME/inbox/x.md`` expands to an absolute
         # path outside the vault). Both go through paths.expand, so this
         # module still never reads the environment itself.
-        in_vault_expanded = expand(config.vault.root / literal)
+        in_vault_expanded = expand(root / literal)
         if in_vault_expanded.exists():
-            return in_vault_expanded
+            return contained(in_vault_expanded)
         expanded = expand(text)
         if expanded.exists():
-            return expanded.resolve()
+            return contained(expanded)
     # Nothing exists yet (a new destination folder, or a genuine typo): the
     # vault-relative reading is the documented meaning, and naming it in the
     # error is what makes the failure actionable.
-    return in_vault
+    return contained(in_vault)
 
 
 def _rel(path: Path | str, config: Config) -> str:
@@ -373,8 +503,18 @@ def _rel(path: Path | str, config: Config) -> str:
 
 def _record_for(index: VaultIndex, config: Config, raw: str) -> NoteRecord:
     """The note argument every operation takes, resolved to the index record
-    the fileops API requires (05 §2 / 08 §A14 — never a bare string)."""
-    path = _vault_path(config, raw)
+    the fileops API requires (05 §2 / 08 §A14 — never a bare string).
+
+    ``_vault_path`` has already refused anything outside the vault with the
+    "outside the vault <root>" error, so the "inside the vault but not
+    indexable" branch below can only be reached by a path that really is
+    inside it. It used to catch both, because ``index.update_file`` returns
+    ``None`` for "outside the root" AND for "ignored/too large" — so an
+    out-of-vault note was reported as an ignore-pattern problem and the hint
+    sent the user to two config keys that had nothing to do with it
+    (spec 09 §1.5: an error must be actionable).
+    """
+    path = _vault_path(config, raw, what="note")
     if not path.is_file():
         raise VaultError(
             f"note not found: {path}",
@@ -457,12 +597,30 @@ def _print_result(result: OperationResult, config: Config) -> None:
         _emit("  nothing was written")
 
 
-def _record_learning(paths: CorePaths, capture: NoteRecord, destination: Path) -> None:
-    """Persist the filing decision (spec 04 §3). ``record_move`` is pure —
-    the caller owns the write (ARCHITECTURE resolution #5)."""
+def _learn_from_action(paths: CorePaths, config: Config, record: ActionRecord) -> None:
+    """Fold one WRITTEN ActionRecord into learning.json (spec 12 §2 "Uses" #2).
+
+    Wired to ``OperationContext.on_record``, so it fires exactly once per
+    persisted record and never in parallel with the recorder: learning.json
+    is a view derived from the action log, not a second independent store
+    that can disagree with it. It fires for a `move` AND for a `merge`
+    (spec 03 §6's outcome table; 04 §3 "on every successful accept/move/
+    merge") — the CLI used to record only moves while the RPC door recorded
+    both, so the two clients silently disagreed about the same user action.
+
+    Decay runs here too, before recording, through
+    :func:`learn.maybe_apply_decay`: ``apply_decay`` was implemented,
+    unit-tested and then never called from any production path, so the
+    90-day eviction and the ``max_history`` cap (04 §3 step 6, §5) never ran
+    (08 §A23 traded "decays too often" for "never decays").
+    """
+    now = time.time()
     data = learn_mod.load_learning(paths.learning_path)
-    data = learn_mod.record_move(data, capture, str(destination), now=time.time())
-    learn_mod.save_learning(paths.learning_path, data)
+    data = learn_mod.maybe_apply_decay(data, config.suggestions.learning, now=now)
+    updated = learn_mod.record_action(data, record, now=now)
+    if updated is None:
+        return
+    learn_mod.save_learning(paths.learning_path, updated)
 
 
 # --- handlers (spec 10 §1) -------------------------------------------------
@@ -608,7 +766,6 @@ def cmd_move(args: argparse.Namespace) -> int:
     _print_result(result, config)
     if not ctx.dry_run:
         index.flush()
-        _record_learning(paths, record, destination)
     return 0
 
 
@@ -643,58 +800,19 @@ def cmd_archive(args: argparse.Namespace) -> int:
 
 
 def _metadata_fields(config: Config) -> dict[str, MetadataFieldConfig]:
-    return {field.key: field for field in config.metadata_fields}
+    """Kept as a thin alias so this module's readers see one name; the rule
+    itself is ``config.metadata_fields_by_key`` (spec 10 §3 — core config, so
+    both doors read the SAME definitions)."""
+    return metadata_fields_by_key(config)
 
 
 def _coerce_meta_value(field: MetadataFieldConfig | None, key: str, raw: str) -> Any:
     """Coerce one ``KEY=VALUE`` argument per its ``metadata_fields`` type
-    (spec 07). An empty value REMOVES the field (update_frontmatter's
-    ``None`` contract). Unconfigured keys are plain strings — frontmatter is
-    arbitrary by design (07 "Downstream note")."""
-    if raw == "":
-        return None
-    if field is None:
-        return raw
-
-    if field.type == "list":
-        values = [part.strip() for part in raw.split(",") if part.strip()]
-        if field.normalize == "kebab":
-            values = [normalize_tag(value) for value in values]
-        deduped: list[str] = []
-        for value in values:
-            if value not in deduped:
-                deduped.append(value)
-        return deduped
-    if field.type == "enum":
-        if raw not in field.values:
-            raise ConfigError(
-                f"{key}={raw!r} is not one of the configured values",
-                hint="allowed values: " + ", ".join(field.values),
-            )
-        return raw
-    if field.type == "boolean":
-        lowered = raw.strip().lower()
-        if lowered in _TRUE_WORDS:
-            return True
-        if lowered in _FALSE_WORDS:
-            return False
-        raise ConfigError(
-            f"{key}={raw!r} is not a boolean",
-            hint="use one of: " + ", ".join(sorted(_TRUE_WORDS | _FALSE_WORDS)),
-        )
-    if field.type == "number":
-        try:
-            return int(raw)
-        except ValueError:
-            pass
-        try:
-            return float(raw)
-        except ValueError:
-            raise ConfigError(
-                f"{key}={raw!r} is not a number",
-                hint=f"[[metadata_fields]] key = {key!r} declares type = \"number\"",
-            ) from None
-    return raw
+    (spec 07). Delegates to :func:`config.coerce_metadata_value`, which the
+    RPC ``meta.set`` handler calls too — the coercion used to live here and
+    only here, so the two doors disagreed about what ``tags=foo, Bar Baz``
+    means and the nvim client wrote malformed frontmatter."""
+    return coerce_metadata_value(field, key, raw)
 
 
 def cmd_set_meta(args: argparse.Namespace) -> int:
@@ -741,14 +859,13 @@ def cmd_set_meta(args: argparse.Namespace) -> int:
         changes[key] = value
 
     ctx = _op_context(args, paths, config, index)
-    # A list field with append = false must REPLACE; update_frontmatter merges
-    # `tags` by contract (05 §5), so clear it first rather than fight the rule.
-    for key in replaced_lists:
-        if key == "tags":
-            clear = update_frontmatter(ctx, path, {key: None})
-            if not clear.ok:
-                _print_result(clear, config)
-    result = update_frontmatter(ctx, path, changes)
+    # A list field declaring `append = false` (spec 07) must REPLACE.
+    # `update_frontmatter` merges `tags` by contract (05 §5), so name it in
+    # `replace_keys` — this used to be a clear-then-set pair, which wrote the
+    # file twice and recorded TWO actions for one logical edit (12 §2).
+    result = update_frontmatter(
+        ctx, path, changes, replace_keys=frozenset(replaced_lists)
+    )
     _print_result(result, config)
     for key, value in sorted(changes.items()):
         _emit(f"  {key}: {'(removed)' if value is None else value}")
@@ -756,6 +873,70 @@ def cmd_set_meta(args: argparse.Namespace) -> int:
         _emit(f"  note: {key!r} is not a configured metadata field (written as a plain frontmatter value)")
     if not ctx.dry_run:
         index.flush()
+    return 0
+
+
+def _completions_for(
+    entry: MetadataFieldConfig, index: VaultIndex
+) -> list[str]:
+    """Resolve one field's completion source (spec 07 ``complete``)."""
+    if entry.complete == "existing":
+        return list(index.values_of(entry.key))
+    if isinstance(entry.complete, list):
+        return [str(value) for value in entry.complete]
+    if entry.type == "enum":
+        return list(entry.values)
+    return []
+
+
+def cmd_meta_fields(args: argparse.Namespace) -> int:
+    """``organize meta-fields`` — the doc-07 field definitions and their
+    completion values (spec 07, spec 10 §3).
+
+    Spec 07 calls completion "what makes tag entry fast and consistent" and
+    spec 10 §3 puts ``metadata_fields`` in CORE config so the UI reads it
+    from the core rather than re-declaring it. Neither the CLI nor the RPC
+    surface exposed the definitions or ``VaultIndex.values_of``, so a thin
+    client could not obtain them and the feature was unreachable. The RPC
+    twin is ``meta.fields`` / ``meta.values``.
+    """
+    paths, config = _load(args)
+    index = _open_index(paths, config)
+
+    if args.key:
+        values = list(index.values_of(args.key))
+        if args.json:
+            _json_out({"key": args.key, "values": values})
+            return 0
+        for value in values:
+            _emit(value)
+        return 0
+
+    fields = [
+        {
+            "key": entry.key,
+            "type": entry.type,
+            "keymap": entry.keymap,
+            "prompt": entry.prompt,
+            "append": entry.append,
+            "complete": entry.complete,
+            "values": list(entry.values),
+            "normalize": entry.normalize,
+            "completions": _completions_for(entry, index),
+        }
+        for entry in config.metadata_fields
+    ]
+    if args.json:
+        _json_out({"fields": fields})
+        return 0
+    if not fields:
+        _emit("no metadata fields configured")
+        return 0
+    for entry in fields:
+        _emit(
+            f"{entry['key']}\t{entry['type']}\t{entry['keymap']}\t"
+            f"{','.join(entry['completions'])}"
+        )
     return 0
 
 
@@ -891,6 +1072,33 @@ def cmd_routes(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ndjson(raw: str, whole_buffer_error: ValueError) -> list[Any]:
+    """Parse newline-delimited JSON, one object per non-blank line.
+
+    Raised with the ORIGINAL whole-buffer error when a line fails, because
+    "your stdin is not one JSON document" is the more useful message when the
+    input was never meant to be NDJSON in the first place.
+    """
+    items: list[Any] = []
+    for number, line in enumerate(raw.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            items.append(json.loads(line))
+        except ValueError as exc:
+            raise ActionSchemaError(
+                f"stdin is not valid JSON: {whole_buffer_error}; "
+                f"read as newline-delimited JSON, line {number} also failed: {exc}",
+                hint="expected one ActionRecord object, a JSON array, or newline-delimited objects",
+            ) from exc
+    if not items:
+        raise ActionSchemaError(
+            f"stdin is not valid JSON: {whole_buffer_error}",
+            hint="expected one ActionRecord object, a JSON array, or newline-delimited objects",
+        )
+    return items
+
+
 def cmd_record(args: argparse.Namespace) -> int:
     paths, config = _load(args)
     raw = sys.stdin.read()
@@ -902,12 +1110,13 @@ def cmd_record(args: argparse.Namespace) -> int:
     try:
         payload = json.loads(raw)
     except ValueError as exc:
-        raise ActionSchemaError(
-            f"stdin is not valid JSON: {exc}",
-            hint="expected one ActionRecord object, a JSON array, or newline-delimited objects",
-        ) from exc
-
-    items = payload if isinstance(payload, list) else [payload]
+        # NDJSON fallback. `organize actions export` emits exactly one JSON
+        # object per line, so `export | record` — the natural corpus-transfer
+        # path — was the one format the parser rejected, while its own hint
+        # advertised "newline-delimited objects".
+        items = _ndjson(raw, exc)
+    else:
+        items = payload if isinstance(payload, list) else [payload]
     recorder = ActionRecorder(paths.actions_dir)
     written = 0
     for item in items:
@@ -930,6 +1139,10 @@ def cmd_record(args: argparse.Namespace) -> int:
                 f"could not append action {record.id} to {paths.actions_dir}",
                 hint="check that the state directory exists and is writable (spec 12 §2)",
             )
+        # Same consumer the op path uses: an externally supplied move record
+        # is a filing decision too, and it used to reach the corpus without
+        # ever reaching the learner (spec 12 §2 "Uses" #2).
+        _learn_from_action(paths, config, record)
         _emit(f"{record.id}")
         written += 1
     if written and not args.dry_run:
@@ -937,38 +1150,22 @@ def cmd_record(args: argparse.Namespace) -> int:
     return 0
 
 
-class _CorpusView(ActionRecorder):
-    """An :class:`ActionRecorder` whose reads hide simulated actions.
-
-    ``--dry-run`` operations DO append an ActionRecord (fileops' decision:
-    spec 09 §5.6 wants the intended action logged so it can be diffed against
-    expectations before writes are enabled). But the action corpus is the
-    training substrate for docs 12/13 — "when Matt captured X he appended it
-    to Y" — and an action that never happened is not evidence of anything.
-    So every READ path filters them out by default.
-
-    Overriding ``query`` rather than re-deriving the aggregates keeps ONE
-    implementation of the stats/export logic (it lives in actions.py, which
-    calls ``self.query``); the CLI only narrows the stream.
-    """
-
-    def query(self, **filters: Any) -> Any:
-        for record in super().query(**filters):
-            if record.context.filters.get(DRY_RUN_FILTER_KEY):
-                continue
-            yield record
-
-
 def cmd_actions(args: argparse.Namespace) -> int:
+    """``organize actions export|stats``.
+
+    Dry-run records are hidden by default, but that exclusion is NOT
+    implemented here: ``ActionRecorder.query``/``stats``/``export`` default to
+    ``include_dry_run=False``, so every corpus reader (this CLI, the server,
+    the doc-13 retrieval still to come) inherits the rule instead of each
+    re-deriving it. This used to be a local ``_CorpusView`` subclass; the
+    integrator moved it into the recorder. ``--include-dry-run`` opts back in
+    for debugging a rehearsal — never for learning from one.
+    """
     if args.actions_command is None:
         _warn("usage: organize actions {export|stats}")
         return 2
     paths, config = _load(args)
-    recorder = (
-        ActionRecorder(paths.actions_dir)
-        if args.include_dry_run
-        else _CorpusView(paths.actions_dir)
-    )
+    recorder = ActionRecorder(paths.actions_dir)
 
     if args.actions_command == "export":
         out = expand(args.out) if args.out else None
@@ -978,12 +1175,13 @@ def cmd_actions(args: argparse.Namespace) -> int:
             actor=args.actor,
             since=args.since,
             until=args.until,
+            include_dry_run=args.include_dry_run,
         )
         if out is not None:
             _emit(f"exported {count} record(s) to {out}")
         return 0
 
-    stats = recorder.stats()
+    stats = recorder.stats(include_dry_run=args.include_dry_run)
     if args.json:
         _json_out(stats)
         return 0
@@ -1044,6 +1242,17 @@ def _state_issues(paths: CorePaths, config: Config) -> list[HealthIssue]:
                 severity="warning",
                 message=f"no index snapshot at {paths.index_path}",
                 hint="run `organize index --full`",
+            )
+        )
+    orphans = find_orphaned_temp_files(config.vault.root, now=time.time())
+    if orphans:
+        issues.append(
+            HealthIssue(
+                severity="warning",
+                message=f"{len(orphans)} abandoned atomic-write temp file(s) in the vault "
+                f"(e.g. {orphans[0]})",
+                hint="a killed/power-lost write left them behind; they are safe to delete "
+                "and they replicate over Syncthing (spec 05 §1.3)",
             )
         )
     backup_dir = config.vault.root / config.file_ops.backup_dir
@@ -1134,7 +1343,18 @@ def cmd_serve(args: argparse.Namespace) -> int:
     socket_path = expand(args.socket) if args.socket else (config.server.socket_path or paths.socket_path)
     idle = args.idle_timeout if args.idle_timeout is not None else config.server.idle_timeout_seconds
     server = OrganizeServer(config, paths, socket_path=Path(socket_path), idle_timeout_seconds=idle)
-    _warn(f"organize serve: listening on {socket_path}")
+
+    # Announce only once the socket is actually bound. Printing "listening on
+    # X" before serve_forever() got there made a refused start (unwritable
+    # path, another instance holding the lock) claim success on stderr and
+    # then contradict itself — the ServerError/AlreadyRunning below is the
+    # truth, so the banner has to wait for `ready`.
+    def announce() -> None:
+        if server.ready.wait(timeout=30.0):
+            _warn(f"organize serve: listening on {server.socket_path}")
+
+    banner = threading.Thread(target=announce, name="serve-banner", daemon=True)
+    banner.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1150,6 +1370,7 @@ _HANDLERS = {
     "merge": cmd_merge,
     "archive": cmd_archive,
     "set-meta": cmd_set_meta,
+    "meta-fields": cmd_meta_fields,
     "session": cmd_session,
     "routes": cmd_routes,
     "record": cmd_record,

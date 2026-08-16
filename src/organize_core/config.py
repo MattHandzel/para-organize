@@ -235,6 +235,15 @@ def default_metadata_fields() -> list[MetadataFieldConfig]:
 
 RouteMode = Literal["append", "move", "integrate"]
 
+#: The three doc-12 §1 edit modes. ``RouteMode`` is the same alphabet because a
+#: route's ``mode`` IS the per-route default edit mode (12 §1 "per-route default
+#: via ``mode`` in doc 11").
+EditMode = Literal["manual", "append", "integrate"]
+
+#: The doc-12 §1 review gate. ``"diff"`` shows the proposed result and waits for
+#: Matt; ``"auto"`` applies without asking and is a deliberate per-route opt-in.
+ReviewGate = Literal["diff", "auto"]
+
 
 @dataclass(frozen=True)
 class RouteConfig:
@@ -243,7 +252,14 @@ class RouteConfig:
     file destinations get ``append``/``integrate`` — violations are a
     RouteConfigError at load time. ``description`` is Matt's natural
     language and is load-bearing (UI display, auto-tagger and doc-13 input).
-    ``auto=True`` opts the route into unattended handling (11 §1)."""
+    ``auto=True`` opts the route into unattended handling (11 §1).
+
+    ``review`` is the doc-12 §1 review gate for this route's ``integrate``
+    results: ``"diff"`` (the default) shows Matt the unified diff and waits;
+    ``"auto"`` applies without asking. Spec 12 §1 makes ``"auto"`` an explicit
+    PER-ROUTE opt-in, so it lives here rather than only in ``[integrate]``. It
+    is meaningful only for ``mode = "integrate"``; validation says so rather
+    than silently ignoring it (03 §1 every-key-honored)."""
 
     tags: list[str]
     destination: str  # relative to vault root; trailing "/" ⇒ folder
@@ -251,6 +267,7 @@ class RouteConfig:
     description: str = ""
     template: str | None = None  # append-heading template override (11 §1)
     auto: bool = False
+    review: ReviewGate = "diff"
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +313,38 @@ class LLMConfig:
     integrate_backend: LLMBackendName = "claude-cli"
     timeout_seconds: float = 60.0
     retries: int = 2  # bounded retry with backoff for HTTP calls (06 §6)
+
+
+# ---------------------------------------------------------------------------
+# [integrate] (spec 12 §1)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class IntegrateConfig:
+    """Edit-mode and integrate-safety settings (spec 12 §1).
+
+    - ``default_mode`` is the GLOBAL default edit mode. Spec 12 §1: "per-route
+      default via ``mode`` in doc 11; global default ``manual``" — so a route's
+      ``mode`` overrides this, and this overrides nothing but the bare UI
+      default.
+    - ``review`` is the global review-gate default; a route's ``review``
+      overrides it (12 §1 makes ``"auto"`` a per-route opt-in).
+    - ``max_deleted_lines`` is the configurable deletion threshold of the
+      integrate hard-reject: "hard-rejects any result that deletes existing
+      non-whitespace lines beyond a configurable threshold (default: zero
+      deletions allowed outside the edited region)". Exceeding it is an
+      :class:`~organize_core.errors.IntegrationRejected`. Zero means an
+      integrate result may only add and weave — never destroy.
+
+    Phase 5 implements the enforcement; the settings are contract and are
+    validated from day one so a spec-conformant config never fails the
+    unknown-key law (03 §1).
+    """
+
+    default_mode: EditMode = "manual"
+    review: ReviewGate = "diff"
+    max_deleted_lines: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +399,7 @@ class Config:
     routes: list[RouteConfig] = field(default_factory=list)
     consumers: list[ConsumerConfig] = field(default_factory=list)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    integrate: IntegrateConfig = field(default_factory=IntegrateConfig)
     auto_organize: AutoOrganizeConfig = field(default_factory=AutoOrganizeConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
@@ -411,15 +461,23 @@ def _dotted(prefix: str, key: str) -> str:
 
 
 def _registered_consumer_types() -> frozenset[str]:
-    """The live ``@register`` registry (spec 06 §1). Imported lazily: the
-    consumers package imports :mod:`organize_core.config`, so a module-level
-    import would be a cycle."""
+    """The live ``@register`` registry (spec 06 §1).
+
+    Imported lazily because ``consumers/base.py`` imports this module: the
+    edge is real and is recorded in ARCHITECTURE.md's dependency block, with
+    the lazy import as the mitigation that keeps the module graph acyclic.
+
+    Only ``ImportError`` falls back. A broken ``@register`` in a consumer
+    module, or any other failure inside the registry, must surface — the
+    module contract is "bad config is banned", and a blanket
+    ``except Exception`` here quietly validated user config against a
+    HARDCODED type list while the real registry was broken.
+    """
     try:
         from organize_core.consumers import get_consumer_types
-
-        return frozenset(get_consumer_types()) or _FALLBACK_CONSUMER_TYPES
-    except Exception:  # pragma: no cover - only while another seat is mid-build
+    except ImportError:  # pragma: no cover - only while another seat is mid-build
         return _FALLBACK_CONSUMER_TYPES
+    return frozenset(get_consumer_types()) or _FALLBACK_CONSUMER_TYPES
 
 
 class _Validator:
@@ -953,8 +1011,10 @@ def _validate_metadata_fields(v: _Validator, raw: dict[str, Any]) -> list[Metada
     return fields
 
 
-_ROUTE_KEYS = {"tags", "destination", "mode", "description", "template", "auto"}
+_ROUTE_KEYS = {"tags", "destination", "mode", "description", "template", "auto", "review"}
 _ROUTE_MODES = frozenset({"append", "move", "integrate"})
+_REVIEW_GATES = frozenset({"diff", "auto"})
+_EDIT_MODES = frozenset({"manual", "append", "integrate"})
 
 
 def _validate_routes(v: _Validator, raw: dict[str, Any]) -> list[RouteConfig]:
@@ -1017,6 +1077,20 @@ def _validate_route(v: _Validator, entry: dict[str, Any], i: int) -> RouteConfig
             hint='add a trailing "/" to move into a folder (spec 11 §1)',
             cls=RouteConfigError,
         )
+    review = v.string(
+        entry, "review", prefix, "diff", choices=_REVIEW_GATES, cls=RouteConfigError
+    )
+    # Every key is honored or it is an error (03 §1). `review` only has meaning
+    # for an integrate route; accepting it silently on a move/append route would
+    # be a dead key of exactly the 08 §A35 kind.
+    if review != "diff" and mode != "integrate":
+        v.fail(
+            f"{prefix}.review",
+            f"is {review!r} but mode is {mode!r} — the review gate applies to "
+            f'integrate results only (spec 12 §1)',
+            hint='set mode = "integrate" for this destination, or drop `review`',
+            cls=RouteConfigError,
+        )
     return RouteConfig(
         tags=[tag.strip() for tag in tags],
         destination=destination,
@@ -1024,6 +1098,7 @@ def _validate_route(v: _Validator, entry: dict[str, Any], i: int) -> RouteConfig
         description=v.string(entry, "description", prefix, "", allow_empty=True) or "",
         template=v.string(entry, "template", prefix, None, allow_empty=True),
         auto=v.boolean(entry, "auto", prefix, False),
+        review=review,  # type: ignore[arg-type]
     )
 
 
@@ -1135,6 +1210,23 @@ _AUTO_ORGANIZE_KEYS = {"trust", "confidence_threshold", "min_precedents"}
 _TRUST_LEVELS = frozenset({"propose", "auto_below"})
 
 
+def _validate_integrate(v: _Validator, raw: dict[str, Any]) -> IntegrateConfig:
+    table = v.table(raw, "integrate", "")
+    v.check_unknown(table, {"default_mode", "review", "max_deleted_lines"}, "integrate")
+    d = IntegrateConfig()
+    return IntegrateConfig(
+        default_mode=v.string(  # type: ignore[arg-type]
+            table, "default_mode", "integrate", d.default_mode, choices=_EDIT_MODES
+        ),
+        review=v.string(  # type: ignore[arg-type]
+            table, "review", "integrate", d.review, choices=_REVIEW_GATES
+        ),
+        max_deleted_lines=v.integer(
+            table, "max_deleted_lines", "integrate", d.max_deleted_lines, minimum=0
+        ),
+    )
+
+
 def _validate_auto_organize(v: _Validator, raw: dict[str, Any]) -> AutoOrganizeConfig:
     table = v.table(raw, "auto_organize", "")
     v.check_unknown(table, _AUTO_ORGANIZE_KEYS, "auto_organize")
@@ -1205,6 +1297,7 @@ _TOP_LEVEL_KEYS = {
     "routes",
     "consumers",
     "llm",
+    "integrate",
     "auto_organize",
     "server",
     "logging",
@@ -1292,11 +1385,118 @@ def validate_config(raw: dict[str, Any], *, source: str = "<config>") -> Config:
         routes=_validate_routes(v, raw),
         consumers=_validate_consumers(v, raw),
         llm=_validate_llm(v, raw),
+        integrate=_validate_integrate(v, raw),
         auto_organize=_validate_auto_organize(v, raw),
         server=_validate_server(v, raw),
         logging=_validate_logging(v, raw),
         descriptions=_validate_descriptions(v, raw),
     )
+
+
+# --- spec 07 metadata-field coercion (shared by BOTH doors) ----------------
+
+_TRUE_WORDS = frozenset({"true", "yes", "on", "1"})
+_FALSE_WORDS = frozenset({"false", "no", "off", "0"})
+
+
+def metadata_fields_by_key(config: Config) -> dict[str, MetadataFieldConfig]:
+    """``{key: MetadataFieldConfig}`` for the configured ``metadata_fields``."""
+    return {entry.key: entry for entry in config.metadata_fields}
+
+
+def coerce_metadata_value(entry: MetadataFieldConfig | None, key: str, raw: Any) -> Any:
+    """Apply one ``[[metadata_fields]]`` rule to one incoming value (spec 07).
+
+    This lives in ``config`` — not in ``cli`` where it started — because
+    spec 10 §3 puts ``metadata_fields`` in CORE config precisely so that
+    "CLI and UI can never disagree". While the coercion was CLI-private, the
+    RPC ``meta.set`` handed the client's raw value straight to
+    ``update_frontmatter``: the nvim client, whose only write path is RPC,
+    could write ``tags: ["foo, Bar Baz"]``, ``importance: totally-invalid``
+    and ``remember: maybe`` into the vault, failing doc 07 acceptance tests
+    1 and 2 on that boundary while the CLI enforced them.
+
+    Rules, per field ``type``:
+
+    * ``list`` — split a string on commas, kebab-normalize when
+      ``normalize = "kebab"``, dedupe preserving order. An already-list value
+      (the natural JSON-RPC shape) skips the split and is normalized
+      element-wise.
+    * ``enum`` — membership in ``values`` or ``ConfigError``.
+    * ``boolean`` / ``number`` — parsed from a string, or passed through when
+      the caller already sent the right JSON type.
+    * unconfigured key — returned unchanged; frontmatter is arbitrary by
+      design (07 "Downstream note").
+
+    An empty string REMOVES the field (``update_frontmatter``'s ``None``
+    contract); an explicit ``None`` is already a removal and passes through.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw == "":
+        return None
+    if entry is None:
+        return raw
+
+    if entry.type == "list":
+        if isinstance(raw, (list, tuple)):
+            values = [str(item).strip() for item in raw if str(item).strip()]
+        else:
+            values = [part.strip() for part in str(raw).split(",") if part.strip()]
+        if entry.normalize == "kebab":
+            from organize_core.frontmatter import normalize_tag
+
+            values = [normalize_tag(value) for value in values]
+        deduped: list[str] = []
+        for value in values:
+            if value not in deduped:
+                deduped.append(value)
+        return deduped
+
+    if entry.type == "enum":
+        text = str(raw)
+        if text not in entry.values:
+            raise ConfigError(
+                f"{key}={text!r} is not one of the configured values",
+                hint="allowed values: " + ", ".join(entry.values),
+            )
+        return text
+
+    if entry.type == "boolean":
+        if isinstance(raw, bool):
+            return raw
+        lowered = str(raw).strip().lower()
+        if lowered in _TRUE_WORDS:
+            return True
+        if lowered in _FALSE_WORDS:
+            return False
+        raise ConfigError(
+            f"{key}={raw!r} is not a boolean",
+            hint="use one of: " + ", ".join(sorted(_TRUE_WORDS | _FALSE_WORDS)),
+        )
+
+    if entry.type == "number":
+        if isinstance(raw, bool):
+            raise ConfigError(
+                f"{key}={raw!r} is not a number",
+                hint=f'[[metadata_fields]] key = {key!r} declares type = "number"',
+            )
+        if isinstance(raw, (int, float)):
+            return raw
+        text = str(raw).strip()
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        try:
+            return float(text)
+        except ValueError:
+            raise ConfigError(
+                f"{key}={raw!r} is not a number",
+                hint=f'[[metadata_fields]] key = {key!r} declares type = "number"',
+            ) from None
+
+    return raw
 
 
 @dataclass(frozen=True)
@@ -1577,6 +1777,20 @@ destination = "resources/performing/"
 mode = "move"
 description = "Notes about improvisation, theatre, and performance practice."
 
+# An `integrate` route: Claude rewrites the target to weave the capture in
+# (spec 12 §1). `review` is the per-route gate — "diff" shows you the change
+# before it lands, "auto" applies it silently. Prefer "diff" until you trust a
+# given destination; either way the target is backed up and the write is atomic,
+# and a `no-ai: true` target refuses integrate outright.
+[[routes]]
+tags = ["kms", "second-brain"]
+destination = "projects/kms/design-notes.md"
+mode = "integrate"
+review = "diff"                  # diff | auto
+description = """Running design notes for the knowledge-management system.
+New thinking is woven into the relevant existing section rather than appended,
+so this one is worth an LLM pass."""
+
 # Automation consumers (spec 06 §2). `type` must be a registered consumer
 # type; keys outside the framework set below are consumer-specific options and
 # are validated by the consumer itself.
@@ -1638,6 +1852,16 @@ claude_command = ["claude", "-p"]
 integrate_backend = "claude-cli"                      # quality-sensitive path (12 §1)
 timeout_seconds = 60.0
 retries = 2
+
+# Edit modes and integrate safety (spec 12 §1). `default_mode` is the global
+# default; a route's `mode` overrides it. `max_deleted_lines` is the integrate
+# hard-reject threshold: an LLM result that deletes more than this many existing
+# non-whitespace lines is refused outright (default zero — integration adds and
+# weaves, it never destroys).
+[integrate]
+default_mode = "manual"      # manual | append | integrate
+review = "diff"              # diff (show me the change) | auto (apply silently)
+max_deleted_lines = 0
 
 # Automatic organize trust ladder (spec 13 §2).
 [auto_organize]

@@ -25,6 +25,13 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    # Opt-in, minutes-scale perf checks (spec 09 §4 at full 10k scale).
+    # Excluded by default so the normal suite stays fast and load-insensitive;
+    # run with: pytest -m slow
+    "slow: long-running performance measurement, deselected by default",
+]
+addopts = "-m 'not slow'"
 
 [tool.ruff]
 line-length = 100

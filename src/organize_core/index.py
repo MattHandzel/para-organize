@@ -231,7 +231,15 @@ class VaultIndex:
     def __init__(self, config: Config, index_path: Path) -> None:
         self.config = config
         self.index_path = Path(index_path)
-        self.root = Path(config.vault.root).expanduser()
+        # No ``.expanduser()`` here or anywhere else in this module:
+        # structural decision 4 — nothing outside ``paths.py`` consults
+        # ``os.environ``/``Path.home()``, and ``expanduser`` reads ``HOME``.
+        # ``config.vault.root`` is already expanded by ``config._expand_path``
+        # → ``paths.expand``, and note arguments are resolved by the
+        # composition roots. Expanding here also made a vault-relative name
+        # starting with ``~`` raise a bare ``RuntimeError`` (outside the
+        # OrganizeError taxonomy) instead of addressing the real file.
+        self.root = Path(config.vault.root)
         try:
             self.root = self.root.resolve()
         except OSError:  # pragma: no cover - resolve() is non-strict
@@ -606,13 +614,23 @@ class VaultIndex:
 
     def _touch(self) -> None:
         """Record one pending change; flush only when the batch is large
-        enough to matter (09 §4 — never a snapshot per keystroke)."""
+        enough to matter (09 §4 — never a snapshot per keystroke).
+
+        Spec 09 §40 allows "batch, debounce, or switch format"; this is the
+        BATCH, and it doubles as the crash bound (at most
+        ``flush_threshold`` changes can be lost). A time debounce is
+        deliberately NOT stacked on top of it here: it would delay the
+        crash-bound write, which is the one thing this counter exists to
+        guarantee. ``vault.incremental_debounce`` is the debounce on the
+        client's incremental-reindex TRIGGER (spec 03 §7) — see the
+        reserved-key allowlist in tests/test_config.py.
+        """
         self._pending += 1
         if self.flush_threshold and self._pending >= self.flush_threshold:
             self.flush()
 
     def _resolve(self, path: Path | str) -> Path:
-        candidate = Path(path).expanduser()
+        candidate = Path(path)  # never .expanduser() — see __init__
         if not candidate.is_absolute():
             candidate = self.root / candidate
         try:
@@ -720,12 +738,12 @@ def para_type_for(path: Path, config: Config) -> ParaType:
     """Derive the PARA type from a path relative to the vault root using the
     CONFIGURED folder names (spec 03 §7): projects|areas|resources|archives
     keys → singular ParaType, the capture folder → "capture", else "other"."""
-    root = Path(config.vault.root).expanduser()
+    root = Path(config.vault.root)  # never .expanduser() — see VaultIndex.__init__
     try:
         root = root.resolve()
     except OSError:  # pragma: no cover - resolve() is non-strict
         root = root.absolute()
-    candidate = Path(path).expanduser()
+    candidate = Path(path)
     if not candidate.is_absolute():
         candidate = root / candidate
     try:

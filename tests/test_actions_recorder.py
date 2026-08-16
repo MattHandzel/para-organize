@@ -167,6 +167,16 @@ def test_every_operation_type_produces_exactly_one_valid_record(actions_dir: Pat
 
 
 def test_session_of_five_actions_keeps_session_id_and_chosen_ranks(actions_dir: Path) -> None:
+    """Unit half of spec 12 §3's session gate: the RECORDER round-trips what
+    it is handed.
+
+    On its own this proves the dataclass, not the write path — and for a long
+    time nothing in the product could produce these fields at all, so the
+    acceptance test was satisfiable only by hand-feeding it. The end-to-end
+    half now lives in `tests/test_server.py::
+    test_a_session_of_five_rpc_actions_yields_five_records_with_correct_ranks`,
+    which drives five real RPC operations.
+    """
     recorder = ActionRecorder(actions_dir)
     ranks = [1, 1, 3, None, 2]
     for i, rank in enumerate(ranks):
@@ -521,6 +531,127 @@ def test_query_filters(actions_dir: Path, filters: dict, expected: list[str]) ->
     recorder = ActionRecorder(actions_dir)
     seed(recorder)
     assert [r.id for r in recorder.query(**filters)] == expected
+
+
+# --- dry-run records are logged but are NOT corpus (spec 12 §2 + 09 §5.6) ---
+#
+# `--dry-run` operations DO append an ActionRecord (ARCHITECTURE ruling (a):
+# the log-only mode is only useful if the intended action is written down),
+# but a rehearsal that never touched the vault is not evidence of anything.
+# The exclusion lives in the RECORDER so every corpus reader inherits it —
+# the CLI used to re-derive it in a local subclass, which is exactly the
+# "each caller reimplements the rule" shape that lets one reader forget.
+
+
+def seed_with_dry_runs(recorder: ActionRecorder) -> None:
+    recorder.record(make_record(id="act_real1", ts="2026-08-02T09:00:00Z"))
+    recorder.record(
+        make_record(
+            id="act_dry",
+            ts="2026-08-03T09:00:00Z",
+            context=ActionContext(dry_run=True),
+        )
+    )
+    recorder.record(make_record(id="act_real2", ts="2026-08-04T09:00:00Z"))
+
+
+def test_query_excludes_dry_run_records_by_default(actions_dir: Path) -> None:
+    recorder = ActionRecorder(actions_dir)
+    seed_with_dry_runs(recorder)
+    assert [r.id for r in recorder.query()] == ["act_real1", "act_real2"]
+
+
+def test_query_include_dry_run_opts_them_back_in(actions_dir: Path) -> None:
+    recorder = ActionRecorder(actions_dir)
+    seed_with_dry_runs(recorder)
+    assert [r.id for r in recorder.query(include_dry_run=True)] == [
+        "act_real1",
+        "act_dry",
+        "act_real2",
+    ]
+
+
+def test_the_dry_run_record_is_on_disk_even_though_it_is_hidden(actions_dir: Path) -> None:
+    """It is excluded from the corpus, NOT dropped — 09 §5.6 wants the
+    intended action on paper so it can be diffed against expectations."""
+    recorder = ActionRecorder(actions_dir)
+    seed_with_dry_runs(recorder)
+    (month_file,) = recorder.month_files()
+    ids = [json.loads(line)["id"] for line in read_lines(month_file)]
+    assert ids == ["act_real1", "act_dry", "act_real2"]
+
+
+def test_stats_excludes_dry_runs_so_a_rehearsal_cannot_move_an_accept_rate(
+    actions_dir: Path,
+) -> None:
+    recorder = ActionRecorder(actions_dir)
+    shown = (SuggestionShown(path="areas/health", score=3.7, rank=1, reasons=()),)
+    # One real action where Matt took the top suggestion...
+    recorder.record(
+        make_record(
+            id="act_real",
+            ts="2026-08-02T09:00:00Z",
+            context=ActionContext(suggestions_shown=shown, chosen_rank=1),
+        )
+    )
+    # ...and three rehearsals where he took the third. If dry runs counted,
+    # the top-accept-rate would read 1/4 = 0.25 instead of a perfect 1.0.
+    for i in range(3):
+        recorder.record(
+            make_record(
+                id=f"act_dry{i}",
+                ts="2026-08-03T09:00:00Z",
+                context=ActionContext(suggestions_shown=shown, chosen_rank=3, dry_run=True),
+            )
+        )
+
+    stats = recorder.stats()
+    assert stats["total"] == 1
+    assert stats["by_operation"] == {"move": 1}
+    assert stats["suggestions"]["with_suggestions"] == 1
+    assert stats["suggestions"]["top_chosen"] == 1
+    assert stats["suggestions"]["top_accept_rate"] == 1.0
+    assert stats["suggestions"]["rank_histogram"] == {1: 1}
+
+    everything = recorder.stats(include_dry_run=True)
+    assert everything["total"] == 4
+    assert everything["suggestions"]["top_accept_rate"] == 0.25
+    assert everything["suggestions"]["rank_histogram"] == {1: 1, 3: 3}
+
+
+def test_export_excludes_dry_runs_by_default(actions_dir: Path, tmp_path: Path) -> None:
+    recorder = ActionRecorder(actions_dir)
+    seed_with_dry_runs(recorder)
+    out = tmp_path / "corpus.jsonl"
+
+    assert recorder.export(out) == 2
+    assert [json.loads(ln)["id"] for ln in read_lines(out)] == ["act_real1", "act_real2"]
+
+    assert recorder.export(out, include_dry_run=True) == 3
+    assert [json.loads(ln)["id"] for ln in read_lines(out)] == [
+        "act_real1",
+        "act_dry",
+        "act_real2",
+    ]
+
+
+def test_a_corrupt_dry_run_marker_fails_closed_and_stays_out_of_the_corpus(
+    actions_dir: Path,
+) -> None:
+    """A record whose marker is neither absent nor exactly ``false`` is
+    treated as a dry run. The failure mode we refuse is a rehearsal being
+    mistaken for a precedent; the reverse costs one corpus entry."""
+    recorder = ActionRecorder(actions_dir)
+    recorder.record(make_record(id="act_real"))
+    (month_file,) = recorder.month_files()
+    payload = json.loads(read_lines(month_file)[0])
+    payload["id"] = "act_weird"
+    payload["context"]["dry_run"] = "no"  # truthy string, NOT False
+    with month_file.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
+
+    assert [r.id for r in recorder.query()] == ["act_real"]
+    assert [r.id for r in recorder.query(include_dry_run=True)] == ["act_real", "act_weird"]
 
 
 def test_query_skips_corrupt_lines_with_a_warning(

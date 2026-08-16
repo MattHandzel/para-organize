@@ -179,9 +179,55 @@ def test_escaping_destination_is_rejected() -> None:
 def test_unknown_route_key_is_a_route_error_naming_the_index() -> None:
     with pytest.raises(RouteConfigError) as excinfo:
         validate_config(
-            raw_with({"tags": ["x"], "destination": "a/b.md", "mode": "append", "review": "auto"})
+            raw_with({"tags": ["x"], "destination": "a/b.md", "mode": "append", "revoew": "auto"})
         )
-    assert "unknown config key 'routes[0].review'" in str(excinfo.value)
+    assert "unknown config key 'routes[0].revoew'" in str(excinfo.value)
+
+
+# --- spec 12 §1: `review` is a per-route opt-in, NOT an unknown key ----------
+# The config seat originally pinned `review` as unknown and flagged it as a
+# seam; the integrator's ruling is that spec 12 §1 makes it real config
+# ("review = \"auto\" (per-route opt-in) applies without asking"), so a
+# spec-conformant route must load. These tests replace that pin.
+
+
+def test_route_review_defaults_to_diff() -> None:
+    """12 §1: 'default review = "diff"' — the gate that shows Matt the change."""
+    config = validate_config(
+        raw_with({"tags": ["x"], "destination": "a/b.md", "mode": "integrate"})
+    )
+    assert config.routes[0].review == "diff"
+
+
+def test_route_review_auto_is_honored_on_an_integrate_route() -> None:
+    config = validate_config(
+        raw_with(
+            {"tags": ["x"], "destination": "a/b.md", "mode": "integrate", "review": "auto"}
+        )
+    )
+    assert config.routes[0].review == "auto"
+
+
+def test_route_review_rejects_an_unknown_gate_naming_the_index() -> None:
+    with pytest.raises(RouteConfigError) as excinfo:
+        validate_config(
+            raw_with(
+                {"tags": ["x"], "destination": "a/b.md", "mode": "integrate", "review": "yolo"}
+            )
+        )
+    assert "config key 'routes[0].review'" in str(excinfo.value)
+    assert "'auto', 'diff'" in str(excinfo.value) or "['auto', 'diff']" in str(excinfo.value)
+
+
+def test_review_auto_on_a_non_integrate_route_is_a_loud_error_not_a_dead_key() -> None:
+    """03 §1 every-key-honored: `review` steers integrate results only, so
+    accepting it on a move/append route would be a dead key (08 §A35)."""
+    with pytest.raises(RouteConfigError) as excinfo:
+        validate_config(
+            raw_with({"tags": ["x"], "destination": "a/b/", "mode": "move", "review": "auto"})
+        )
+    assert "config key 'routes[0].review'" in str(excinfo.value)
+    assert "integrate results only" in str(excinfo.value)
 
 
 def test_second_route_errors_are_indexed_correctly() -> None:

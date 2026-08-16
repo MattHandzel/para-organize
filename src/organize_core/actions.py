@@ -162,6 +162,15 @@ class TargetState:
     after_hash: str | None
     diff: str
     description: str | None = None  # the NL description of this destination
+    #: The target's COMPLETE pre-edit text, per spec 12 §2's annotation on
+    #: `diff`: "full before-text stored when the file is new or small
+    #: (<64 KB)". `before_hash` plus a 3-line-context unified diff cannot
+    #: reconstruct the file the edit was made against, and doc 12's stated
+    #: purpose ("proposed_diff vs final_diff turns every reviewed integration
+    #: into a labeled edit example") needs that file. `None` for a new file
+    #: — where `before_hash` is `None` too — and for anything >= 64 KB, which
+    #: stays hash+diff to bound corpus growth.
+    before_text: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -170,6 +179,7 @@ class TargetState:
             "before_hash": self.before_hash,
             "after_hash": self.after_hash,
             "diff": self.diff,
+            "before_text": self.before_text,
             "description": self.description,
         }
 
@@ -188,6 +198,7 @@ class TargetState:
             before_hash=_opt_str(data, "before_hash", "targets[]"),
             after_hash=_opt_str(data, "after_hash", "targets[]"),
             diff=_opt_str(data, "diff", "targets[]") or "",
+            before_text=_opt_str(data, "before_text", "targets[]"),
             description=_opt_str(data, "description", "targets[]"),
         )
 
@@ -222,7 +233,20 @@ class SuggestionShown:
 
 @dataclass(frozen=True)
 class ActionContext:
-    """``context`` block (spec 12 §2)."""
+    """``context`` block (spec 12 §2).
+
+    ``dry_run`` marks a record produced by a rehearsal rather than a real
+    operation. Dry runs DO record (ARCHITECTURE ruling (a): ``--dry-run`` is
+    vault-write-free but not state-silent — 09 §5.6's log-only intent is what
+    makes "diff intended actions against expectations" possible). But doc 12's
+    corpus is a record of what Matt ACTUALLY did: a rehearsal that was never
+    committed is not a precedent, so every corpus reader — ``stats``,
+    ``export``, and the doc-13 retrieval that will be built on ``query`` —
+    excludes these by default. It is a first-class field rather than a
+    ``filters`` entry so that exclusion cannot be forgotten by a new reader
+    (it used to live at ``filters["dry_run"]``, which every consumer had to
+    know about by convention).
+    """
 
     session_id: str | None = None
     filters: dict[str, Any] = field(default_factory=dict)
@@ -232,6 +256,7 @@ class ActionContext:
     auto_tags_present: tuple[str, ...] = ()
     vault_stats: dict[str, int] = field(default_factory=dict)
     durations_ms: dict[str, int] = field(default_factory=dict)
+    dry_run: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -243,6 +268,7 @@ class ActionContext:
             "auto_tags_present": list(self.auto_tags_present),
             "vault_stats": dict(self.vault_stats),
             "durations_ms": dict(self.durations_ms),
+            "dry_run": self.dry_run,
         }
 
     @classmethod
@@ -264,6 +290,10 @@ class ActionContext:
             ),
             vault_stats=_opt_dict(data, "vault_stats", "context") or {},
             durations_ms=_opt_dict(data, "durations_ms", "context") or {},
+            # Fail CLOSED on a malformed marker: anything that is not exactly
+            # `false`/absent counts as a dry run, so a corrupt record can only
+            # ever be omitted from the corpus, never mistaken for a precedent.
+            dry_run=data.get("dry_run", False) is not False,
         )
 
 
@@ -636,6 +666,27 @@ def _append_line(path: Path, line: str) -> None:
         os.close(fd)
 
 
+#: `--since`/`--until` bounds are compared as ISO PREFIXES, which only works
+#: for a zero-padded ISO string. `2026-8-1` sorts ABOVE `2026-08-…`, so an
+#: unpadded bound silently excluded every record and looked exactly like "no
+#: data" — the opposite of spec 09 §1.5's loud-error rule.
+_BOUND_RE = re.compile(r"^\d{4}-\d{2}(-\d{2}([T ]\d{2}:\d{2}(:\d{2})?Z?)?)?$")
+
+
+def check_bound(value: str | None, name: str) -> str | None:
+    """Validate one ``--since``/``--until`` bound, loudly (spec 09 §1.5)."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not _BOUND_RE.match(text):
+        raise ActionSchemaError(
+            f"{name}={value!r} is not a zero-padded ISO date",
+            hint="use YYYY-MM, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ "
+            "(bounds are compared as ISO prefixes, so '2026-8-1' matches nothing)",
+        )
+    return text
+
+
 def _within(ts: str, since: str | None, until: str | None) -> bool:
     """Bounds compare against the ISO prefix of the bound's own length, so
     ``--since 2026-08-01 --until 2026-08-15`` is inclusive of whole days."""
@@ -701,20 +752,36 @@ class ActionRecorder:
         actor: str | None = None,
         since: str | None = None,
         until: str | None = None,
+        include_dry_run: bool = False,
     ) -> Iterator[ActionRecord]:
         """Stream matching records across month files, oldest first.
         Corrupt lines are skipped with a warning, never fatal.
 
         ``since``/``until`` accept ``YYYY-MM-DD`` (inclusive whole days) or a
         full ISO timestamp; comparison is on the ISO prefix of the bound.
+
+        Dry-run records are EXCLUDED by default (see
+        :class:`ActionContext.dry_run`): the corpus is what Matt actually did,
+        and a rehearsal is not a precedent. ``include_dry_run=True`` opts them
+        back in — for debugging a dry run, not for learning from it. Every
+        corpus reader goes through here, so the default is the guarantee.
         """
+        since = check_bound(since, "since")
+        until = check_bound(until, "until")
         for path in self.month_files():
             month = path.name[:7]
             if since is not None and month < since[:7]:
                 continue
             if until is not None and month > until[:7]:
                 continue
-            yield from self._read_file(path, operation=operation, actor=actor, since=since, until=until)
+            yield from self._read_file(
+                path,
+                operation=operation,
+                actor=actor,
+                since=since,
+                until=until,
+                include_dry_run=include_dry_run,
+            )
 
     def _read_file(
         self,
@@ -724,6 +791,7 @@ class ActionRecorder:
         actor: str | None,
         since: str | None,
         until: str | None,
+        include_dry_run: bool = False,
     ) -> Iterator[ActionRecord]:
         try:
             handle = path.open("r", encoding="utf-8", errors="replace", newline="")
@@ -740,6 +808,8 @@ class ActionRecorder:
                     rec = ActionRecord.from_json(raw)
                 except (ValueError, ActionSchemaError) as exc:
                     logger.warning("action log %s:%d is corrupt, skipping (%s)", path, lineno, exc)
+                    continue
+                if not include_dry_run and rec.context.dry_run:
                     continue
                 if operation is not None and rec.operation != operation:
                     continue
@@ -767,10 +837,11 @@ class ActionRecorder:
                 count += 1
         return count
 
-    def stats(self) -> dict[str, Any]:
+    def stats(self, *, include_dry_run: bool = False) -> dict[str, Any]:
         """``organize actions stats`` (spec 12 §2 "Uses" #1): accept-rate of
         top suggestion, per-route volumes, integrate accept/edit/reject
-        rates.
+        rates. Dry-run records are excluded by default — a rehearsal must not
+        move an accept rate.
 
         ``suggestions.top_accept_rate`` = records whose ``chosen_rank == 1``
         over records that had a non-empty ``suggestions_shown`` (a record
@@ -793,7 +864,7 @@ class ActionRecorder:
         first_ts: str | None = None
         last_ts: str | None = None
 
-        for rec in self.query():
+        for rec in self.query(include_dry_run=include_dry_run):
             total += 1
             by_operation[rec.operation] = by_operation.get(rec.operation, 0) + 1
             by_actor[rec.actor] = by_actor.get(rec.actor, 0) + 1

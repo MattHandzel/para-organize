@@ -69,6 +69,14 @@ class RouteMatch:
     route_name: str  # display name: first tag or explicit name
     destination: Path  # resolved absolute path
     is_folder: bool
+    #: PARA type of the destination, resolved against the CONFIGURED folder
+    #: names by :func:`resolve` (which holds the ``Config``).
+    #: ``as_suggestion`` takes no config, so without this a vault that renames
+    #: a PARA root (``projects = "p"``) would type its route suggestions
+    #: ``"p"`` while every scored suggestion was typed ``"projects"`` — and
+    #: the UI groups on this field. Empty means "derive it from the leading
+    #: path segment", which is what a hand-built RouteMatch gets.
+    para_type: str = ""
 
     def as_suggestion(self) -> Suggestion:
         """Rendered distinctly above scored suggestions:
@@ -78,7 +86,7 @@ class RouteMatch:
         return Suggestion(
             path=str(self.destination),
             name=self.destination.name,
-            type=_destination_type(self.route.destination),
+            type=self.para_type or _destination_type(self.route.destination),
             score=ROUTE_SUGGESTION_SCORE,
             reasons=(f"Route '{self.route_name}' ({self.route.mode})",),
             route=self.route_name,
@@ -86,21 +94,28 @@ class RouteMatch:
         )
 
 
-def _destination_type(destination: str) -> str:
+def _destination_type(destination: str, config: Config | None = None) -> str:
     """PARA type of a vault-relative route destination, from its leading
     segment (``areas/health/training-log.md`` → ``areas``).
 
-    ``as_suggestion`` has no ``Config``, so the configured PARA folder names
-    are not available here; the leading segment IS the folder name in every
-    layout spec 02 describes, and ``archive`` is aliased to the plural
-    suggestion type. Unrecognizable destinations report ``"other"`` rather
-    than claiming a PARA type they do not have.
+    Given a ``config``, the leading segment is matched against the CONFIGURED
+    ``vault.para_folders`` values, so a renamed PARA root still reports its
+    canonical type key. Without one (a hand-built ``RouteMatch``) the leading
+    segment IS the folder name in every layout spec 02 describes, and
+    ``archive`` is aliased to the plural suggestion type. Unrecognizable
+    destinations report ``"other"`` rather than claiming a PARA type they do
+    not have.
     """
     segments = [part for part in destination.strip().strip("/").split("/") if part]
     if not segments:
         return _UNKNOWN_TYPE
-    head = segments[0].strip().lower()
-    return _TYPE_ALIASES.get(head, head or _UNKNOWN_TYPE)
+    head = segments[0].strip()
+    if config is not None:
+        for key, folder in (config.vault.para_folders or {}).items():
+            if str(folder).strip().strip("/").casefold() == head.casefold():
+                return key
+    lowered = head.lower()
+    return _TYPE_ALIASES.get(lowered, lowered or _UNKNOWN_TYPE)
 
 
 def _normalized(value: str, config: Config) -> str:
@@ -154,6 +169,7 @@ def resolve(note_tags: list[str], config: Config) -> list[RouteMatch]:
                 route_name=_route_display_name(route),
                 destination=config.vault.root / route.destination,
                 is_folder=is_folder,
+                para_type=_destination_type(route.destination, config),
             )
         )
     return matches
@@ -177,6 +193,13 @@ def merge_route_suggestions(
     hands over IS the UI's max length. Routes and the archive entry always
     survive (ARCHITECTURE resolution #10), so a caller with more routes than
     the cap gets a longer list rather than a silently dropped route.
+
+    CONFIRMED by the integrator (the routes seat asked): both composition
+    roots pass ``suggest()`` output unmodified — ``cli.cmd_suggest`` and
+    ``server._suggest_for_note`` each call ``rank_suggestions(...)`` and hand
+    the result straight here. No caller passes an untruncated candidate list,
+    so no ``max_suggestions`` parameter is needed on this signature. A future
+    caller that wants a different cap must truncate before calling.
 
     A scored entry pointing at a destination a route already offers is
     dropped — the route carries the same path plus its description, and

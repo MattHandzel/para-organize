@@ -46,12 +46,43 @@ Dependency direction (import graph, enforced — no cycles):
 errors ◀── everything
 paths  ◀── config ◀── frontmatter? (no: frontmatter is dep-free)
 config ◀── index ◀── learn ◀── suggest ◀── routes
-frontmatter ◀── index, fileops, consumers/*
+frontmatter ◀── index, fileops, suggest, routes, consumers/*
 actions ◀── fileops ◀── routes, session-layer callers
 llm ◀── consumers/*, (Phase-5 integrate)
 store, runner ◀── cli.run-consumers
 everything ◀── cli, server (composition roots)
 ```
+
+`frontmatter ◀── suggest, routes` was added at Phase-1 close: both compare
+tags and must go through the ONE shared `normalize_tag` (09 §2). `frontmatter`
+is dependency-free, so the edge is acyclic.
+
+Two more edges recorded at the Phase-1 fix pass:
+
+- `frontmatter ◀── config` — `config.coerce_metadata_value` applies the doc-07
+  `normalize = "kebab"` rule and must use the ONE `normalize_tag` (09 §2).
+  The doc-07 coercion moved out of `cli.py` into `config.py` so BOTH doors
+  enforce it; while it was CLI-private, RPC `meta.set` wrote unvalidated
+  frontmatter (spec 10 §3: "CLI and UI can never disagree"). `frontmatter`
+  is dependency-free, so this is acyclic; the import is function-local
+  inside the one branch that needs it.
+- `config ◀── consumers/base` — the back-edge that already existed in code:
+  `config._registered_consumer_types()` imports `organize_core.consumers`,
+  whose `base.py` imports `config`. It is broken by deferring the import
+  into the function body, and the fallback is now `except ImportError` only,
+  so a broken `@register` fails loudly instead of silently validating
+  against a stale hardcoded type list.
+
+`learn ◀── (duck-typed) actions`: `learn.record_action` folds an ActionRecord
+into `LearningData` (spec 12 §2 "Uses" #2 — one write path, two readers). It
+takes the record structurally (`getattr`), so there is no import edge at all;
+`fileops` calls it through `OperationContext.on_record`, which the
+composition roots wire.
+
+`fileops` never imports `routes` (routes already imports fileops).
+`OperationContext.describe` is the callable seam through which the
+composition roots supply `routes.get_description` for
+`targets[].description` (spec 12 §2).
 
 | Builder | Owns (src) | Owns (tests) | Must read | Depends on |
 |---|---|---|---|---|
@@ -315,3 +346,186 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
   consumers, which needs machine-readable output. It must never change
   human-output defaults, and `SUBCOMMANDS`/`build_parser` remain the
   scaffold contract.
+
+## Integrator seam rulings — Phase 1 close (2026-08-16)
+
+Every seam the builders raised, with the decision and its reason. Rulings
+that changed code are listed with the pinning test.
+
+### Granted (implemented)
+
+1. **`RouteConfig.review`** (config seat). Spec 12 §1 makes `review = "auto"`
+   an explicit PER-ROUTE opt-in, so it is real config, not an unknown key.
+   Added `review: ReviewGate = "diff"`. Because `review` steers integrate
+   results only, setting it to `"auto"` on a `move`/`append` route is a loud
+   `RouteConfigError` rather than a silently-ignored key (03 §1 / 08 §A35).
+   The config seat's test that pinned `review` as unknown was replaced with
+   one using a genuinely unknown key. → `tests/test_config_routes.py`.
+2. **`[integrate]` config section** (config seat). `IntegrateConfig(
+   default_mode="manual", review="diff", max_deleted_lines=0)` on
+   `Config.integrate` — the global edit-mode default, the review-gate default
+   and the configurable deletion threshold of the integrate hard-reject, all
+   from spec 12 §1. Phase 5 implements enforcement; the keys are contract and
+   validate from today so a spec-conformant config never trips the
+   unknown-key law. The shipped example now demonstrates all three route
+   modes, including `integrate`. → `tests/test_config*.py`.
+3. **`ActionContext.dry_run`** (fileops + cli seats, one seam). Promoted from
+   the `filters["dry_run"]` convention to a first-class field, and
+   `ActionRecorder.query/stats/export` now default to
+   `include_dry_run=False`. A dry run is logged (09 §5.6 wants the intended
+   action on paper) but is never a doc-12 precedent. Putting the exclusion in
+   the RECORDER means every corpus reader inherits it — cli.py's local
+   `_CorpusView` subclass is deleted, and the doc-13 retrieval to come gets
+   the rule for free. `from_json` fails CLOSED: anything but exactly `false`
+   counts as a dry run. → `tests/test_actions_recorder.py`,
+   `tests/test_integration.py`.
+4. **`merge_tags(..., normalized=, extra_map=)`** (frontmatter seat). Spec
+   05 §2.6 (move) says "dedupes case-insensitively"; spec 05 §4 (merge) says
+   "dedupe on normalized form". Those are genuinely different keys and both
+   are correct, so the key is a keyword instead of one implementation being
+   wrong half the time. `merge_into_note` passes `normalized=True` with the
+   configured `tag_normalization` map. → `tests/test_frontmatter.py`,
+   `tests/test_integration.py`.
+5. **`update_frontmatter(..., replace_keys=)`** (cli seat). Spec 07 lets a
+   `[[metadata_fields]]` entry declare `append = false`; `tags` merges by
+   contract, so `organize set-meta` had to clear-then-set — two writes, two
+   log lines and TWO ActionRecords for one logical edit, i.e. a corpus that
+   misreports what Matt did. Now one atomic op. → `tests/test_integration.py`.
+6. **`ServerError` for an unusable socket path** (cli seat). `organize serve
+   --socket <bad>` surfaced a bare `PermissionError`; the CLI could not
+   attach a hint to an exception it did not raise (09 §1.5). `_bind` now
+   converts every OS-level failure, with errno-specific hints — including the
+   AF_UNIX ~104-byte path limit, which CPython reports as a bare `OSError`
+   with no errno, so the hint is derived from the path length. The CLI also
+   no longer prints "listening on X" before the bind has actually succeeded.
+   → `tests/test_integration.py`.
+7. **`RouteMatch.para_type`** (routes seat). `as_suggestion()` takes no
+   Config and guessed the PARA type from the destination's leading path
+   segment; a vault that renames a PARA root (`projects = "p"`) would type
+   its route entries `"p"` while scored entries for the same folder were
+   typed `"projects"`, and the UI groups on that field. `resolve()` has the
+   Config and now fills the field; the leading-segment reading remains the
+   fallback for a hand-built `RouteMatch`. → `tests/test_routes.py`.
+8. **frontmatter single-parse + libyaml** (index seat, perf). `_parse_with_
+   pyyaml` parsed every block TWICE (`yaml.load` then `yaml.compose`) on the
+   pure-Python loader. It now composes once and constructs the document from
+   that node graph, and derives from `CSafeLoader` when the build has
+   libyaml. Both loaders consult the same Python `Resolver`, so the
+   timestamp-stays-a-string surgery is unaffected — pinned, since switching
+   the base class would otherwise be an invisible behaviour change.
+   **10k full reindex went from ~11.8 s (extrapolated) to a measured 1.67 s
+   against the 5 s gate.** → `tests/test_frontmatter.py`,
+   `tests/test_integration.py`.
+
+### Confirmed as-is (no code change; the seat's reading was right)
+
+9. **Frontmatter field ordering on rewrite.** Fields that came FROM the
+   source keep their source position; fields the caller ADDS are placed by
+   `KNOWN_FIELD_ORDER`. Reordering a user's existing file is exactly the
+   churn the round-trip law forbids. Downstream suites must assert per-field
+   content, never canonical re-ordering of a pre-existing file.
+10. **FrontmatterError tolerance boundary.** Unparseable YAML raises; the
+    INDEX catches it and indexes the note with `parse_error=True` and a
+    warning, while a MUTATING op refuses loudly rather than writing a guessed
+    file (03 §7 + 09 §1.5). Confirmed end-to-end in
+    `tests/test_integration.py`.
+11. **`new_folder` needs no index hook.** Spec 05 §6 says "refresh folder
+    caches/index dirs", but `VaultIndex.para_subfolders` enumerates
+    directories from DISK, so an empty new folder is a suggestion candidate
+    the moment mkdir returns. Pinned by
+    `test_new_folder_is_immediately_a_suggestion_candidate`, which will fail
+    if anyone makes `para_subfolders` record-derived.
+12. **`merge_route_suggestions` needs no `max_suggestions`.** Both
+    composition roots (`cli.cmd_suggest`, `server._suggest_for_note`) pass
+    `suggest()` output unmodified, already truncated. Recorded in the
+    docstring; a future caller wanting a different cap truncates first.
+13. **`CaptureFeaturesView.modalities`** (suggest seat) — CONFIRMED, keep.
+    Without it `record_move` writes an association key including
+    `modalities:` that `calculate_score` could never reproduce, so the
+    learned signal would silently never fire for any capture with
+    modalities. It stays a NON-signal (04 §2); the field exists for key
+    parity only.
+14. **`CaptureLike` protocol widening in learn.py** (suggest seat) —
+    CONFIRMED. Widening only, `NoteRecord` still conforms, and it avoids a
+    `learn → suggest` import cycle.
+
+### Rejected (with reason)
+
+15. **`learn` → `fileops.atomic_write`.** The two atomic writers implement
+    the same spec 05 §1.3 rule, but making the pure scoring/learning module
+    import the whole mutation layer (which pulls in `actions` and `index`) to
+    reuse ~15 lines would cost more than the duplication: structural decision
+    3 ("scoring/learning are pure") stops being enforceable. `learn` keeps
+    its local helper; its no-leftover-temp behaviour is already tested.
+16. **`learn.clear()`.** Spec 04 §6 lists it in the parity API, but no CLI or
+    RPC surface calls it and `LearningData()` is the constructor. Not added;
+    revisit if a `organize learn --reset` surface appears.
+17. **`ActionSchemaError` into `errors.py`.** It already derives from
+    `OrganizeError`, so CLI/RPC error mapping works. Moving it would widen
+    the shared taxonomy for one module's payload-validation error. Stays in
+    `actions.py`.
+18. **`env=` on `CorePaths`/`load_config`.** `config.py` reads no environment
+    at all — it delegates to `paths.expand`, which keeps the single env
+    touchpoint in `paths.py` (structural decision 4). Adding an env channel
+    to `load_config` would reopen exactly that. Tests inject via `CorePaths`.
+
+### Defect found by the new integration suite
+
+19. **CLI and server disagreed on a missing note.** `organize move
+    <nonexistent>` raised `VaultError`; the server's `op.move`/`note.get`
+    raised `ServerError`. `error.data.kind` is what clients branch on, and
+    `ServerError` invites a reconnect/retry when the only useful response is
+    to fix the path. The server now raises `VaultError` and `note.get` goes
+    through the same `_record_for` helper as the `op.*` methods (it had a
+    second, subtly different copy of the lookup). → pinned by
+    `test_the_two_doors_reject_the_same_bad_move`.
+
+## Public-interface additions since the scaffold
+
+Recorded so the manifest stays exhaustive. All are additive; no fixed
+skeleton signature changed incompatibly.
+
+- **config** — `IntegrateConfig`, `Config.integrate`, `RouteConfig.review`,
+  type aliases `EditMode` / `ReviewGate`, `CORE_KEYMAPS`,
+  `EXAMPLE_CONFIG_TOML`, `REMOVED_KEYS`.
+- **frontmatter** — `merge_tags(existing, new, *, normalized=False,
+  extra_map=None)`.
+- **index** — `NoteRecord.parse_error` and `NoteRecord.extra` (documented
+  extensions of the 03 §7 shape; both trailing and defaulted).
+- **suggest** — `CaptureFeaturesView.modalities`.
+- **learn** — `CaptureLike` protocol (widened parameter annotations only).
+- **actions** — `ActionContext.dry_run`; `include_dry_run=` on `query`,
+  `stats` and `export`; `ActionSchemaError`; `OPERATIONS` / `EDIT_MODES` /
+  `VERDICTS` / `TARGET_ROLES`; `ActionRecorder.month_files()`.
+- **fileops** — `OperationContext.clock`; `LoggedOperation.backup` and
+  `.dry_run`; `update_frontmatter(..., replace_keys=)`.
+  (`DRY_RUN_FILTER_KEY` was removed — superseded by `ActionContext.dry_run`.)
+- **routes** — `RouteMatch.para_type`, `ROUTE_SUGGESTION_SCORE`,
+  `ARCHIVE_SUGGESTION_TYPE`.
+- **session** — `default_filters()`, `TERMINAL_OUTCOMES`.
+- **server** — `MUTATING_METHODS`, `INDEX_CHANGING_METHODS`,
+  `EVENT_INDEX_UPDATED` / `EVENT_OP_PROGRESS` / `EVENT_TYPES` /
+  `EVENT_METHOD`, `NOT_IMPLEMENTED = -32001`, `RpcException`,
+  `encode_event()`, `handshake_line()`, `OrganizeServer.emit()` / `ready` /
+  `connection_count` / `stopping`.
+
+## Cross-module tests and measured performance (Phase 1 close)
+
+`tests/test_integration.py` (integrator seat) covers what no single seat
+could: real-`VaultIndex` fileops round-trips (including the persisted
+snapshot re-opened as a fresh process would) and CLI-vs-server behavioural
+equivalence for `move` — same vault bytes, same frontmatter, same
+ActionRecords, same operations log, same learning write, same rejection
+taxonomy.
+
+Measured 2026-08-16 (spec 09 §4 gates in brackets):
+
+| Measurement | Result | Gate |
+|---|---|---|
+| `full_reindex`, 10 000 generated notes | **1.7 s** idle, 2.9 s under load | < 5 s |
+| `full_reindex`, 1 000 notes (standalone / under suite load) | 0.17 s / 0.41 s | < 2 s (CI) |
+| `update_file`, incremental, 10k-note index | 0.33 ms | < 500 ms |
+| `suggest()` on a warm 1 000-note index | 0.03 ms median, 0.07 ms worst | < 100 ms |
+
+The 10k case is `pytest -m slow` (deselected by default via `addopts`, since
+generating the vault dominates its runtime); the 1k gate always runs.

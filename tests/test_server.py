@@ -48,75 +48,32 @@ from organize_core.server import (
 # ---------------------------------------------------------------------------
 
 
-class _ResolvedCorePaths(CorePaths):
-    """Stand-in for the integrator-owned derived paths.
-
-    ``paths.py`` is a SHARED file and its derived properties still
-    ``raise NotImplementedError``; this subclass implements exactly the
-    layout its docstrings specify (spec 10 §3) so the server suite can run
-    today. :func:`make_core_paths` prefers the real implementation the moment
-    that seat lands, so these tests convert to it without edits.
-    """
-
-    @property
-    def config_file(self) -> Path:
-        return self.config_dir / "config.toml"
-
-    @property
-    def index_path(self) -> Path:
-        return self.state_dir / "index.json"
-
-    @property
-    def learning_path(self) -> Path:
-        return self.state_dir / "learning.json"
-
-    @property
-    def operations_log(self) -> Path:
-        return self.state_dir / "operations.log"
-
-    @property
-    def actions_dir(self) -> Path:
-        return self.state_dir / "actions"
-
-    @property
-    def automations_db(self) -> Path:
-        return self.state_dir / "automations.db"
-
-    @property
-    def backups_dir(self) -> Path:
-        return self.state_dir / "backups"
-
-    @property
-    def socket_path(self) -> Path:
-        return self.runtime_dir / "organize-core.sock"
-
-    @property
-    def lock_path(self) -> Path:
-        return self.runtime_dir / "organize-core.lock"
-
-    def ensure_state_dirs(self) -> None:
-        # Deliberately does NOT create runtime_dir: the docstring scopes this
-        # to state, so the server must create the socket/lock parents itself.
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.actions_dir.mkdir(parents=True, exist_ok=True)
-        self.backups_dir.mkdir(parents=True, exist_ok=True)
-
-
 def make_core_paths(tmp_path: Path) -> CorePaths:
-    """Tmp-dir CorePaths; real implementation when available, else the
-    documented stand-in above. NEVER reads the process environment."""
-    kwargs = {
-        "config_dir": tmp_path / "config",
-        "state_dir": tmp_path / "state",
-        "runtime_dir": tmp_path / "runtime",
-    }
-    real = CorePaths(**kwargs)
-    try:
-        _ = (real.socket_path, real.lock_path, real.index_path, real.learning_path)
-        _ = (real.operations_log, real.actions_dir, real.backups_dir)
-    except NotImplementedError:
-        return _ResolvedCorePaths(**kwargs)
-    return real
+    """Tmp-dir CorePaths — the REAL implementation, never the process env.
+
+    This used to fall back to a local subclass because ``paths.py`` was still
+    a skeleton; that seat has landed, so the spec 10 §3 layout under test is
+    now the shipped one.
+    """
+    return CorePaths(
+        config_dir=tmp_path / "config",
+        state_dir=tmp_path / "state",
+        runtime_dir=tmp_path / "runtime",
+    )
+
+
+def test_the_real_core_paths_lay_state_out_per_spec_10_3(tmp_path: Path) -> None:
+    """Pins what the deleted stand-in used to assert by construction."""
+    paths = make_core_paths(tmp_path)
+    assert type(paths) is CorePaths
+    assert paths.config_file == tmp_path / "config" / "config.toml"
+    assert paths.index_path == tmp_path / "state" / "index.json"
+    assert paths.learning_path == tmp_path / "state" / "learning.json"
+    assert paths.operations_log == tmp_path / "state" / "operations.log"
+    assert paths.actions_dir == tmp_path / "state" / "actions"
+    assert paths.backups_dir == tmp_path / "state" / "backups"
+    assert paths.socket_path == tmp_path / "runtime" / "organize-core.sock"
+    assert paths.lock_path == tmp_path / "runtime" / "organize-core.lock"
 
 
 # ---------------------------------------------------------------------------
@@ -425,10 +382,15 @@ def test_note_get_tolerates_broken_frontmatter(client: RpcClient) -> None:
 
 
 def test_note_get_on_a_missing_note_is_an_organize_error(client: RpcClient) -> None:
+    """The kind is VaultError, not ServerError: the server is healthy, the
+    path is wrong. `error.data.kind` is what clients branch on, and it must
+    match what `organize` reports for the same mistake (integrator ruling —
+    see tests/test_integration.py::test_the_two_doors_reject_the_same_bad_move)."""
     error = client.error("note.get", path="capture/raw_capture/nope.md")
     assert error["code"] == ORGANIZE_ERROR
-    assert error["data"]["kind"] == "ServerError"
+    assert error["data"]["kind"] == "VaultError"
     assert error["data"]["hint"]
+    assert "note not found" in error["message"]
 
 
 def test_path_escaping_the_vault_is_refused(client: RpcClient) -> None:
@@ -959,3 +921,478 @@ def test_idle_timeout_does_not_fire_while_requests_keep_arriving(
     finally:
         srv.shutdown()
         thread.join(timeout=10.0)
+
+
+# ===========================================================================
+# Phase-1 fix pass — the RPC door must enforce what the CLI door enforces
+# ===========================================================================
+
+
+@pytest.fixture()
+def metadata_config(fixture_vault: Path) -> Config:
+    """The shipped example's doc-07 fields: a normalized list, an enum, a
+    boolean and a number."""
+    from organize_core.config import MetadataFieldConfig
+
+    return Config(
+        vault=VaultConfig(root=fixture_vault),
+        metadata_fields=[
+            MetadataFieldConfig(
+                key="tags",
+                type="list",
+                keymap="<leader>mt",
+                normalize="kebab",
+                complete="existing",
+            ),
+            MetadataFieldConfig(
+                key="importance",
+                type="enum",
+                keymap="<leader>mi",
+                values=["high", "medium", "low"],
+            ),
+            MetadataFieldConfig(key="remember", type="boolean", keymap="<leader>mr"),
+            MetadataFieldConfig(key="energy", type="number", keymap="<leader>me"),
+            MetadataFieldConfig(
+                key="people", type="list", keymap="<leader>mp", append=False, complete="existing"
+            ),
+        ],
+    )
+
+
+@pytest.fixture()
+def metadata_client(metadata_config: Config, paths: CorePaths) -> Iterator[RpcClient]:
+    srv = OrganizeServer(metadata_config, paths, idle_timeout_seconds=0)
+    thread = start_server(srv)
+    conn = RpcClient(srv.socket_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
+        srv.shutdown()
+        thread.join(timeout=10.0)
+
+
+def test_meta_set_applies_the_doc_07_list_rules(metadata_client: RpcClient) -> None:
+    """Doc 07 acceptance 1: "type `foo, Bar Baz` -> tags gains foo, bar-baz".
+
+    `_meta_set` handed `params['changes']` straight to `update_frontmatter`;
+    the coercion lived in `cli.py` and was never imported here, so the nvim
+    client — whose ONLY write path is RPC — wrote `tags: ["foo, Bar Baz"]`
+    into the vault. Spec 10 §3 exists to make that impossible: "CLI and UI
+    can never disagree".
+    """
+    note = QUIRK_FILES["metadata_empty_map"]
+    result = metadata_client.result("meta.set", path=note, changes={"tags": "foo, Bar Baz"})
+    assert result["ok"] is True, result["error"]
+
+    text = (vault_of_client(metadata_client) / note).read_text(encoding="utf-8")
+    assert "- foo" in text
+    assert "- bar-baz" in text, "kebab normalization did not run"
+    assert "foo, Bar Baz" not in text, "the raw string was written as one bogus tag"
+
+
+def test_meta_set_rejects_a_value_outside_an_enum(metadata_client: RpcClient) -> None:
+    """Doc 07 acceptance 2. The CLI raised ConfigError with the allowed
+    values; RPC accepted anything and wrote it."""
+    note = QUIRK_FILES["metadata_empty_map"]
+    before = (vault_of_client(metadata_client) / note).read_text(encoding="utf-8")
+
+    error = metadata_client.error("meta.set", path=note, changes={"importance": "totally-invalid"})
+    assert error["code"] == ORGANIZE_ERROR
+    assert error["data"]["kind"] == "ConfigError"
+    assert "high, medium, low" in error["data"]["hint"]
+    assert (vault_of_client(metadata_client) / note).read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    ("changes", "kind"),
+    [({"remember": "maybe"}, "ConfigError"), ({"energy": "abc"}, "ConfigError")],
+)
+def test_meta_set_rejects_a_mistyped_scalar(
+    metadata_client: RpcClient, changes: dict[str, Any], kind: str
+) -> None:
+    error = metadata_client.error("meta.set", path=QUIRK_FILES["metadata_empty_map"], changes=changes)
+    assert error["data"]["kind"] == kind
+
+
+def test_meta_set_accepts_the_natural_json_types(metadata_client: RpcClient) -> None:
+    """A JSON client sends a real list/bool/number; coercion must pass those
+    through rather than stringify them."""
+    note = QUIRK_FILES["metadata_empty_map"]
+    result = metadata_client.result(
+        "meta.set",
+        path=note,
+        changes={"tags": ["Deep Work"], "remember": True, "energy": 3, "importance": "high"},
+    )
+    assert result["ok"] is True, result["error"]
+    text = (vault_of_client(metadata_client) / note).read_text(encoding="utf-8")
+    assert "- deep-work" in text
+    assert "remember: true" in text
+    assert "energy: 3" in text
+
+
+def test_meta_set_replaces_a_list_field_declaring_append_false(
+    metadata_client: RpcClient,
+) -> None:
+    """Spec 07 `append = false`, the same rule `organize set-meta` applies."""
+    note = QUIRK_FILES["metadata_empty_map"]
+    metadata_client.result("meta.set", path=note, changes={"people": "alice, bob"})
+    metadata_client.result("meta.set", path=note, changes={"people": "carol"})
+    text = (vault_of_client(metadata_client) / note).read_text(encoding="utf-8")
+    assert "- carol" in text
+    assert "- alice" not in text, "append = false must REPLACE"
+
+
+def test_meta_fields_exposes_the_definitions_and_completions(
+    metadata_client: RpcClient,
+) -> None:
+    """Spec 07 + 10 §3: `metadata_fields` lives in core config so the UI
+    reads it FROM the core. Neither surface exposed it, nor
+    `VaultIndex.values_of`, so `complete = "existing"` was unreachable from
+    any thin client — the capability worked in-core and was dead code from
+    the outside."""
+    metadata_client.result("index.reindex")
+    payload = metadata_client.result("meta.fields")
+    fields = {entry["key"]: entry for entry in payload["fields"]}
+    assert fields["importance"]["values"] == ["high", "medium", "low"]
+    assert fields["importance"]["completions"] == ["high", "medium", "low"]
+    assert fields["tags"]["normalize"] == "kebab"
+    assert "impro" in fields["tags"]["completions"], "complete = 'existing' reads the vault"
+    assert fields["people"]["append"] is False
+
+
+def test_meta_values_lists_the_existing_values_of_a_key(metadata_client: RpcClient) -> None:
+    metadata_client.result("index.reindex")
+    payload = metadata_client.result("meta.values", key="tags")
+    assert payload["key"] == "tags"
+    assert "impro" in payload["values"]
+    assert payload["values"] == sorted(payload["values"])
+
+
+def vault_of_client(conn: RpcClient) -> Path:
+    """The fixture vault root, read back off the server via note.get."""
+    record = conn.result("note.get", path=QUIRK_FILES["metadata_empty_map"])["record"]
+    return Path(record["path"]).parents[2]
+
+
+# --- the counterfactual survives the RPC boundary (spec 12 §2) -------------
+
+
+def test_op_move_records_the_counterfactual_it_was_given(
+    client: RpcClient, server: OrganizeServer, tmp_path: Path
+) -> None:
+    """Spec 12 §3: "a session of 5 actions yields 5 records with consistent
+    session_id and correct chosen_ranks". `server._context()` read only
+    dry_run/actor/session_id and silently DISCARDED client-supplied
+    suggestions_shown / chosen_rank / durations_ms, so that gate was
+    unsatisfiable through the product and `actions stats` could never report
+    an accept rate from real usage."""
+    client.result("index.reindex")
+    result = client.result(
+        "op.move",
+        path=QUIRK_FILES["current_schema"],
+        destination="projects/blog",
+        session_id="ses_probe",
+        suggestions_shown=[
+            {"path": "projects/blog", "score": 3.1, "rank": 1, "reasons": ["tag"]},
+            {"path": "areas/health", "score": 1.0, "rank": 2, "reasons": ["type"]},
+        ],
+        chosen_rank=1,
+        durations_ms={"decision": 8400, "operation": 120},
+        auto_tags_present=["auto/idea"],
+    )
+    assert result["ok"] is True, result["error"]
+
+    records = read_action_records(server)
+    assert len(records) == 1
+    context = records[0]["context"]
+    assert context["session_id"] == "ses_probe"
+    assert context["chosen_rank"] == 1
+    assert [s["rank"] for s in context["suggestions_shown"]] == [1, 2]
+    assert context["durations_ms"] == {"decision": 8400, "operation": 120}
+    assert context["auto_tags_present"] == ["auto/idea"]
+
+
+def test_a_malformed_counterfactual_is_a_loud_invalid_params(client: RpcClient) -> None:
+    error = client.error(
+        "op.move",
+        path=QUIRK_FILES["current_schema"],
+        destination="projects/blog",
+        chosen_rank="first",
+    )
+    assert error["code"] == INVALID_PARAMS
+    assert error["data"]["kind"] == "InvalidParams"
+
+
+def read_action_records(server: OrganizeServer) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for month in sorted(Path(server.paths.actions_dir).glob("*.jsonl")):
+        for line in month.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                out.append(json.loads(line))
+    return out
+
+
+def test_a_move_records_the_destination_description(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    """Spec 12 §2 `targets[].description`. `areas/health/index.md` carries
+    one in the fixture vault, and it used to be recorded as null."""
+    client.result("index.reindex")
+    result = client.result(
+        "op.move", path=QUIRK_FILES["current_schema"], destination="areas/health"
+    )
+    assert result["ok"] is True, result["error"]
+    description = read_action_records(server)[0]["targets"][0]["description"]
+    assert description is not None and description.strip()
+
+
+# --- learning is a view derived from the ActionRecord (12 §2 "Uses" #2) ---
+
+
+def test_op_merge_still_records_learning_through_the_pipeline(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    client.result("index.reindex")
+    result = client.result(
+        "op.merge_commit", path=QUIRK_FILES["current_schema"], target=QUIRK_FILES["merge_target"]
+    )
+    assert result["ok"] is True, result["error"]
+
+    learning = json.loads(server.paths.learning_path.read_text(encoding="utf-8"))
+    assert learning["statistics"]["total_moves"] == 1
+    folder = str(vault_of(server) / "projects" / "blog")
+    assert list(learning["statistics"]["destinations"]) == [folder]
+
+
+def test_a_dry_run_move_teaches_nothing(client: RpcClient, server: OrganizeServer) -> None:
+    """A rehearsal is not a precedent — the rule every corpus reader already
+    applies now also governs the derived learning view."""
+    client.result("index.reindex")
+    result = client.result(
+        "op.move", path=QUIRK_FILES["current_schema"], destination="projects/blog", dry_run=True
+    )
+    assert result["ok"] is True and result["dry_run"] is True
+    assert not server.paths.learning_path.exists()
+
+
+# --- no-ai binds the CAPTURE of a merge/append too (vault law, spec 02) ---
+
+
+@pytest.mark.parametrize("actor", ["claude-integrate", "consumer:auto_tagger"])
+def test_an_ai_actor_cannot_merge_a_no_ai_capture_over_rpc(
+    client: RpcClient, server: OrganizeServer, actor: str
+) -> None:
+    """`server._op_merge_commit` takes `actor` straight from request params,
+    so this was reachable by any caller: a `no-ai: true` capture's body could
+    be copied into an ordinary note carrying no such marking."""
+    client.result("index.reindex")
+    target = vault_of(server) / QUIRK_FILES["merge_target"]
+    before = target.read_text(encoding="utf-8")
+
+    error = client.error(
+        "op.merge_commit",
+        path=QUIRK_FILES["no_ai"],
+        target=QUIRK_FILES["merge_target"],
+        actor=actor,
+    )
+    assert error["data"]["kind"] == "NoAiRefusal"
+    assert target.read_text(encoding="utf-8") == before
+
+
+# --- session.start: a misplaced key is loud, not silently unfiltered ------
+
+
+def test_session_start_accepts_top_level_filters(client: RpcClient) -> None:
+    """`search.query` accepted them at the top level; `session.start` ignored
+    them and returned an UNFILTERED session — a silent wrong answer in an API
+    whose stated stance is "an unknown key is a hard error naming the key"."""
+    client.result("index.reindex")
+    nested = client.result("session.start", filters={"tags": ["todo"]})
+    flat = client.result("session.start", tags=["todo"])
+    assert [c["path"] for c in flat["captures"]] == [c["path"] for c in nested["captures"]]
+    assert 0 < len(flat["captures"]) < len(client.result("session.start")["captures"])
+
+
+def test_session_start_rejects_an_unknown_top_level_key(client: RpcClient) -> None:
+    client.result("index.reindex")
+    error = client.error("session.start", totally_unknown_key=1)
+    assert error["code"] == ORGANIZE_ERROR
+    assert "totally_unknown_key" in error["message"]
+
+
+def test_session_start_rejects_a_filter_given_twice(client: RpcClient) -> None:
+    error = client.error("session.start", tags=["todo"], filters={"tags": ["impro"]})
+    assert error["code"] == INVALID_PARAMS
+    assert "tags" in error["message"]
+
+
+# --- protocol errors carry the same taxonomy as domain errors -------------
+
+
+@pytest.mark.parametrize(
+    ("method", "params", "code", "kind"),
+    [
+        ("meta.set", {}, INVALID_PARAMS, "InvalidParams"),
+        ("nope.method", {}, METHOD_NOT_FOUND, "MethodNotFound"),
+        ("events.subscribe", {"events": ["not-an-event"]}, INVALID_PARAMS, "InvalidParams"),
+    ],
+)
+def test_protocol_errors_carry_kind_and_hint(
+    client: RpcClient, method: str, params: dict[str, Any], code: int, kind: str
+) -> None:
+    """A client must be able to render taxonomy + hint through ONE code path.
+    Domain errors (-32000) carried `data.kind`/`data.hint`; the protocol
+    codes carried a bare message, so every client needed a special case."""
+    error = client.error(method, **params)
+    assert error["code"] == code
+    assert error["data"]["kind"] == kind
+    assert error["data"]["hint"]
+
+
+def test_a_parse_error_carries_kind_and_hint(client: RpcClient) -> None:
+    client.send_raw("{not json\n")
+    message = client.read_message()
+    assert message["error"]["data"]["kind"] == "ParseError"
+    assert message["error"]["data"]["hint"]
+
+
+def test_an_invalid_request_carries_kind_and_hint(client: RpcClient) -> None:
+    client.send_raw(json.dumps({"jsonrpc": "1.0", "id": 1, "method": "note.get"}) + "\n")
+    message = client.read_message()
+    assert message["error"]["data"]["kind"] == "InvalidRequest"
+    assert message["error"]["data"]["hint"]
+
+
+def test_method_not_found_still_lists_the_known_methods(client: RpcClient) -> None:
+    error = client.error("nope.method")
+    assert "meta.fields" in error["data"]["known_methods"]
+
+
+# --- the two doors agree (ARCHITECTURE ruling #19) ------------------------
+
+
+def test_both_doors_refuse_the_same_out_of_vault_destination(
+    client: RpcClient, server: OrganizeServer, tmp_path: Path
+) -> None:
+    """`test_the_two_doors_reject_the_same_bad_move` pinned agreement for a
+    MISSING note only, so the CLI's out-of-vault escape went unnoticed by the
+    whole suite. Both doors must refuse, and nothing may be written outside.
+    """
+    from organize_core.errors import VaultError
+    from organize_core.fileops import move_to_destination, require_in_vault
+
+    client.result("index.reindex")
+    outside = tmp_path / "OUTSIDE"
+
+    error = client.error("op.move", path=QUIRK_FILES["current_schema"], destination=str(outside))
+    assert error["code"] == ORGANIZE_ERROR
+    assert "outside the vault" in error["message"]
+    assert not outside.exists()
+
+    # ...and the shared enforcement point behind BOTH doors agrees.
+    with pytest.raises(VaultError):
+        require_in_vault(server.config, outside, "destination folder")
+    assert move_to_destination is not None  # imported to pin the call site exists
+
+
+def test_the_archive_folder_is_resolved_like_the_cli_resolves_it(
+    fixture_vault: Path, paths: CorePaths, tmp_path: Path
+) -> None:
+    """`cli._archive_folder` resolves and `server._archive_folder` did not,
+    so a symlinked vault root made the two doors emit DIFFERENT archive
+    suggestion paths for the same vault (04 §1)."""
+    from organize_core.cli import _archive_folder as cli_archive_folder
+
+    link = tmp_path / "vault-link"
+    link.symlink_to(fixture_vault)
+    config = make_config(link)
+    srv = OrganizeServer(config, paths, idle_timeout_seconds=0)
+    assert srv._archive_folder() == cli_archive_folder(config)
+
+
+# --- idle timeout must not evict a connected subscriber -------------------
+
+
+def test_a_connected_client_keeps_the_server_alive(
+    config: Config, paths: CorePaths
+) -> None:
+    """`_idle_expired` consulted only `_inflight` and `_last_activity`, never
+    `_connections`, so a Neovim client holding an `events.subscribe` stream
+    lost it after `idle_timeout_seconds` with no notification."""
+    srv = OrganizeServer(config, paths, idle_timeout_seconds=0.2)
+    thread = start_server(srv)
+    conn = RpcClient(srv.socket_path)
+    try:
+        conn.result("events.subscribe", events=[EVENT_INDEX_UPDATED])
+        time.sleep(0.8)  # >> the idle timeout, with the client silent
+        assert not srv.stopping, "the server shut down under a connected subscriber"
+        assert conn.result("index.reindex")["total"] > 0
+    finally:
+        conn.close()
+        srv.shutdown()
+        thread.join(timeout=10.0)
+
+
+def test_the_server_still_idles_out_with_no_client(config: Config, paths: CorePaths) -> None:
+    """The other half: the timeout must still fire once everyone has left."""
+    srv = OrganizeServer(config, paths, idle_timeout_seconds=0.2)
+    thread = start_server(srv)
+    try:
+        RpcClient(srv.socket_path).close()
+        thread.join(timeout=15.0)
+        assert not thread.is_alive(), "the server never idled out"
+    finally:
+        srv.shutdown()
+        thread.join(timeout=10.0)
+
+
+def test_a_session_of_five_rpc_actions_yields_five_records_with_correct_ranks(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    """Spec 12 §3, driven through the PRODUCT: "a session of 5 actions yields
+    5 records with consistent session_id and correct chosen_ranks".
+
+    The repo's gate for this hand-constructed `ActionContext(chosen_rank=...)`
+    and fed it straight to the recorder, so it proved the dataclass rather
+    than the write path — and the write path could not produce those fields
+    at all, because `server._context()` read only dry_run/actor/session_id and
+    discarded the rest.
+    """
+    client.result("index.reindex")
+    session = client.result("session.start")["session_id"]
+    shown = [
+        {"path": "projects/blog", "score": 3.25, "rank": 1, "reasons": ["exact tag"]},
+        {"path": "areas/health", "score": 1.5, "rank": 2, "reasons": ["type"]},
+    ]
+
+    calls = [
+        ("op.move", {"path": QUIRK_FILES["current_schema"], "destination": "projects/blog"}, 1),
+        ("folder.create", {"para_type": "resources", "name": "fresh-topic"}, None),
+        ("meta.set", {"path": QUIRK_FILES["metadata_empty_map"], "changes": {"importance": "high"}}, None),
+        ("op.archive", {"path": QUIRK_FILES["metadata_empty_list"]}, 3),
+        (
+            "op.merge_commit",
+            {"path": QUIRK_FILES["scalar_tags"], "target": QUIRK_FILES["merge_target"]},
+            2,
+        ),
+    ]
+    for method, params, rank in calls:
+        payload = dict(params, session_id=session, suggestions_shown=shown)
+        if rank is not None:
+            payload["chosen_rank"] = rank
+        response = client.call(method, **payload)
+        assert "error" not in response, response["error"]
+
+    records = read_action_records(server)
+    assert len(records) == 5, "every state-changing operation appends one record (12 §2)"
+    assert {r["context"]["session_id"] for r in records} == {session}
+    assert [r["context"]["chosen_rank"] for r in records] == [1, None, None, 3, 2]
+    assert all(len(r["context"]["suggestions_shown"]) == 2 for r in records)
+    assert [r["operation"] for r in records] == [
+        "move",
+        "create_folder",
+        "meta_edit",
+        "archive",
+        "merge",
+    ]

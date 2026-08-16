@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import QUIRK_FILES
+from organize_core import frontmatter as frontmatter_mod
 from organize_core.errors import FrontmatterError
 from organize_core.frontmatter import (
     KNOWN_FIELD_ORDER,
@@ -628,6 +629,53 @@ def test_merge_tags_handles_empty_inputs() -> None:
     assert merge_tags([], []) == []
 
 
+# --- the two dedupe keys the spec asks for --------------------------------
+#
+# 05 §2.6 (move) says "dedupes case-insensitively"; 05 §4 (merge) says
+# "dedupe on normalized form". Those are genuinely different keys and both
+# are real, so merge_tags takes the key as a keyword rather than picking one
+# and being wrong for the other operation half the time.
+
+
+def test_default_key_is_case_insensitive_only_and_keeps_punctuation_variants() -> None:
+    """05 §2.6: casefold ONLY. `deep_work` and `deep-work` are different tags
+    under this key and both survive a move."""
+    assert merge_tags(["deep-work"], ["deep_work", "DEEP-WORK"]) == ["deep-work", "deep_work"]
+
+
+def test_normalized_key_collapses_what_casefold_cannot() -> None:
+    """05 §4: the merge key is normalize_tag, which is strictly stronger —
+    `deep_work`, `Deep Work` and `deep-work` are ONE tag."""
+    assert merge_tags(
+        ["deep-work"], ["deep_work", "Deep Work", "DEEP-WORK"], normalized=True
+    ) == ["deep-work"]
+
+
+def test_normalized_key_keeps_the_targets_spelling_not_the_captures() -> None:
+    """05 §4 is target-first: the note being merged INTO keeps its casing."""
+    assert merge_tags(["Deep_Work", "impro"], ["deep-work", "new"], normalized=True) == [
+        "Deep_Work",
+        "impro",
+        "new",
+    ]
+
+
+def test_normalized_key_honors_the_tag_normalization_map() -> None:
+    """The merge key is the SAME normalizer scoring and routing use, config
+    table included — otherwise a tag that scores as `projects` could still be
+    stored twice on the merged note."""
+    extra = {"project": "projects"}
+    assert merge_tags(["projects"], ["project"], normalized=True, extra_map=extra) == ["projects"]
+    # ...and without the map they are legitimately distinct tags.
+    assert merge_tags(["projects"], ["project"], normalized=True) == ["projects", "project"]
+
+
+def test_normalized_merge_is_idempotent() -> None:
+    once = merge_tags(["Deep_Work"], ["deep-work", "impro"], normalized=True)
+    assert once == ["Deep_Work", "impro"]
+    assert merge_tags(once, ["DEEP WORK", "impro"], normalized=True) == once
+
+
 def test_merge_sources_is_exact_string_union_target_first() -> None:
     assert merge_sources(["me", "clipboard"], ["web page", "me"]) == [
         "me",
@@ -664,3 +712,77 @@ def test_is_no_ai_false_when_explicitly_disabled() -> None:
 )
 def test_is_no_ai_tolerates_real_world_spellings(line: str) -> None:
     assert is_no_ai(parse(f"---\n{line}\n---\nbody\n")) is True
+
+
+# ---------------------------------------------------------------------------
+# Loader choice and single-parse (spec 09 §4 perf gate)
+# ---------------------------------------------------------------------------
+#
+# The index seat measured a cold scan of 1000 capture-shaped notes at ~1.18 s,
+# of which ~1.0 s was inside parse(): the block was parsed TWICE (yaml.load for
+# the values, yaml.compose for the key line numbers) on the pure-Python loader,
+# which put the 09 §4 "10k notes < 5 s" gate out of reach. Both halves are
+# fixed here, and both are pinned — a well-meaning simplification back to
+# `yaml.load(...) + yaml.compose(...)` would restore the old cost silently.
+
+
+def test_the_fast_c_loader_is_used_when_the_build_has_libyaml() -> None:
+    yaml = pytest.importorskip("yaml")
+    if not getattr(yaml, "__with_libyaml__", False):
+        pytest.skip("this PyYAML build has no libyaml")
+    assert issubclass(frontmatter_mod._FrontmatterLoader, yaml.CSafeLoader)
+
+
+def test_timestamps_stay_strings_on_whichever_loader_is_active() -> None:
+    """06 §4: timestamp-like scalars must stay strings. The implicit-resolver
+    surgery is done on the Python Resolver, which BOTH the C and the pure
+    loader consult — this is the test that says so, since switching the base
+    class would otherwise be an invisible behaviour change."""
+    fields = parse(
+        "---\n"
+        "created_date: 2026-06-10\n"
+        "timestamp: 2026-06-10T21:37:42.809743+00:00\n"
+        "count: 3\n"
+        "flag: true\n"
+        "---\nbody\n"
+    ).frontmatter.fields
+    assert fields["created_date"] == "2026-06-10"
+    assert isinstance(fields["created_date"], str)
+    assert fields["timestamp"] == "2026-06-10T21:37:42.809743+00:00"
+    assert isinstance(fields["timestamp"], str)
+    # ...while genuinely-typed scalars are still resolved normally.
+    assert fields["count"] == 3
+    assert fields["flag"] is True
+
+
+def test_a_document_is_parsed_exactly_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The values and the per-field source line numbers come from ONE pass.
+    Counting loader instantiations is the cheapest honest proxy: the old
+    `yaml.load` + `yaml.compose` pair built two."""
+    pytest.importorskip("yaml")
+    built = []
+
+    class CountingLoader(frontmatter_mod._FrontmatterLoader):  # type: ignore[misc, name-defined]
+        def __init__(self, stream):  # noqa: ANN001, ANN204
+            built.append(stream)
+            super().__init__(stream)
+
+    monkeypatch.setattr(frontmatter_mod, "_FrontmatterLoader", CountingLoader)
+    text = (
+        "---\n"
+        "title: A note\n"
+        "tags: [impro, creativity]\n"
+        "location:\n  city: chicago\n"
+        "created_date: 2026-06-10\n"
+        "---\n\n## Content\n\nbody\n"
+    )
+    doc = parse(text)
+
+    assert len(built) == 1, f"parsed {len(built)} times, expected 1"
+    # ...and the single pass still produced BOTH halves: the values...
+    assert doc.frontmatter.fields["tags"] == ["impro", "creativity"]
+    assert doc.frontmatter.fields["location"] == {"city": "chicago"}
+    # ...and the chunk boundaries that make the round-trip law work.
+    assert serialize(doc) == text
+    doc.frontmatter.fields["title"] = "Renamed"
+    assert serialize(doc) == text.replace("title: A note", "title: Renamed")

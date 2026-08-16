@@ -103,8 +103,20 @@ _RESERVED_PLAIN = frozenset(
 
 if _yaml is not None:  # pragma: no branch - trivial
 
-    class _FrontmatterLoader(_yaml.SafeLoader):
-        """SafeLoader that keeps timestamp-like scalars as STRINGS (06 §4).
+    #: The fastest SAFE loader this PyYAML build offers. ``CSafeLoader`` is the
+    #: libyaml binding and parses several times faster than the pure-Python
+    #: one; it is only present when PyYAML was built with libyaml. Both share
+    #: the same Python ``Resolver``, so the timestamp surgery below applies
+    #: identically either way (asserted by
+    #: ``test_timestamps_stay_strings_on_whichever_loader_is_active``).
+    _SafeLoaderBase = (
+        _yaml.CSafeLoader
+        if getattr(_yaml, "__with_libyaml__", False) and hasattr(_yaml, "CSafeLoader")
+        else _yaml.SafeLoader
+    )
+
+    class _FrontmatterLoader(_SafeLoaderBase):  # type: ignore[valid-type, misc]
+        """Safe loader that keeps timestamp-like scalars as STRINGS (06 §4).
 
         The implicit-resolver table is rebuilt as a *new* class attribute —
         mutating the inherited one would corrupt ``yaml.SafeLoader`` for every
@@ -274,15 +286,40 @@ def normalize_tag(value: str, extra_map: dict[str, str] | None = None) -> str:
     return normalized
 
 
-def merge_tags(existing: list[str], new: list[str]) -> list[str]:
-    """Case-insensitive dedupe that PRESERVES existing order and casing,
-    appending genuinely-new tags at the end (spec 05 §2.6 — the original
-    re-sorted and re-cased the user's list, 08 §A24)."""
+def merge_tags(
+    existing: list[str],
+    new: list[str],
+    *,
+    normalized: bool = False,
+    extra_map: dict[str, str] | None = None,
+) -> list[str]:
+    """Dedupe that PRESERVES existing order and casing, appending
+    genuinely-new tags at the end (spec 05 §2.6 — the original re-sorted and
+    re-cased the user's list, 08 §A24).
+
+    The DEDUPE KEY differs by operation, and the spec says so in two places:
+
+    - ``normalized=False`` (default) — case-insensitive, per spec 05 §2.6's
+      move rule: "Tag merge dedupes case-insensitively but preserves existing
+      order and casing".
+    - ``normalized=True`` — dedupe on :func:`normalize_tag` form, per spec
+      05 §4's merge rule: "``tags`` = target's ∪ capture's (dedupe on
+      normalized form, target-first order)". This is a strictly STRONGER key:
+      ``foo_bar`` and ``foo-bar`` collapse under it but not under casefold.
+
+    The normalizing form is a keyword rather than a second function so there
+    stays exactly one tag-merge implementation and one normalizer (09 §2).
+    ``extra_map`` is the ``suggestions.tag_normalization`` table, threaded
+    through so this key matches the one scoring and routing use.
+
+    Whichever key is used, the RETAINED string is the first spelling seen —
+    the target's own casing always wins over the capture's.
+    """
     merged: list[str] = []
     seen: set[str] = set()
     for item in list(existing or []) + list(new or []):
         text = item if isinstance(item, str) else str(item)
-        key = text.strip().casefold()
+        key = normalize_tag(text, extra_map) if normalized else text.strip().casefold()
         if key in seen:
             continue
         seen.add(key)
@@ -351,13 +388,26 @@ def _parse_mapping(fm_text: str) -> tuple[dict[str, Any], list[tuple[Any, int]]]
 
 
 def _parse_with_pyyaml(fm_text: str) -> tuple[dict[str, Any], list[tuple[Any, int]]]:
+    """Parse the block ONCE, yielding both the values and each top-level key's
+    source line.
+
+    We need the node graph anyway (the round-trip law chunks the source by
+    ``start_mark.line``), so the values are constructed FROM that graph rather
+    than by scanning the text a second time. The previous ``yaml.load`` +
+    ``yaml.compose`` pair parsed every block twice, which dominated a cold
+    vault scan and put the spec 09 §4 10k-note gate out of reach.
+    """
+    loader = _FrontmatterLoader(fm_text)
     try:
-        data = _yaml.load(fm_text, Loader=_FrontmatterLoader)
-        node = _yaml.compose(fm_text, Loader=_FrontmatterLoader)
-    except _yaml.YAMLError as exc:
-        raise FrontmatterError(
-            f"unparseable YAML frontmatter: {_one_line(exc)}", hint=_PARSE_HINT
-        ) from exc
+        try:
+            node = loader.get_single_node()
+            data = loader.construct_document(node) if node is not None else None
+        except _yaml.YAMLError as exc:
+            raise FrontmatterError(
+                f"unparseable YAML frontmatter: {_one_line(exc)}", hint=_PARSE_HINT
+            ) from exc
+    finally:
+        loader.dispose()
     if data is None:
         return {}, []
     if not isinstance(data, dict):
@@ -367,18 +417,34 @@ def _parse_with_pyyaml(fm_text: str) -> tuple[dict[str, Any], list[tuple[Any, in
         )
     key_lines: list[tuple[Any, int]] = []
     if node is not None and isinstance(node, _yaml.MappingNode):
-        constructor = _FrontmatterLoader("")
         for key_node, _value_node in node.value:
-            try:
-                key = constructor.construct_object(key_node, deep=True)
-            except _yaml.YAMLError:  # pragma: no cover - yaml.load would have raised
-                continue
-            try:
-                hash(key)
-            except TypeError:  # pragma: no cover - yaml.load would have raised
-                continue
+            # The document is already constructed, so a key node here has a
+            # constructed counterpart in `data`; scalar keys (all but a
+            # pathological few) need no re-construction at all.
+            key = key_node.value if isinstance(key_node, _yaml.ScalarNode) else None
+            if key is None or not isinstance(key, str) or key not in data:
+                key = _reconstruct_key(key_node, data)
+                if key is _MISSING_KEY:
+                    continue  # pragma: no cover - construct_document would have raised
             key_lines.append((key, key_node.start_mark.line))
     return data, key_lines
+
+
+_MISSING_KEY: Any = object()
+
+
+def _reconstruct_key(key_node: Any, data: dict[Any, Any]) -> Any:
+    """Recover a non-plain-string key (``true``, ``2026-06-10``, an int, a
+    quoted key that resolved to a non-str) by constructing just that node."""
+    constructor = _FrontmatterLoader("")
+    try:
+        key = constructor.construct_object(key_node, deep=True)
+        hash(key)
+    except (_yaml.YAMLError, TypeError):  # pragma: no cover - unreachable via load
+        return _MISSING_KEY
+    finally:
+        constructor.dispose()
+    return key if key in data else _MISSING_KEY
 
 
 def _one_line(exc: Exception) -> str:

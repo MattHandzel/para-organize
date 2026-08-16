@@ -15,7 +15,15 @@ Invariants (spec 05 §1) made STRUCTURALLY unavoidable here:
   cross-filesystem fallback = copy+verify+unlink (05 §1.3, 05 §3).
 - **Concurrent-modification check** (spec 10 §4) — mtime+hash captured at
   read; any mismatch at mutate time raises ConcurrentModificationError and
-  touches nothing (the vault is Syncthing-synced).
+  touches nothing (the vault is Syncthing-synced). "At read" is literal:
+  :func:`_read_document` stats the mtime, reads the bytes ONCE, and builds
+  the :class:`FileSnapshot` from those bytes. Nothing between the read and
+  the commit may re-derive the snapshot from disk — a snapshot taken after
+  the read silently blesses whatever landed in between.
+- **Containment** (spec 05 §1) — :func:`require_in_vault` refuses any
+  source/destination/target outside ``config.vault.root``. It lives here,
+  not in a composition root, because fileops is the only writer and the two
+  doors must agree (ARCHITECTURE ruling #19).
 - Global ``--dry-run`` (spec 09 §5.6): with ``ctx.dry_run`` no write, no
   archive, no filesystem mutation of any kind — the returned
   OperationResult describes what WOULD happen (used for supervised first
@@ -49,8 +57,10 @@ mode … diff intended actions against expectations", which is only useful if
 the intended actions are written down. (The skeleton docstring said "no log
 mutation"; the spec wins, per the ground rules.) The oplog marks them with
 a third status token ``[DRY-RUN]``; the ActionRecord marks them with
-``context.filters["dry_run"] = True`` because ``ActionContext`` (spec 12 §2,
-owned by another module) has no dry-run field yet.
+``context.dry_run = True``. That field is first-class in ``ActionContext``
+(the integrator granted the seam request), and ``ActionRecorder.query`` /
+``stats`` / ``export`` exclude such records by default — a rehearsal is
+logged, but it is never a doc-12 precedent.
 
 *Failure surface.* Ordinary operational failures (missing source,
 unwritable destination, unknown PARA type) return ``OperationResult(ok=
@@ -76,6 +86,13 @@ refused with :class:`NoAiRefusal` for any operation that WRITES note
 content — move (it rewrites the copy's frontmatter), merge, append,
 metadata/tag edits. Pure relocation (:func:`archive_capture`) and
 :func:`new_folder` change no note content and stay allowed.
+
+The rule is applied to BOTH files a merge/append touches. The exemption
+above is justified by "pure relocation … changes no note content", which is
+not true of the CAPTURE in a merge or append: those duplicate the capture's
+body into a different note, which is exactly how ``no-ai`` content escapes
+its container. Refusing only the target let an automated actor copy a
+protected note's body into an ordinary one.
 """
 
 from __future__ import annotations
@@ -101,11 +118,18 @@ from organize_core.actions import (
     ActionRecord,
     ActionRecorder,
     CaptureState,
+    SuggestionShown,
     TargetState,
     new_action_id,
 )
 from organize_core.config import Config
-from organize_core.errors import ConcurrentModificationError, NoAiRefusal, OperationError
+from organize_core.errors import (
+    ConcurrentModificationError,
+    FrontmatterError,
+    NoAiRefusal,
+    OperationError,
+    VaultError,
+)
 from organize_core.frontmatter import (
     Document,
     Frontmatter,
@@ -136,9 +160,6 @@ _ACTION_OPERATION: dict[str, str] = {
 #: and is bound by the ``no-ai`` vault law (spec 02).
 HUMAN_ACTORS: frozenset[str] = frozenset({"matt", "user", "human"})
 
-#: Key under ``ActionContext.filters`` marking a dry run (see module docstring).
-DRY_RUN_FILTER_KEY = "dry_run"
-
 #: Default per-route append template (spec 11 §1). Placeholders are replaced
 #: literally — NEVER ``str.format`` (08 §B15: templates contain literal ``{}``).
 DEFAULT_APPEND_TEMPLATE = "## {date} — from {capture_id}\n\n{body}"
@@ -160,9 +181,44 @@ _replace = os.replace
 # --- small helpers ---------------------------------------------------------
 
 
-def _one_line(text: str) -> str:
-    """Collapse a value to a single log-line-safe fragment (one op == one line)."""
-    return re.sub(r"\s+", " ", str(text)).strip()
+#: The three literal sequences that carry meaning in the spec 05 §1.5 line
+#: grammar. A path is allowed to contain any of them (``a -> b.md`` is a
+#: legal filename), so they are escaped rather than assumed absent.
+_LOG_ESCAPES: tuple[tuple[str, str], ...] = (
+    ("\\", "\\\\"),  # first: the escape character itself
+    ("\n", "\\n"),
+    ("\r", "\\r"),
+    ("\t", "\\t"),
+    (" -> ", " -\\> "),
+    (" Backup: ", " Backup\\: "),
+    (" Error: ", " Error\\: "),
+)
+
+_LOG_UNESCAPE = re.compile(r"\\(.)")
+_LOG_UNESCAPE_MAP = {"\\": "\\", "n": "\n", "r": "\r", "t": "\t", ">": ">", ":": ":"}
+
+
+def _escape_field(text: str) -> str:
+    """Make one field safe for the single-line log grammar WITHOUT destroying
+    it (spec 05 §1.5 "the log must contain enough to manually undo any
+    operation"; §8 "every operation manually reversible").
+
+    Only the characters that actually break the grammar are touched, and
+    every one of them is reversible by :func:`_unescape_field`. The old
+    implementation collapsed whitespace runs, so a note named
+    ``two  spaces\\tand tab.md`` was logged under a path that does not
+    exist — the log, ``parse_log_line`` and ``undo_info`` all named a file
+    nobody could find.
+    """
+    out = str(text)
+    for raw, escaped in _LOG_ESCAPES:
+        out = out.replace(raw, escaped)
+    return out
+
+
+def _unescape_field(text: str) -> str:
+    """Exact inverse of :func:`_escape_field`."""
+    return _LOG_UNESCAPE.sub(lambda m: _LOG_UNESCAPE_MAP.get(m.group(1), m.group(1)), text)
 
 
 def _iso(now: float) -> str:
@@ -185,6 +241,14 @@ def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _file_mode(path: Path) -> int | None:
+    """The permission bits of an existing file, or ``None`` if unreadable."""
+    try:
+        return os.stat(path).st_mode & 0o7777
+    except OSError:  # pragma: no cover - the caller has just read the file
+        return None
+
+
 def _hash_file(path: Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -195,15 +259,61 @@ def _hash_file(path: Path) -> str:
 
 def _read_text(path: Path) -> str:
     """Every text read in this module: utf-8 with ``errors="replace"`` so a
-    single bad byte can never crash an operation (06 §6 / 08 §B18)."""
+    single bad byte can never crash an operation (06 §6 / 08 §B18).
+
+    READ-BACK / VERIFICATION ONLY. The mutation path goes through
+    :func:`_read_document`, which decodes STRICTLY — see there.
+    """
     return Path(path).read_text(encoding="utf-8", errors="replace")
 
 
-def _read_document(path: Path) -> tuple[Document, str]:
-    """Read + parse. ``FrontmatterError`` propagates: a mutating operation
-    must refuse to rewrite a note it cannot round-trip (errors.py contract)."""
-    text = _read_text(path)
-    return parse(text), text
+def _decode_for_mutation(raw: bytes, path: Path) -> str:
+    """Decode a note we are about to REWRITE, strictly.
+
+    ``errors="replace"`` is right for scans and read-backs, and wrong here:
+    it turns every undecodable byte into U+FFFD, and the operation then
+    writes that corruption into the destination while reporting ``ok=True``.
+    The errors.py contract is "scans tolerate, mutations refuse" — broken
+    YAML already refuses, and undecodable bytes now refuse the same way
+    instead of silently damaging the copy (05 §1 "no code path may lose note
+    content").
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise FrontmatterError(
+            f"{path} is not valid UTF-8 (byte {exc.start} of {len(raw)}: {exc.reason}); "
+            "refusing to rewrite it because the copy would silently differ from the original",
+            hint=(
+                "fix the encoding of the note (e.g. `iconv -f latin1 -t utf-8`) and retry; "
+                "reading, scanning and archiving the note still work — only rewrites refuse."
+            ),
+        ) from exc
+
+
+def _read_document(path: Path) -> tuple[Document, str, FileSnapshot]:
+    """Read + parse + snapshot, from ONE read of ONE byte string.
+
+    The snapshot is derived from the bytes that were actually read, with the
+    mtime stat'd BEFORE the read — it is NOT a second stat+hash of the file
+    afterwards. That ordering is the whole concurrent-modification guarantee
+    (spec 10 §4, module docstring "mtime+hash captured at read"): the old
+    code read the file and only then called ``snapshot_file()``, so any
+    concurrent write landing in between was invisible, the operation
+    overwrote the file from the stale read, and it reported ``ok=True``.
+    The window was not theoretical — merge parsed a second document inside
+    it.
+
+    ``FrontmatterError`` propagates for unparseable YAML *and* for
+    undecodable bytes: a mutating operation must refuse to rewrite a note it
+    cannot round-trip (errors.py contract).
+    """
+    path = Path(path)
+    mtime = path.stat().st_mtime
+    raw = path.read_bytes()
+    snapshot = FileSnapshot(path=str(path), mtime=mtime, sha256=hashlib.sha256(raw).hexdigest())
+    text = _decode_for_mutation(raw, path)
+    return parse(text), text, snapshot
 
 
 def _fields(doc: Document) -> dict[str, Any]:
@@ -245,6 +355,35 @@ def is_ai_actor(actor: str) -> bool:
     if name in HUMAN_ACTORS or name.startswith("human:"):
         return False
     return True
+
+
+def _resolved(path: Path) -> Path:
+    """``resolve()`` that never raises on a dangling path (non-strict)."""
+    try:
+        return Path(path).resolve()
+    except OSError:  # pragma: no cover - resolve() is non-strict on 3.12
+        return Path(path).absolute()
+
+
+def require_in_vault(config: Config, path: Path, what: str) -> Path:
+    """Refuse any path outside ``config.vault.root`` (spec 05 §1).
+
+    THE containment check, and it lives here rather than in each composition
+    root on purpose: fileops is the only writer, so this is the only place
+    both doors inherit it from (ARCHITECTURE ruling #19 — the two doors must
+    agree). The server used to enforce containment at its own boundary while
+    ``organize move`` happily wrote note content to ``../OUTSIDE`` and
+    reported success.
+    """
+    root = _resolved(config.vault.root)
+    candidate = _resolved(path)
+    if candidate != root and root not in candidate.parents:
+        raise VaultError(
+            f"{candidate} is outside the vault {root}",
+            hint=f"the {what} must be inside the vault root; paths are vault-relative or "
+            "absolute inside the vault (spec 05 §1 — the core never writes outside the vault)",
+        )
+    return candidate
 
 
 def _refuse_no_ai(ctx: OperationContext, path: Path, doc: Document, what: str) -> None:
@@ -295,11 +434,14 @@ def format_log_line(op: LoggedOperation) -> str:
         status = "DRY-RUN"
     else:
         status = "SUCCESS"
-    line = f"[{_one_line(op.ts)}] {op.type}: {_one_line(op.src)} -> {_one_line(op.dst)} [{status}]"
+    line = (
+        f"[{_escape_field(op.ts)}] {op.type}: "
+        f"{_escape_field(op.src)} -> {_escape_field(op.dst)} [{status}]"
+    )
     if op.backup:
-        line += f" Backup: {_one_line(op.backup)}"
+        line += f" Backup: {_escape_field(op.backup)}"
     if op.error:
-        line += f" Error: {_one_line(op.error)}"
+        line += f" Error: {_escape_field(op.error)}"
     return line
 
 
@@ -309,6 +451,8 @@ def parse_log_line(line: str) -> LoggedOperation | None:
     match = _LINE_RE.match(line.rstrip("\n"))
     if match is None:
         return None
+    # Every delimiter below is escaped inside a field by `_escape_field`, so
+    # splitting on the raw sequence can no longer cut a path in half.
     src, sep, dst = match.group("body").rpartition(" -> ")
     if not sep:
         src, dst = match.group("body"), ""
@@ -317,17 +461,17 @@ def parse_log_line(line: str) -> LoggedOperation | None:
     error: str | None = None
     err_at = rest.find(" Error: ")
     if err_at >= 0:
-        error = rest[err_at + len(" Error: ") :] or None
+        error = _unescape_field(rest[err_at + len(" Error: ") :]) or None
         rest = rest[:err_at]
     bak_at = rest.find(" Backup: ")
     if bak_at >= 0:
-        backup = rest[bak_at + len(" Backup: ") :] or None
+        backup = _unescape_field(rest[bak_at + len(" Backup: ") :]) or None
     status = match.group("status")
     return LoggedOperation(
-        ts=match.group("ts"),
+        ts=_unescape_field(match.group("ts")),
         type=match.group("type"),  # type: ignore[arg-type]
-        src=src,
-        dst=dst,
+        src=_unescape_field(src),
+        dst=_unescape_field(dst),
         success=status != "FAILED",
         error=error,
         backup=backup,
@@ -420,6 +564,38 @@ class OperationContext:
     #: ``time.time``.
     clock: Callable[[], float] = time.time
 
+    # --- spec 12 §2 decision context -------------------------------------
+    # These describe the DECISION, which only the caller knows, and they are
+    # the whole reason the corpus exists ("the counterfactual is stored, not
+    # just the choice"). They used to have no parameter and no call site, so
+    # every real record stored an empty `suggestions_shown` and a null
+    # `chosen_rank` and `organize actions stats` could never report an
+    # accept-rate from real usage.
+    #: The ranked list the user was shown, in rank order (12 §2).
+    suggestions_shown: tuple[SuggestionShown, ...] = ()
+    #: Which of them was picked; 1 means the engine was right (12 §2).
+    chosen_rank: int | None = None
+    #: e.g. ``{"decision": 8400, "operation": 120}`` (12 §2).
+    durations_ms: dict[str, int] = field(default_factory=dict)
+    #: Auto-tags present on the capture at decision time (12 §2, doc 11 §2).
+    auto_tags_present: tuple[str, ...] = ()
+    #: The session filters in force (12 §2).
+    filters: dict[str, Any] = field(default_factory=dict)
+
+    #: Resolves ``targets[].description`` — the destination's NL description
+    #: (12 §2 / 11 §3). A callable, not an import: ``routes`` depends on
+    #: ``fileops``, so ``fileops`` may not import ``routes`` back. The
+    #: composition roots wire this to ``routes.get_description``.
+    describe: Callable[[Path], str | None] | None = None
+
+    #: Called with each ActionRecord that was successfully APPENDED to the
+    #: corpus — spec 12 §2 "Uses" #2: "doc 04's learning layer records
+    #: through this same pipeline (one write path, two readers)". The
+    #: composition roots wire this to `learn.record_action`, so learning.json
+    #: is a view derived from the action log rather than a second,
+    #: independent write that can disagree with it.
+    on_record: Callable[[ActionRecord], None] | None = None
+
 
 @dataclass(frozen=True)
 class OperationResult:
@@ -439,28 +615,48 @@ class OperationResult:
 # --- primitives ------------------------------------------------------------
 
 
-def atomic_write(path: Path, content: str, *, encoding: str = "utf-8") -> None:
+def atomic_write(path: Path, content: str, *, encoding: str = "utf-8", mode: int | None = None) -> None:
     """Write-to-temp + rename per spec 05 §1.3. Temp in ``path.parent``,
-    unique name via pid+counter; preserve existing file permissions; on any
-    failure the target is untouched and the temp is removed.
+    unique name via pid+counter; preserve file permissions; on any failure
+    the target is untouched and the temp is removed.
 
     Fixes 08 §A25 wholesale: unique-per-write temp names (pid + process
     counter, not epoch seconds), permissions carried over, temp removed on
     every failure path including ``KeyboardInterrupt``.
+
+    Permissions, in order (spec 05 §1.3 "Preserve file permissions"):
+
+    1. an explicit ``mode`` — ``move_to_destination`` passes the SOURCE's
+       mode, because the destination is a new file and the thing being
+       preserved is the note's mode, not the (nonexistent) target's;
+    2. else the existing target's mode, when we are overwriting;
+    3. else the platform default (``0o666`` masked by the process umask),
+       obtained by letting ``O_CREAT`` apply the umask itself — no
+       ``os.umask()`` read, which is process-global and racy.
+
+    Case 3 used to be missing entirely: the temp was always created 0o600
+    and, with no existing target to copy a mode from, every file this
+    function CREATED landed owner-only. Every note organized by ``move``
+    silently diverged from the rest of the Syncthing-synced vault.
     """
     path = Path(path)
     directory = path.parent
     directory.mkdir(parents=True, exist_ok=True)
 
-    try:
-        mode: int | None = os.stat(path).st_mode & 0o7777
-    except OSError:
-        mode = None
+    if mode is None:
+        try:
+            mode = os.stat(path).st_mode & 0o7777
+        except OSError:
+            mode = None
 
+    # When the final mode is known, create restrictively and widen at the
+    # end, so a note that should be 0600 is never briefly world-readable.
+    # When it is not known, let O_CREAT + umask produce the platform default.
     tmp = directory / f".{path.name}.{os.getpid()}.{next(_TMP_COUNTER)}.organize-tmp"
+    create_mode = 0o600 if mode is not None else 0o666
     fd: int | None = None
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, create_mode)
         handle = os.fdopen(fd, "w", encoding=encoding, errors="replace", newline="")
         fd = None  # ownership transferred to the file object
         with handle:
@@ -659,6 +855,30 @@ def _unified_diff(before: str, after: str, path: Path) -> str:
     )
 
 
+#: Spec 12 §2: "full before-text stored when the file is new or small
+#: (<64 KB)" — target files are otherwise kept as hash + diff to bound growth.
+BEFORE_TEXT_LIMIT_BYTES = 64 * 1024
+
+
+def _describe(ctx: OperationContext, folder: Path) -> str | None:
+    """``targets[].description`` — the destination's NL description (12 §2).
+
+    Resolved through ``ctx.describe``, which the composition roots wire to
+    ``routes.get_description``. It is a callable rather than a direct import
+    because ``routes`` already depends on ``fileops``; importing it back
+    would be the one cycle the ARCHITECTURE dependency graph forbids.
+    """
+    if ctx.describe is None:
+        return None
+    try:
+        text = ctx.describe(Path(folder))
+    except Exception:  # noqa: BLE001 - a description is never load-bearing
+        logger.debug("could not resolve a description for %s", folder, exc_info=True)
+        return None
+    text = (text or "").strip()
+    return text or None
+
+
 def _target_state(
     path: Path,
     before: str | None,
@@ -667,6 +887,13 @@ def _target_state(
     *,
     description: str | None = None,
 ) -> TargetState:
+    # `before_hash is None` already means "the file is new", so `before_text`
+    # is only populated for an EXISTING small file — that is the case where
+    # `before_hash` + a 3-context diff cannot reconstruct the pre-edit state
+    # and doc 13 loses the file the edit was made against.
+    before_text: str | None = None
+    if before is not None and len(before.encode("utf-8", errors="replace")) < BEFORE_TEXT_LIMIT_BYTES:
+        before_text = before
     return TargetState(
         path=str(path),
         role=role,  # type: ignore[arg-type]
@@ -674,6 +901,7 @@ def _target_state(
         after_hash=_hash_text(after),
         diff=_unified_diff(before or "", after, path),
         description=description,
+        before_text=before_text,
     )
 
 
@@ -687,13 +915,30 @@ def _record_action(
     edit_mode: str | None = None,
     route: str | None = None,
     action: str | None = None,
+    partial_failure: str | None = None,
 ) -> None:
-    """Emit the spec 12 §2 ActionRecord for a COMPLETED operation.
+    """Emit the spec 12 §2 ActionRecord for an operation that CHANGED THE VAULT.
 
-    Only successful operations are recorded: the schema has no "it failed"
-    slot, and a corpus that claims moves which never happened is worse than
-    a corpus with gaps. Failures live in the operation log's FAILED lines.
+    Spec 12 §2 is unconditional — "**Every** state-changing operation
+    appends one ActionRecord" — and spec 05 §1.2 explicitly blesses a
+    partially-applied operation (the destination copy exists, archiving the
+    original failed). Those branches mutate the vault, so they record too,
+    with ``context.filters["partial_failure"]`` naming what did not finish;
+    the corpus is the audit trail, and a real vault edit that appears
+    nowhere in it is an untraceable mutation. Operations that changed
+    nothing (a missing source, an unwritable destination) still do NOT
+    record: the schema has no "it failed" slot and their story is the
+    operation log's FAILED line.
+
+    The decision context (``suggestions_shown``, ``chosen_rank``,
+    ``durations_ms``, ``auto_tags_present``, ``filters``) comes off the
+    :class:`OperationContext`, so the counterfactual doc 12 exists to
+    capture is filled in by whichever door the user came through instead of
+    being hardcoded empty on every real record.
     """
+    filters: dict[str, Any] = dict(ctx.filters)
+    if partial_failure:
+        filters["partial_failure"] = partial_failure
     try:
         record = ActionRecord(
             id=new_action_id(now=now),
@@ -704,9 +949,14 @@ def _record_action(
             targets=tuple(targets),
             context=ActionContext(
                 session_id=ctx.session_id,
-                filters={DRY_RUN_FILTER_KEY: True} if ctx.dry_run else {},
+                dry_run=ctx.dry_run,
                 route=route,
                 vault_stats=_vault_stats(ctx),
+                filters=filters,
+                suggestions_shown=tuple(ctx.suggestions_shown),
+                chosen_rank=ctx.chosen_rank,
+                auto_tags_present=tuple(ctx.auto_tags_present),
+                durations_ms=dict(ctx.durations_ms),
             ),
             edit_mode=edit_mode,  # type: ignore[arg-type]
         )
@@ -719,7 +969,23 @@ def _record_action(
             exc_info=True,
         )
         return
-    ctx.recorder.record(record)
+    if not ctx.recorder.record(record):
+        # The corpus is the source of truth: if the line was LOST, no reader
+        # derives state from it either. Previously learning.json was written
+        # regardless, so the learner could hold a move the corpus never saw.
+        return
+    if ctx.on_record is None:
+        return
+    try:
+        ctx.on_record(record)
+    except Exception:  # noqa: BLE001 - a derived view never blocks the op
+        logger.error(
+            "ACTION RECORD CONSUMER FAILED for %s on %s — the operation itself "
+            "completed and the record was written (spec 12 §2)",
+            op_type,
+            capture.path if capture is not None else "<unknown>",
+            exc_info=True,
+        )
 
 
 def _index_update(ctx: OperationContext, path: Path) -> None:
@@ -773,6 +1039,17 @@ def _archive_file(source: Path, archive_path: Path) -> tuple[Path | None, str | 
     try:
         source_hash = _hash_file(source)
         archive_path.parent.mkdir(parents=True, exist_ok=True)
+        # `get_archive_path` already picked a free name, but that check and
+        # this rename are not one operation: anything that appeared at
+        # `archive_path` in between (another organize run, Syncthing, or —
+        # before the guard in `move_to_destination` — this very operation's
+        # own organized copy) would be silently obliterated by os.replace,
+        # which overwrites unconditionally. Never delete (05 §1.1): fail.
+        if archive_path.exists():
+            return None, (
+                f"archive target {archive_path} already exists; refusing to overwrite it "
+                "(spec 05 §1.1: never delete). The original was NOT removed."
+            )
         try:
             _replace(source, archive_path)
         except OSError as exc:
@@ -896,11 +1173,32 @@ def move_to_destination(
     the CLI layer.
     """
     now = ctx.clock()
-    source = Path(capture.path)
-    dest_folder = Path(destination_folder)
+    source = require_in_vault(ctx.config, capture.path, "note")
+    dest_folder = require_in_vault(ctx.config, destination_folder, "destination folder")
 
     if not source.is_file():
         return _fail(ctx, "move", source, dest_folder, f"source note does not exist: {source}", now)
+
+    # The archive capture folder is not an ordinary destination: `dest_path`
+    # and `archive_path` would both resolve to <archive>/<filename>, the
+    # organized copy would be written there and then silently overwritten by
+    # `_archive_file`'s os.replace of the un-organized original — while the
+    # result claimed ok=True with tag_added / processing_status=organized.
+    archive_folder = _resolved(
+        Path(ctx.config.vault.root)
+        / (ctx.config.vault.para_folders.get("archives") or "archive")
+        / ctx.config.vault.archive_capture_path
+    )
+    if _resolved(dest_folder) == archive_folder:
+        return _fail(
+            ctx,
+            "move",
+            source,
+            dest_folder,
+            f"{dest_folder} is the archive capture folder, not a filing destination",
+            now,
+            details={"archive_path": str(archive_folder)},
+        )
 
     if not dest_folder.is_dir():
         if not ctx.config.file_ops.auto_create_folders:
@@ -920,14 +1218,16 @@ def move_to_destination(
                     ctx, "move", source, dest_folder, f"could not create {dest_folder}: {exc}", now
                 )
 
-    doc, text = _read_document(source)
+    # ONE read: doc, text and the concurrent-modification token all come from
+    # the same bytes, with mtime stat'd before the read (10 §4).
+    doc, text, snapshot = _read_document(source)
     _refuse_no_ai(ctx, source, doc, "move")
 
-    snapshot = snapshot_file(source)
     dest_path = collision_free_path(dest_folder / source.name)
     fields_after, tag = _organized_fields(doc, dest_folder, ctx.config, now)
     new_text = _rendered(fields_after, _style(doc), doc.body)
     archive_path = get_archive_path(source.name, ctx.config, now=now)
+    description = _describe(ctx, dest_folder)
 
     capture_state = _capture_state(source, text, doc, fields_after=fields_after)
     details: dict[str, Any] = {
@@ -944,7 +1244,9 @@ def move_to_destination(
             ctx,
             op_type="move",
             capture=capture_state,
-            targets=[_target_state(dest_path, None, new_text, "destination")],
+            targets=[
+                _target_state(dest_path, None, new_text, "destination", description=description)
+            ],
             now=now,
         )
         return OperationResult(
@@ -968,7 +1270,11 @@ def move_to_destination(
     check_unmodified(snapshot)
 
     try:
-        atomic_write(dest_path, new_text)
+        # Spec 05 §1.3 "Preserve file permissions": the destination is a NEW
+        # file, so the mode to preserve is the source note's — without it
+        # every organized note landed 0600 while the rest of the vault stayed
+        # 0644, and the vault is read by Syncthing/Obsidian/other tools.
+        atomic_write(dest_path, new_text, mode=_file_mode(source))
     except OSError as exc:
         # Nothing was archived: the original is exactly where it was (05 §1.2).
         return _fail(
@@ -984,6 +1290,18 @@ def move_to_destination(
 
     written = _read_text(dest_path)
     if written != new_text:
+        # The vault HAS changed (a file exists at dest_path), so this branch
+        # records — spec 12 §2 "every state-changing operation".
+        _record_action(
+            ctx,
+            op_type="move",
+            capture=capture_state,
+            targets=[
+                _target_state(dest_path, None, written, "destination", description=description)
+            ],
+            now=now,
+            partial_failure="copy verification failed; the original was NOT archived",
+        )
         return _fail(
             ctx,
             "move",
@@ -998,6 +1316,19 @@ def move_to_destination(
     archived, archive_error = _archive_file(source, archive_path)
     if archived is None:
         _log(ctx, "archive", source, archive_path, success=False, now=now, error=archive_error)
+        # Partial apply (05 §1.2): the organized copy is on disk and the
+        # original is still in place. That is a vault mutation, so it gets a
+        # record (12 §2) naming what did not finish.
+        _record_action(
+            ctx,
+            op_type="move",
+            capture=capture_state,
+            targets=[
+                _target_state(dest_path, None, new_text, "destination", description=description)
+            ],
+            now=now,
+            partial_failure=f"archiving the original failed: {archive_error}",
+        )
         return _fail(
             ctx,
             "move",
@@ -1019,7 +1350,9 @@ def move_to_destination(
         ctx,
         op_type="move",
         capture=capture_state,
-        targets=[_target_state(dest_path, None, new_text, "destination")],
+        targets=[
+            _target_state(dest_path, None, new_text, "destination", description=description)
+        ],
         now=now,
     )
     return OperationResult(
@@ -1047,7 +1380,10 @@ def archive_capture(ctx: OperationContext, capture: NoteRecord) -> OperationResu
         return _fail(ctx, "archive", source, None, f"source note does not exist: {source}", now)
 
     archive_path = get_archive_path(source.name, ctx.config, now=now)
-    doc, text = _read_document(source)
+    # Pure relocation: tolerate bytes we could not rewrite (this operation
+    # never rewrites), so the read stays lenient here on purpose.
+    text = _read_text(source)
+    doc = parse(text)
     capture_state = _capture_state(source, text, doc)
 
     if ctx.dry_run:
@@ -1128,21 +1464,29 @@ def merge_into_note(
     longer paste its instruction text into the file (08 §A32).
     """
     now = ctx.clock()
-    source = Path(capture.path)
-    target_path = Path(target_path)
+    source = require_in_vault(ctx.config, capture.path, "capture")
+    target_path = require_in_vault(ctx.config, target_path, "merge target")
 
     if not source.is_file():
         return _fail(ctx, "merge", source, target_path, f"capture does not exist: {source}", now)
     if not target_path.is_file():
         return _fail(ctx, "merge", source, target_path, f"merge target does not exist: {target_path}", now)
 
-    target_doc, target_text = _read_document(target_path)
+    # `snapshot` comes from the SAME bytes we derive the merged content from,
+    # and mtime was stat'd before the read (10 §4). It used to be taken after
+    # BOTH reads below, and parsing the capture is not instant — a concurrent
+    # write landing in that window was overwritten with ok=True.
+    target_doc, target_text, snapshot = _read_document(target_path)
     _refuse_no_ai(ctx, target_path, target_doc, "merge into")
-    capture_doc, capture_text = _read_document(source)
+    capture_doc, capture_text, _capture_snapshot = _read_document(source)
+    # A merge COPIES the capture's body into another file. That is a write of
+    # the protected content out of its no-ai container, so an automated actor
+    # is refused on the capture too — the module's "pure relocation" exemption
+    # covers `archive_capture`, not this (vault law, spec 02).
+    _refuse_no_ai(ctx, source, capture_doc, "merge from")
 
     if target_snapshot is not None:
         check_unmodified(target_snapshot)
-    snapshot = target_snapshot or snapshot_file(target_path)
 
     if edited_content is not None:
         edited_doc = parse(edited_content)
@@ -1155,7 +1499,16 @@ def merge_into_note(
         body = _merged_body(target_doc.body, capture_doc.body, source.name, now)
 
     capture_fields = _fields(capture_doc)
-    tags = merge_tags(_as_str_list(base_fields.get("tags")), _as_str_list(capture_fields.get("tags")))
+    # Spec 05 §4 (merge) dedupes on NORMALIZED form — a strictly stronger key
+    # than 05 §2.6's case-insensitive move rule, so `deep_work` from the
+    # capture collapses into the target's existing `deep-work` instead of
+    # landing beside it. Target-first order and the target's casing are kept.
+    tags = merge_tags(
+        _as_str_list(base_fields.get("tags")),
+        _as_str_list(capture_fields.get("tags")),
+        normalized=True,
+        extra_map=ctx.config.suggestions.tag_normalization,
+    )
     if tags:
         base_fields["tags"] = tags
     sources = merge_sources(
@@ -1168,7 +1521,15 @@ def merge_into_note(
     new_text = _rendered(base_fields, base_style, body)
     archive_path = get_archive_path(source.name, ctx.config, now=now)
     capture_state = _capture_state(source, capture_text, capture_doc)
-    targets = [_target_state(target_path, target_text, new_text, "merge_target")]
+    targets = [
+        _target_state(
+            target_path,
+            target_text,
+            new_text,
+            "merge_target",
+            description=_describe(ctx, target_path.parent),
+        )
+    ]
     details: dict[str, Any] = {"archive_path": str(archive_path), "tags": tags, "sources": sources}
 
     if ctx.dry_run:
@@ -1200,7 +1561,7 @@ def merge_into_note(
     check_unmodified(snapshot)
 
     try:
-        atomic_write(target_path, new_text)
+        atomic_write(target_path, new_text, mode=_file_mode(target_path))
     except OSError as exc:
         return _fail(
             ctx,
@@ -1216,6 +1577,17 @@ def merge_into_note(
     archived, archive_error = _archive_file(source, archive_path)
     if archived is None:
         _log(ctx, "archive", source, archive_path, success=False, now=now, error=archive_error)
+        # The target has ALREADY been rewritten in place — the most
+        # consequential partial apply in the module. It records (12 §2).
+        _record_action(
+            ctx,
+            op_type="merge",
+            capture=capture_state,
+            targets=targets,
+            now=now,
+            edit_mode="manual",
+            partial_failure=f"archiving the capture failed: {archive_error}",
+        )
         return _fail(
             ctx,
             "merge",
@@ -1263,11 +1635,13 @@ def merge_preview(
         raise OperationError(f"capture does not exist: {source}")
     if not target_path.is_file():
         raise OperationError(f"merge target does not exist: {target_path}")
-    target_doc, _ = _read_document(target_path)
-    capture_doc, _ = _read_document(source)
+    target_doc, _target_text, snapshot = _read_document(target_path)
+    capture_doc, _capture_text, _ = _read_document(source)
     body = _merged_body(target_doc.body, capture_doc.body, source.name, now)
     content = _rendered(_fields(target_doc), _style(target_doc), body)
-    return content, snapshot_file(target_path)
+    # The snapshot is the one taken WITH the target read above, not a fresh
+    # stat afterwards, so a write during the capture read invalidates it.
+    return content, snapshot
 
 
 def append_to_note(
@@ -1288,19 +1662,20 @@ def append_to_note(
     template containing a literal ``{`` must not raise (08 §B15).
     """
     now = ctx.clock()
-    source = Path(capture.path)
-    target_path = Path(target_path)
+    source = require_in_vault(ctx.config, capture.path, "capture")
+    target_path = require_in_vault(ctx.config, target_path, "append target")
 
     if not source.is_file():
         return _fail(ctx, "append", source, target_path, f"capture does not exist: {source}", now)
     if not target_path.is_file():
         return _fail(ctx, "append", source, target_path, f"append target does not exist: {target_path}", now)
 
-    target_doc, target_text = _read_document(target_path)
+    target_doc, target_text, snapshot = _read_document(target_path)
     _refuse_no_ai(ctx, target_path, target_doc, "append to")
-    capture_doc, capture_text = _read_document(source)
-
-    snapshot = snapshot_file(target_path)
+    capture_doc, capture_text, _capture_snapshot = _read_document(source)
+    # Same reasoning as merge: an append duplicates the capture's body into
+    # another file, so a no-ai capture refuses an automated actor here too.
+    _refuse_no_ai(ctx, source, capture_doc, "append from")
     capture_id = capture.capture_id or capture.id or source.stem
     block = _render_template(
         template or DEFAULT_APPEND_TEMPLATE,
@@ -1323,7 +1698,15 @@ def append_to_note(
     new_text = _rendered(fields, _style(target_doc), new_body)
 
     capture_state = _capture_state(source, capture_text, capture_doc)
-    targets = [_target_state(target_path, target_text, new_text, "append_target")]
+    targets = [
+        _target_state(
+            target_path,
+            target_text,
+            new_text,
+            "append_target",
+            description=_describe(ctx, target_path.parent),
+        )
+    ]
     details: dict[str, Any] = {"capture_id": capture_id, "archived": False}
 
     if ctx.dry_run:
@@ -1354,7 +1737,7 @@ def append_to_note(
     check_unmodified(snapshot)
 
     try:
-        atomic_write(target_path, new_text)
+        atomic_write(target_path, new_text, mode=_file_mode(target_path))
     except OSError as exc:
         return _fail(
             ctx,
@@ -1389,23 +1772,29 @@ def _apply_frontmatter_changes(
     *,
     op_type: OperationType,
     action: str,
+    replace_keys: frozenset[str] = frozenset(),
 ) -> OperationResult:
     now = ctx.clock()
-    path = Path(path)
+    path = require_in_vault(ctx.config, path, "note")
     if not path.is_file():
         return _fail(ctx, op_type, path, path, f"note does not exist: {path}", now)
 
-    doc, text = _read_document(path)
+    doc, text, snapshot = _read_document(path)
     _refuse_no_ai(ctx, path, doc, "edit the frontmatter of")
-    snapshot = snapshot_file(path)
 
     fields = dict(_fields(doc))
     for key, value in changes.items():
         if value is None:
             fields.pop(key, None)
             continue
-        if key == "tags":
+        if key == "tags" and key not in replace_keys:
             fields["tags"] = merge_tags(_as_str_list(fields.get("tags")), _as_str_list(value))
+        elif key == "tags":
+            # Explicit replace (spec 07 `append = false`). Still normalised
+            # through merge_tags so the REPLACEMENT list is itself deduped and
+            # order-preserving — replacing must not be a way to smuggle a
+            # duplicated tag list past the 08 §A24 rule.
+            fields["tags"] = merge_tags([], _as_str_list(value))
         else:
             fields[key] = value
 
@@ -1451,7 +1840,7 @@ def _apply_frontmatter_changes(
     check_unmodified(snapshot)
 
     try:
-        atomic_write(path, new_text)
+        atomic_write(path, new_text, mode=_file_mode(path))
     except OSError as exc:
         return _fail(
             ctx, op_type, path, path, f"could not write {path}: {exc}", now, backup=backup, details=details
@@ -1474,6 +1863,8 @@ def update_frontmatter(
     ctx: OperationContext,
     path: Path,
     changes: dict[str, Any],
+    *,
+    replace_keys: frozenset[str] = frozenset(),
 ) -> OperationResult:
     """General primitive (spec 05 §5): read → parse → apply changes
     (``tags`` merges per the order-preserving rule; other fields replace) →
@@ -1484,9 +1875,17 @@ def update_frontmatter(
     unknown (``no-ai``, ``title``, Obsidian properties…) — 08 §A12, the
     worst data-loss bug in the original, at the operation level. A change
     value of ``None`` REMOVES the field (07 needs a way to unset one).
+
+    ``replace_keys`` names keys whose value REPLACES rather than merges.
+    Only ``tags`` merges by default, so in practice this is
+    ``frozenset({"tags"})``, and it exists because spec 07 lets a
+    ``[[metadata_fields]]`` entry declare ``append = false`` on a list field:
+    without it the caller had to clear the field and set it again, which is
+    two writes, two operations-log lines and two ActionRecords for ONE
+    logical edit — a corpus that misreports what Matt did (12 §2).
     """
     return _apply_frontmatter_changes(
-        ctx, path, changes, op_type="metadata", action="meta_edit"
+        ctx, path, changes, op_type="metadata", action="meta_edit", replace_keys=replace_keys
     )
 
 
@@ -1503,12 +1902,18 @@ def update_tags(ctx: OperationContext, path: Path, new_tags: list[str]) -> Opera
 
 def new_folder(ctx: OperationContext, para_type: str, name: str) -> OperationResult:
     """mkdir ``<vault>/<para_folders[para_type]>/<name>`` (spec 05 §6);
-    validate name (no path separators, non-empty); log ``create_folder``;
-    refresh index folder caches. The auto-move-current-capture behavior
-    lives in the session layer.
+    validate name (no path separators, non-empty); log ``create_folder``.
+    The auto-move-current-capture behavior lives in the session layer.
 
     ``para_type`` accepts either the config KEY (``projects``) or its
     singular (``project``), because the UI's ``<leader>np`` speaks singular.
+
+    Spec 05 §6 also says "refresh folder caches/index dirs". No index call is
+    needed: ``VaultIndex.para_subfolders`` enumerates directories from DISK,
+    not from the note records, so a brand-new EMPTY folder is a suggestion
+    candidate the moment mkdir returns — with no scan and no cache to
+    invalidate. Pinned by
+    ``test_new_folder_is_immediately_a_suggestion_candidate``.
     """
     now = ctx.clock()
     folders = ctx.config.vault.para_folders
@@ -1575,6 +1980,43 @@ def new_folder(ctx: OperationContext, para_type: str, name: str) -> OperationRes
     )
 
 
+#: Suffix `atomic_write` gives its in-flight temp files.
+TEMP_SUFFIX = ".organize-tmp"
+
+#: Grace period before an `.organize-tmp` file counts as an orphan. An
+#: in-flight write is measured in milliseconds; anything older than this was
+#: left behind by a killed process.
+TEMP_ORPHAN_AGE_SECONDS = 300.0
+
+
+def find_orphaned_temp_files(
+    root: Path, *, now: float, older_than: float = TEMP_ORPHAN_AGE_SECONDS
+) -> list[Path]:
+    """Every abandoned ``atomic_write`` temp file under ``root`` (spec 05 §1.3
+    "temp files are cleaned up").
+
+    ``atomic_write`` removes its temp on every in-process failure path, but a
+    SIGKILL or a power loss mid-write leaves a full-size hidden
+    ``.<name>.<pid>.<n>.organize-tmp`` sitting inside the vault, and the vault
+    is Syncthing-synced — so the dropping replicates to every device. Nothing
+    swept them and ``organize health`` did not look, which made them
+    invisible as well as permanent. Reporting is deliberately separated from
+    deleting: this returns the list, ``organize health`` surfaces the count,
+    and no code path in this module removes a file it did not create.
+    """
+    orphans: list[Path] = []
+    for path in sorted(Path(root).rglob(f"*{TEMP_SUFFIX}")):
+        if not path.is_file():
+            continue
+        try:
+            age = now - path.stat().st_mtime
+        except OSError:  # pragma: no cover - raced with a real cleanup
+            continue
+        if age >= older_than:
+            orphans.append(path)
+    return orphans
+
+
 def vault_tree(root: Path, *, skip: Iterable[str] = ()) -> dict[str, str]:
     """Every file under ``root`` mapped to its sha256 — the shape the
     never-delete and dry-run invariants are asserted against. Exposed
@@ -1592,9 +2034,11 @@ def vault_tree(root: Path, *, skip: Iterable[str] = ()) -> dict[str, str]:
 
 
 __all__ = [
+    "BEFORE_TEXT_LIMIT_BYTES",
     "DEFAULT_APPEND_TEMPLATE",
-    "DRY_RUN_FILTER_KEY",
     "HUMAN_ACTORS",
+    "TEMP_ORPHAN_AGE_SECONDS",
+    "TEMP_SUFFIX",
     "FileSnapshot",
     "LoggedOperation",
     "OperationContext",
@@ -1607,6 +2051,7 @@ __all__ = [
     "backup_file",
     "check_unmodified",
     "collision_free_path",
+    "find_orphaned_temp_files",
     "format_log_line",
     "get_archive_path",
     "is_ai_actor",
@@ -1615,6 +2060,7 @@ __all__ = [
     "move_to_destination",
     "new_folder",
     "parse_log_line",
+    "require_in_vault",
     "snapshot_file",
     "update_frontmatter",
     "update_tags",

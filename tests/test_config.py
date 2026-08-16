@@ -25,6 +25,7 @@ import pytest
 from organize_core.config import (
     Config,
     FileOpsConfig,
+    IntegrateConfig,
     LearningConfig,
     LLMConfig,
     SuggestionsConfig,
@@ -93,6 +94,12 @@ def test_minimal_config_produces_documented_defaults() -> None:
     assert config.auto_organize.trust == "propose"
     assert config.auto_organize.confidence_threshold == 0.8
     assert config.auto_organize.min_precedents == 5
+    # spec 12 §1 defaults-of-record: global edit mode `manual`, review gate
+    # `diff`, and ZERO deletions tolerated from an integrate result.
+    assert config.integrate == IntegrateConfig()
+    assert config.integrate.default_mode == "manual"
+    assert config.integrate.review == "diff"
+    assert config.integrate.max_deleted_lines == 0
     assert config.server.socket_path is None
     assert config.server.idle_timeout_seconds == 600.0
     assert config.logging.level == "INFO"
@@ -283,10 +290,13 @@ FULL_RAW: dict[str, Any] = {
         {
             "tags": ["workout"],
             "destination": "areas/health/log.md",
-            "mode": "append",
+            # `integrate` so `review` can carry a NON-default value here — the
+            # point of FULL_RAW is that every leaf differs from its default.
+            "mode": "integrate",
             "description": "d",
             "template": "## {date}",
             "auto": True,
+            "review": "auto",
         }
     ],
     "consumers": {
@@ -308,6 +318,11 @@ FULL_RAW: dict[str, Any] = {
         "integrate_backend": "ollama",
         "timeout_seconds": 12.5,
         "retries": 0,
+    },
+    "integrate": {
+        "default_mode": "integrate",
+        "review": "auto",
+        "max_deleted_lines": 3,
     },
     "auto_organize": {
         "trust": "auto_below",
@@ -365,6 +380,7 @@ def test_every_config_key_is_honored() -> None:
     assert config.routes[0].auto is True
     assert config.routes[0].template == "## {date}"
     assert config.routes[0].description == "d"
+    assert config.routes[0].review == "auto"  # spec 12 §1 per-route opt-in
 
     consumer = config.consumers[0]
     assert consumer.name == "tw"
@@ -385,6 +401,9 @@ def test_every_config_key_is_honored() -> None:
         timeout_seconds=12.5,
         retries=0,
     )
+    assert config.integrate == IntegrateConfig(
+        default_mode="integrate", review="auto", max_deleted_lines=3
+    )
     assert config.auto_organize.trust == "auto_below"
     assert config.auto_organize.confidence_threshold == 0.42
     assert config.auto_organize.min_precedents == 11
@@ -392,6 +411,107 @@ def test_every_config_key_is_honored() -> None:
     assert config.server.idle_timeout_seconds == 30.0
     assert config.logging.level == "DEBUG"
     assert config.descriptions == {"areas/health": "health stuff"}
+
+
+#: Config leaves with no reader outside `config.py` TODAY, each with the
+#: reason and its spec citation. This is the escape hatch that keeps
+#: `test_every_config_leaf_has_a_reader` honest: "reserved for a later phase"
+#: is a documented decision with a citation, not an accident. Anything not
+#: listed here must be READ by some non-config module — which is the half of
+#: 08 §A35 ("~25 dead config keys — every one must be honored or deleted")
+#: that a parse-only assertion cannot check. The list may not rot either: a
+#: key that grows a reader must come OFF it (asserted below).
+RESERVED_CONFIG_LEAVES: dict[str, str] = {
+    # Read by `config.check_vault` — i.e. it is honored, by `organize health`,
+    # which is the only behavior it has. The folder that drives SCANNING is
+    # `vault.scan_dirs`; the folder that drives PARA classification is
+    # `vault.capture_folder` (of which this is a subfolder).
+    "vault.raw_capture_folder": "spec 02 — health-check only (config.check_vault)",
+    # Also health-check-only today. `VaultIndex.scan` deliberately walks the
+    # whole vault root (its docstring says so) and filters with
+    # `ignore_patterns`; `scan_dirs` is the automation pipeline's WATCH set
+    # (spec 06 §2), which lands with `run-consumers` in Phase 3.
+    "vault.scan_dirs": "spec 06 §2 — consumer watch set (Phase 3); health-checked today",
+    # spec 03 §7: "Incremental: debounced (`incremental_debounce` ms)
+    # BufWritePost hook re-indexes the written file". Under doc 10 that
+    # trigger lives in the nvim client (Phase 2), not in the core; the core's
+    # own persistence honors spec 09 §40 through the BATCH half
+    # (`VaultIndex.flush_threshold`), which is also its crash bound.
+    "vault.incremental_debounce": "spec 03 §7 — client-side reindex trigger (Phase 2)",
+    # spec 12 §1 integrate mode — Phase 5.
+    "integrate.default_mode": "spec 12 §1 — integrate edit mode (Phase 5)",
+    "integrate.review": "spec 12 §1 — integrate review gate (Phase 5)",
+    "integrate.max_deleted_lines": "spec 12 §1 — integrate deletion guard (Phase 5)",
+    # spec 13 automatic organize — Phase 6.
+    "auto_organize.trust": "spec 13 §2 — automatic organize (Phase 6)",
+    "auto_organize.confidence_threshold": "spec 13 §2 — automatic organize (Phase 6)",
+    "auto_organize.min_precedents": "spec 13 §2 — automatic organize (Phase 6)",
+}
+
+def _config_leaves() -> list[str]:
+    """Every scalar leaf of a real Config INSTANCE, dotted.
+
+    Walks the instance rather than the annotations so `from __future__ import
+    annotations` (which turns every field type into a string) cannot make the
+    walk silently shallow.
+    """
+    import dataclasses
+
+    leaves: list[str] = []
+
+    def walk(obj: object, prefix: str) -> None:
+        for f in dataclasses.fields(obj):  # type: ignore[arg-type]
+            name = f"{prefix}.{f.name}" if prefix else f.name
+            value = getattr(obj, f.name)
+            if dataclasses.is_dataclass(value) and not isinstance(value, type):
+                walk(value, name)
+            else:
+                leaves.append(name)
+
+    walk(validate_config(FULL_RAW), "")
+    return leaves
+
+
+def test_every_config_leaf_has_a_reader() -> None:
+    """08 §A35, the half `test_every_config_key_is_honored` cannot check.
+
+    That test asserts every leaf PARSES onto the Config dataclass. A key that
+    parses and is then read by nobody is the exact original defect and passes
+    it unchanged. This one asserts each leaf is referenced by at least one
+    module outside `config.py`, with a spec-cited allowlist for the keys
+    deliberately reserved for a later phase.
+    """
+    import ast
+
+    src = Path(__file__).resolve().parents[1] / "src" / "organize_core"
+    # AST, not text: a rule that trips over a comment EXPLAINING the rule is a
+    # rule people delete. Only names the code actually touches count.
+    referenced: set[str] = set()
+    for path in sorted(src.rglob("*.py")):
+        if path.name == "config.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+            if isinstance(node, ast.Attribute):
+                referenced.add(node.attr)
+            elif isinstance(node, ast.Name):
+                referenced.add(node.id)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                referenced.add(node.value)
+
+    unread = [leaf for leaf in _config_leaves() if leaf.rsplit(".", 1)[-1] not in referenced]
+
+    unexpected = sorted(set(unread) - set(RESERVED_CONFIG_LEAVES))
+    assert unexpected == [], (
+        "config leaves that nothing outside config.py reads — honor them or delete "
+        f"them with a REMOVED_KEYS entry (08 §A35): {unexpected}"
+    )
+
+    # And the allowlist may not rot: a reserved key that HAS grown a reader
+    # must be taken off the list, or the list stops meaning anything.
+    stale = sorted(set(RESERVED_CONFIG_LEAVES) - set(unread))
+    assert stale == [], (
+        f"these leaves now have readers and must leave RESERVED_CONFIG_LEAVES: {stale}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +575,24 @@ def test_every_config_key_is_honored() -> None:
             'descriptions."areas/health"',
             "must be a string, got integer",
         ),
+        # spec 12 §1 [integrate]. `diff` is a REVIEW gate, not an edit mode —
+        # putting it in default_mode must fail loudly rather than land as a
+        # mode nothing implements.
+        (
+            {"vault": {"root": "/v"}, "integrate": {"default_mode": "diff"}},
+            "integrate.default_mode",
+            "must be one of",
+        ),
+        (
+            {"vault": {"root": "/v"}, "integrate": {"review": "manual"}},
+            "integrate.review",
+            "must be one of",
+        ),
+        (
+            {"vault": {"root": "/v"}, "integrate": {"max_deleted_lines": True}},
+            "integrate.max_deleted_lines",
+            "must be an integer, got boolean",
+        ),
     ],
 )
 def test_leaf_type_and_enum_violations_name_the_key(
@@ -476,6 +614,9 @@ def test_leaf_type_and_enum_violations_name_the_key(
         ({"suggestions": {"learning": {"min_confidence": 1.5}}}, "suggestions.learning.min_confidence"),
         ({"suggestions": {"learning": {"max_history": 0}}}, "suggestions.learning.max_history"),
         ({"suggestions": {"weights": {"context_match": -1.0}}}, "suggestions.weights.context_match"),
+        # 12 §1: the deletion threshold is a COUNT of tolerated deletions;
+        # negative is meaningless and must not silently disable the guard.
+        ({"integrate": {"max_deleted_lines": -1}}, "integrate.max_deleted_lines"),
         ({"vault": {"root": "/v", "max_file_size": 0}}, "vault.max_file_size"),
         ({"vault": {"root": "/v", "incremental_debounce": -1}}, "vault.incremental_debounce"),
         ({"llm": {"retries": -1}}, "llm.retries"),
@@ -760,3 +901,48 @@ def test_config_is_immutable() -> None:
     config = validate_config(minimal_raw())
     with pytest.raises(dataclasses.FrozenInstanceError):
         config.vault.root = Path("/elsewhere")  # type: ignore[misc]
+
+
+def test_a_broken_consumer_registry_fails_loudly_instead_of_falling_back() -> None:
+    """The deferred `organize_core.consumers` import (the `config <- consumers/base`
+    back-edge, now recorded in ARCHITECTURE.md) used to be wrapped in a bare
+    `except Exception` that silently substituted a HARDCODED type list. A
+    broken `@register` in any consumer module would then make config
+    validation quietly accept a stale set of consumer types — the opposite of
+    this module's "bad config is banned" rule. Only `ImportError` falls back.
+    """
+    import organize_core.config as config_module
+
+    original = config_module._registered_consumer_types
+
+    def exploding() -> frozenset[str]:
+        raise RuntimeError("a consumer module's @register is broken")
+
+    raw = minimal_raw()
+    raw["consumers"] = {"tw": {"type": "taskwarrior"}}
+    config_module.__dict__["_registered_consumer_types"] = exploding
+    try:
+        with pytest.raises(RuntimeError):
+            validate_config(raw)
+    finally:
+        config_module.__dict__["_registered_consumer_types"] = original
+
+    # ...and with the real registry the same config is accepted.
+    assert validate_config(raw).consumers[0].type == "taskwarrior"
+
+
+def test_the_consumer_registry_is_not_imported_at_config_import_time() -> None:
+    """The back-edge is broken by DEFERRING the import; if it ever became a
+    module-level import the graph would have a real cycle."""
+    import ast
+    from pathlib import Path as _Path
+
+    source = (
+        _Path(__file__).resolve().parents[1] / "src" / "organize_core" / "config.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in tree.body:  # module level only
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+            "organize_core.consumers"
+        ):
+            raise AssertionError("config.py imports consumers at module level — that is the cycle")

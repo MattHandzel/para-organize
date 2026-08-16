@@ -59,26 +59,41 @@ SERVER_SOURCE = Path(__file__).resolve().parents[1] / "src" / "organize_core" / 
 # ---------------------------------------------------------------------------
 
 
+#: The names spec 10 §2 enumerates, in the order it enumerates them.
+SPEC_10_METHODS: tuple[str, ...] = (
+    "session.start",
+    "note.get",
+    "suggest.for_note",
+    "op.move",
+    "op.merge_preview",
+    "op.merge_commit",
+    "op.archive",
+    "meta.set",
+    "folder.create",
+    "index.reindex",
+    "search.query",
+    "routes.resolve",
+    "auto.propose",
+    "auto.apply",
+    "events.subscribe",
+)
+
+#: Read-only additions beyond spec 10 §2's list. Spec 07 calls completion
+#: "what makes tag entry fast and consistent" and spec 10 §3 puts
+#: `metadata_fields` in CORE config so the UI reads it from the core — but
+#: neither surface exposed the definitions or `VaultIndex.values_of`, so the
+#: doc-07 feature was unreachable from any thin client. Anything else added
+#: here fails this test, which is the point.
+EXTRA_METHODS: frozenset[str] = frozenset({"meta.fields", "meta.values"})
+
+
 def test_rpc_methods_are_exactly_the_spec_10_names_in_order() -> None:
-    assert RPC_METHODS == (
-        "session.start",
-        "note.get",
-        "suggest.for_note",
-        "op.move",
-        "op.merge_preview",
-        "op.merge_commit",
-        "op.archive",
-        "meta.set",
-        "folder.create",
-        "index.reindex",
-        "search.query",
-        "routes.resolve",
-        "auto.propose",
-        "auto.apply",
-        "events.subscribe",
-    )
-    assert len(RPC_METHODS) == 15
-    assert len(set(RPC_METHODS)) == 15
+    assert set(SPEC_10_METHODS) <= set(RPC_METHODS)
+    ordered = [name for name in RPC_METHODS if name in set(SPEC_10_METHODS)]
+    assert tuple(ordered) == SPEC_10_METHODS
+    assert set(RPC_METHODS) - set(SPEC_10_METHODS) == EXTRA_METHODS
+    assert len(RPC_METHODS) == len(SPEC_10_METHODS) + len(EXTRA_METHODS)
+    assert len(set(RPC_METHODS)) == len(RPC_METHODS)
 
 
 def test_mutating_methods_are_exactly_the_dispatch_contract() -> None:

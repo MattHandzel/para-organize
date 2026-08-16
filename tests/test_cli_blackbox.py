@@ -1,29 +1,42 @@
-"""Black-box verification of the `organize` CLI (seat: cli).
+"""Black-box verification of the `organize` CLI (seat: cli-blackbox).
 
-Kept OUTSIDE tests/ because tests/test_cli*.py belongs to the CLI-test seat
-per the integrator ruling. Run:
+Lives in `tests/` and is collected by the default run; ARCHITECTURE.md gives
+`tests/test_cli*.py` to this seat. Run:
 
-    .venv/bin/python -m pytest <this file> -q
+    .venv/bin/python -m pytest tests/test_cli_blackbox.py -q
 
-Every case drives the REAL console script in a subprocess against a fixture
-vault + tmp CorePaths (ORGANIZE_CORE_* env), never real state.
+Every case drives the REAL `organize` entry point in a subprocess against a
+fixture vault + tmp CorePaths (ORGANIZE_CORE_* env), never real state.
+
+PORTABILITY (08 §A37 — "test infra hardcodes an absolute repo path"). `REPO`
+is derived from THIS FILE, and the CLI under test is invoked as
+`sys.executable -m organize_core.cli` with `PYTHONPATH` pointing at this
+checkout's `src/`. It used to hardcode
+`/home/matth/.../organize-rewrite` and shell out to that tree's
+`.venv/bin/organize`, so the whole suite happily passed in any other
+worktree, CI checkout or copy while testing FOREIGN code — including a copy
+whose `organize_core.cli` could not even be imported.
+`tests/test_repo_hygiene.py` pins that no test file names an absolute
+`/home/` path again.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-REPO = Path("/home/matth/Projects/KnowledgeManagementSystem/organize-rewrite")
+REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "tests"))
 
 from conftest import QUIRK_FILES, build_fixture_vault  # noqa: E402
 
-ORGANIZE = REPO / ".venv" / "bin" / "organize"
+#: The command that runs the CLI of THIS checkout, whatever its prefix.
+ORGANIZE: tuple[str, ...] = (sys.executable, "-m", "organize_core.cli")
 CAPTURE = QUIRK_FILES["current_schema"]  # tags: impro, creativity; sources: me
 
 
@@ -65,6 +78,11 @@ class Core:
     def env(self) -> dict[str, str]:
         return {
             "PATH": "/usr/bin:/bin",
+            # `-m organize_core.cli` must resolve to THIS checkout's source,
+            # not to whatever happens to be installed in the venv.
+            "PYTHONPATH": os.pathsep.join(
+                [str(REPO / "src"), *( [p] if (p := os.environ.get("PYTHONPATH")) else [] )]
+            ),
             "ORGANIZE_CORE_CONFIG_DIR": str(self.config_dir),
             "ORGANIZE_CORE_STATE_DIR": str(self.state_dir),
             "ORGANIZE_CORE_RUNTIME_DIR": str(self.runtime_dir),
@@ -72,7 +90,7 @@ class Core:
 
     def run(self, *args: str, stdin: str | None = None, env: dict[str, str] | None = None):
         return subprocess.run(
-            [str(ORGANIZE), *args],
+            [*ORGANIZE, *args],
             capture_output=True,
             text=True,
             timeout=120,
@@ -606,7 +624,7 @@ def test_end_to_end_index_suggest_dry_run_move_real_move(core: Core) -> None:
         json.loads(line)
         for line in (next((core.state_dir / "actions").glob("*.jsonl"))).read_text(encoding="utf-8").splitlines()
     ]
-    real_moves = [r for r in records if r["operation"] == "move" and not r["context"]["filters"].get("dry_run")]
+    real_moves = [r for r in records if r["operation"] == "move" and not r["context"]["dry_run"]]
     assert len(real_moves) == 1
     action = real_moves[0]
     assert action["actor"] == "matt"
@@ -642,3 +660,363 @@ def test_end_to_end_index_stays_consistent_after_a_move(core: Core) -> None:
     assert f"resources/performing/{name}" in paths
     assert f"archive/capture/raw_capture/{name}" in paths
     assert CAPTURE not in paths
+
+
+# ===========================================================================
+# Phase-1 fix pass — every case below fails against the CLI as it was.
+# ===========================================================================
+
+
+def test_merge_records_learning_keyed_by_the_targets_folder(core: Core) -> None:
+    """Spec 03 §6's outcome table: "Merge … `record_move` fires with the
+    target's folder"; spec 04 §3: "on every successful accept/`move`/merge".
+
+    `cmd_merge` never called `_record_learning`, so a merge through the CLI
+    taught the system nothing — while the RPC door DID record it. The two
+    composition roots disagreed about the same user action and nothing
+    failed, because no test asserted that a merge produces learning at all.
+    """
+    core.index()
+    proc = core.run("merge", CAPTURE, "projects/blog/ideas.md")
+    assert proc.returncode == 0, proc.stderr
+
+    learning = json.loads((core.state_dir / "learning.json").read_text(encoding="utf-8"))
+    assert learning["statistics"]["total_moves"] == 1
+    destinations = list(learning["statistics"]["destinations"])
+    assert destinations == [str(core.vault / "projects" / "blog")], (
+        "the FOLDER is the learning key — `suggest` scores folder candidates, "
+        "so a file-keyed association would never read back"
+    )
+    assert learning["associations"], "the capture's features were recorded"
+
+
+def test_move_and_merge_both_reach_the_learner(core: Core) -> None:
+    core.index()
+    assert core.run("move", "capture/raw_capture/scalar-tags.md", "projects/blog").returncode == 0
+    assert core.run("merge", CAPTURE, "projects/blog/ideas.md").returncode == 0
+    learning = json.loads((core.state_dir / "learning.json").read_text(encoding="utf-8"))
+    assert learning["statistics"]["total_moves"] == 2
+
+
+def test_an_accepted_move_evicts_stale_learning(core: Core) -> None:
+    """08 §A23 / spec 04 §5. `apply_decay` had no caller anywhere in
+    production, so the 90-day eviction and the `max_history` cap never ran
+    and learning.json grew without bound. Driven through the REAL CLI so the
+    assertion is about scheduling, not about the pure function.
+    """
+    import time
+
+    core.index()
+    core.state_dir.mkdir(parents=True, exist_ok=True)
+    ancient = time.time() - 200 * 24 * 3600
+    seeded = {
+        "schema_version": 1,
+        "associations": {
+            "tags:ancient": {"created_at": ancient, "last_used": ancient, "destinations": {}},
+            **{
+                f"tags:filler-{n}": {"created_at": ancient, "last_used": time.time(), "destinations": {}}
+                for n in range(1200)
+            },
+        },
+        "patterns": {"tag:ancient->dest:/x": {"count": 1, "created_at": ancient, "last_seen": ancient}},
+        "statistics": {"total_moves": 5, "destinations": {}, "last_updated": 0},
+    }
+    (core.state_dir / "learning.json").write_text(json.dumps(seeded), encoding="utf-8")
+
+    proc = core.run("move", "capture/raw_capture/scalar-tags.md", "projects/blog")
+    assert proc.returncode == 0, proc.stderr
+
+    learning = json.loads((core.state_dir / "learning.json").read_text(encoding="utf-8"))
+    assert "tags:ancient" not in learning["associations"], "the 90-day eviction never ran"
+    assert "tag:ancient->dest:/x" not in learning["patterns"]
+    # Decay runs BEFORE the move is recorded (the move must not evict itself),
+    # so the cap is `max_history` + the one association this move just added.
+    assert len(learning["associations"]) <= 1000 + 1, "max_history is not a dead knob"
+    assert len(learning["associations"]) < 1201, "nothing was evicted at all"
+
+
+@pytest.mark.parametrize("destination", ["../OUTSIDE", "<ABSOLUTE>"])
+def test_move_refuses_a_destination_outside_the_vault(
+    core: Core, destination: str, tmp_path: Path
+) -> None:
+    """ARCHITECTURE ruling #19 — the two doors must agree. `organize move`
+    accepted a destination outside the vault root and silently relocated the
+    note out of the vault with exit 0, while RPC `op.move` refused the
+    identical destination. Nothing was lost (the original is archived) but a
+    vault note left the vault on a plain typo and the index disowned it.
+    """
+    core.index()
+    escape = tmp_path / "ESCAPED"
+    proc = core.run("move", CAPTURE, str(escape) if destination == "<ABSOLUTE>" else destination)
+    assert proc.returncode == 1
+    assert "outside the vault" in proc.stderr
+    assert "hint:" in proc.stderr
+    assert (core.vault / CAPTURE).is_file(), "the capture never moved"
+    assert not escape.exists()
+
+
+def test_a_tilde_destination_stays_inside_the_vault(core: Core) -> None:
+    """`~/HOMEDEST` used to expand against `$HOME` and export the note out of
+    the vault. The literal vault-relative reading now wins (`~` is a legal
+    filename character — spec 02's quirk list), so the note stays contained;
+    what must never happen is a write under the real home directory.
+    """
+    core.index()
+    proc = core.run("move", CAPTURE, "~/HOMEDEST")
+    assert proc.returncode == 0, proc.stderr
+    landed = core.vault / "~" / "HOMEDEST" / Path(CAPTURE).name
+    assert landed.is_file(), "the destination was read as vault-relative"
+    assert not (Path.home() / "HOMEDEST").exists(), "nothing may be written outside the vault"
+
+
+def test_merge_refuses_a_target_outside_the_vault(core: Core, tmp_path: Path) -> None:
+    """The escape that MUTATED an arbitrary non-vault file."""
+    core.index()
+    outside = tmp_path / "private.md"
+    outside.write_text("---\ntitle: private\n---\nMY PRIVATE NOTES\n", encoding="utf-8")
+    proc = core.run("merge", CAPTURE, str(outside))
+    assert proc.returncode == 1
+    assert "outside the vault" in proc.stderr
+    assert outside.read_text(encoding="utf-8") == "---\ntitle: private\n---\nMY PRIVATE NOTES\n"
+
+
+def test_a_note_outside_the_vault_gets_the_right_error(core: Core, tmp_path: Path) -> None:
+    """spec 09 §1.5 (actionable errors). An out-of-vault note used to be
+    reported as "<path> is inside the vault but not indexable", with a hint
+    pointing at `ignore_patterns` / `max_file_size` — both factually wrong
+    and both useless, because `index.update_file` returns None for BOTH
+    "outside the root" and "ignored", and the CLI collapsed the two."""
+    core.index()
+    victim = tmp_path / "outside" / "secret.md"
+    victim.parent.mkdir(parents=True, exist_ok=True)
+    victim.write_text("---\nid: secret\n---\nbody\n", encoding="utf-8")
+
+    proc = core.run("set-meta", str(victim), "importance=high")
+    assert proc.returncode == 1
+    assert "outside the vault" in proc.stderr
+    assert "ignore_patterns" not in proc.stderr
+    assert victim.read_text(encoding="utf-8") == "---\nid: secret\n---\nbody\n"
+
+
+def test_a_leading_tilde_filename_is_addressable(core: Core) -> None:
+    """`~` is a legal character in a vault filename (spec 02's quirk list has
+    the `$` twin). `_vault_path` short-circuited on a leading `~` straight
+    into `expanduser`, so `~inbox.md` resolved against the caller's CWD and
+    reported "note not found" for a file sitting in the vault — while the RPC
+    door resolved it correctly. Same defect class as the already-fixed `$`.
+    """
+    (core.vault / "~inbox.md").write_text("---\nid: tilde\ntags:\n- impro\n---\nbody\n", encoding="utf-8")
+    core.index()
+
+    proc = core.run("suggest", "~inbox.md", "--json")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["subject"] == "~inbox.md"
+
+
+def test_a_move_preserves_the_notes_permissions(core: Core) -> None:
+    """spec 05 §1.3 "Preserve file permissions". `atomic_write` read the mode
+    from the destination, which does not exist for a move, so every organized
+    note landed 0600 while the rest of the vault stayed 0644."""
+    import os
+
+    core.index()
+    source = core.vault / "capture/raw_capture/metadata-map.md"
+    # 0o640: neither the old hardcoded 0o600 nor the umask default (0o644),
+    # so only genuine preservation passes.
+    os.chmod(source, 0o640)
+    proc = core.run("move", "capture/raw_capture/metadata-map.md", "projects/blog")
+    assert proc.returncode == 0, proc.stderr
+    assert os.stat(core.vault / "projects/blog/metadata-map.md").st_mode & 0o777 == 0o640
+    assert os.stat(core.vault / "archive/capture/raw_capture/metadata-map.md").st_mode & 0o777 == 0o640
+
+
+def test_moving_into_the_archive_folder_is_refused(core: Core) -> None:
+    """The destination and the archive path collide, so the organized copy
+    was written and then silently overwritten by the un-organized original —
+    while the CLI printed "tag added" and exited 0."""
+    core.index()
+    proc = core.run("move", "capture/raw_capture/metadata-map.md", "archive/capture/raw_capture")
+    assert proc.returncode == 1
+    assert "archive capture folder" in proc.stderr
+    assert (core.vault / "capture/raw_capture/metadata-map.md").is_file()
+
+
+def test_record_accepts_the_ndjson_that_export_produces(core: Core) -> None:
+    """`organize actions export | organize record` — the natural corpus
+    round-trip — was the one format the parser rejected, while its own error
+    hint advertised "newline-delimited objects"."""
+    core.index()
+    assert core.run("move", "capture/raw_capture/scalar-tags.md", "projects/blog").returncode == 0
+    assert core.run("merge", CAPTURE, "projects/blog/ideas.md").returncode == 0
+
+    exported = core.run("actions", "export")
+    assert exported.returncode == 0
+    assert len(exported.stdout.strip().splitlines()) == 2
+
+    fresh = Core(core.state_dir.parent / "second")
+    proc = fresh.run("record", stdin=exported.stdout)
+    assert proc.returncode == 0, proc.stderr
+    assert len(proc.stdout.strip().splitlines()) == 2
+
+
+def test_record_of_a_move_feeds_the_learner(core: Core) -> None:
+    """spec 12 §2 "Uses" #2: "one write path, two readers". An ActionRecord
+    accepted through the documented external entry point used to reach the
+    corpus and never reach the learner."""
+    core.index()
+    record = {
+        "actor": "matt",
+        "operation": "move",
+        "capture": {
+            "path": str(core.vault / CAPTURE),
+            "content_hash": "h",
+            "frontmatter_before": {"tags": ["impro"], "sources": ["me"]},
+            "body_before": "body",
+        },
+        "targets": [
+            {
+                "path": str(core.vault / "projects/blog/x.md"),
+                "role": "destination",
+                "before_hash": None,
+                "after_hash": "a",
+                "diff": "",
+            }
+        ],
+    }
+    proc = core.run("record", stdin=json.dumps(record))
+    assert proc.returncode == 0, proc.stderr
+
+    learning = json.loads((core.state_dir / "learning.json").read_text(encoding="utf-8"))
+    assert learning["statistics"]["total_moves"] == 1
+    assert list(learning["statistics"]["destinations"]) == [str(core.vault / "projects" / "blog")]
+
+
+@pytest.mark.parametrize("bound", ["2026-8-1", "not-a-date", "26-08-01"])
+def test_actions_export_rejects_a_malformed_date_bound(core: Core, bound: str) -> None:
+    """spec 09 §1.5. `--since`/`--until` are compared as ISO PREFIXES, so an
+    unpadded bound silently excluded EVERY record and exited 0 — on the
+    corpus-extraction path that is indistinguishable from "there is no
+    data"."""
+    core.index()
+    assert core.run("move", "capture/raw_capture/scalar-tags.md", "projects/blog").returncode == 0
+    assert len(core.run("actions", "export").stdout.strip().splitlines()) == 1
+
+    proc = core.run("actions", "export", "--since", bound)
+    assert proc.returncode == 1
+    assert "zero-padded ISO date" in proc.stderr
+    assert "hint:" in proc.stderr
+
+
+def test_actions_export_accepts_the_padded_forms(core: Core) -> None:
+    core.index()
+    assert core.run("move", "capture/raw_capture/scalar-tags.md", "projects/blog").returncode == 0
+    for bound in ("2020-01", "2020-01-01", "2020-01-01T00:00:00Z"):
+        proc = core.run("actions", "export", "--since", bound)
+        assert proc.returncode == 0, proc.stderr
+        assert len(proc.stdout.strip().splitlines()) == 1
+
+
+def test_meta_fields_exposes_the_doc_07_definitions_and_completions(tmp_path: Path) -> None:
+    """spec 07 + spec 10 §3. `metadata_fields` lives in CORE config so the UI
+    reads it FROM the core — but neither the CLI nor the RPC surface exposed
+    the definitions or `VaultIndex.values_of`, so a thin client could not
+    obtain `complete = "existing"` values and the doc-07 feature was
+    unreachable through the doc-10 API."""
+    core = Core(tmp_path)
+    (core.config_dir / "config.toml").write_text(
+        _config_text(
+            core.vault,
+            extra="""
+[[metadata_fields]]
+key = "tags"
+type = "list"
+keymap = "<leader>mt"
+complete = "existing"
+normalize = "kebab"
+
+[[metadata_fields]]
+key = "importance"
+type = "enum"
+keymap = "<leader>mi"
+values = ["high", "medium", "low"]
+""",
+        ),
+        encoding="utf-8",
+    )
+    core.index()
+
+    payload = json.loads(core.run("meta-fields", "--json").stdout)
+    fields = {entry["key"]: entry for entry in payload["fields"]}
+    assert fields["tags"]["type"] == "list"
+    assert fields["tags"]["normalize"] == "kebab"
+    assert "impro" in fields["tags"]["completions"], "complete = 'existing' reads the vault"
+    assert fields["importance"]["completions"] == ["high", "medium", "low"]
+
+    values = json.loads(core.run("meta-fields", "--key", "tags", "--json").stdout)
+    assert values["key"] == "tags"
+    assert "impro" in values["values"]
+
+
+def test_health_reports_an_orphaned_atomic_write_temp(core: Core) -> None:
+    """spec 05 §1.3 "temp files are cleaned up". A SIGKILL mid-write leaves a
+    full-size hidden `.organize-tmp` in the Syncthing-synced vault; nothing
+    swept them and `organize health` did not look, so they were invisible as
+    well as permanent."""
+    import os
+    import time
+
+    core.index()
+    orphan = core.vault / "projects" / ".note.md.999.0.organize-tmp"
+    orphan.write_text("half a write\n", encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(orphan, (old, old))
+
+    proc = core.run("health", "--json")
+    payload = json.loads(proc.stdout)
+    messages = [issue["message"] for issue in payload["issues"]]
+    assert any("abandoned atomic-write temp file" in message for message in messages)
+
+
+def test_move_records_the_counterfactual_it_was_given(core: Core) -> None:
+    """spec 12 §2: "The counterfactual is stored, not just the choice".
+    `suggestions_shown` / `chosen_rank` / `durations_ms` had no parameter and
+    no call site anywhere, so every real record stored an empty list and a
+    null rank and `organize actions stats` could never report an accept rate
+    from real usage."""
+    core.index()
+    ranked = core.run("suggest", CAPTURE, "--json").stdout
+
+    proc = core.run(
+        "move",
+        CAPTURE,
+        "resources/performing",
+        "--suggestions-json",
+        ranked,
+        "--chosen-rank",
+        "1",
+        "--durations-json",
+        '{"decision": 8400, "operation": 120}',
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    exported = [json.loads(line) for line in core.run("actions", "export").stdout.splitlines() if line]
+    context = exported[0]["context"]
+    assert context["chosen_rank"] == 1
+    assert context["suggestions_shown"], "the ranked list that was shown is the label"
+    assert context["suggestions_shown"][0]["rank"] == 1
+    assert context["durations_ms"] == {"decision": 8400, "operation": 120}
+
+    stats = json.loads(core.run("actions", "stats", "--json").stdout)
+    assert stats["suggestions"]["with_suggestions"] == 1
+    assert stats["suggestions"]["top_accept_rate"] == 1.0, (
+        "spec 12 §2 Uses #1 — the accept-rate of the top suggestion must be "
+        "computable from real usage"
+    )
+
+
+def test_a_malformed_decision_context_flag_is_loud(core: Core) -> None:
+    core.index()
+    proc = core.run("move", CAPTURE, "projects/blog", "--suggestions-json", "{not json")
+    assert proc.returncode == 1
+    assert "ConfigError:" in proc.stderr
+    assert (core.vault / CAPTURE).is_file(), "a rejected flag must not half-perform the move"

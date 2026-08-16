@@ -20,15 +20,16 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from organize_core import learn as learn_mod
 from organize_core.config import LearningConfig
 from organize_core.index import NoteRecord
 from organize_core.learn import (
     GENERIC_KEY,
     LEARNING_SCHEMA_VERSION,
-    SECONDS_PER_DAY,
     Association,
     DestinationStat,
     Features,
@@ -52,6 +53,15 @@ from organize_core.learn import (
     suggest_new_folders,
     tag_pattern_key,
 )
+
+#: Declared HERE, independently, exactly like tests/test_suggest.py does.
+#: Importing `learn.SECONDS_PER_DAY` and building every time-based
+#: expectation from it made this whole file a tautology: setting the
+#: production constant to 3600 ("a day is an hour") left the recency-decay,
+#: 30-day and 89/90/91-day eviction goldens ALL green, because both sides of
+#: every assertion moved together. Doc 04 §7 bullet 5 then had no genuine
+#: independent check anywhere in the suite.
+SECONDS_PER_DAY = 24 * 60 * 60
 
 NOW = 1_760_000_000.0  # a fixed epoch; `now` is always injected (spec 09 §3)
 DEST = "/vault/projects/project-x"
@@ -81,6 +91,19 @@ def make_record(
 
 
 # --- features and keys (spec 04 §3.1-3.2, byte-exact) ----------------------
+
+
+def test_a_day_is_a_day() -> None:
+    """The one assertion that makes every time-based golden in this file real.
+
+    `learn.SECONDS_PER_DAY` feeds `days_since` in the recency multiplier and
+    `eviction_days` in `apply_decay`; nothing else in the module states how
+    long a day is, so this is the only thing standing between a typo in that
+    constant and a silently-green suite (doc 04 §7 bullets 4 and 5).
+    """
+    assert learn_mod.SECONDS_PER_DAY == 86400
+    assert learn_mod.SECONDS_PER_DAY == SECONDS_PER_DAY
+    assert learn_mod.DECAY_INTERVAL_SECONDS == SECONDS_PER_DAY
 
 
 def test_extract_features_sorts_every_multi_value_field() -> None:
@@ -356,17 +379,48 @@ def test_total_moves_zero_across_many_candidates_is_all_zero(
     assert sum(scores) == 0.0  # a single NaN would make this NaN
 
 
-def test_total_moves_zero_still_lets_patterns_through(
+def test_total_moves_zero_contributes_exactly_zero_including_the_pattern_term(
     meeting_capture: NoteRecord,
 ) -> None:
-    """The guard is on the frequency DENOMINATOR only — the pattern term is
-    independent of total_moves and must still contribute (04 §4)."""
+    """Spec 04 §7 bullet 6, literally: "`total_moves==0` ⇒ association score
+    contributes **exactly 0 to every candidate**".
+
+    §4's pseudocode adds `0.5 * pattern_score` outside the `total_moves`
+    guard, so this used to return 0.02 for a pattern-only state. §7 is an
+    acceptance gate and wins. The state is reachable in production, not
+    synthetic — see the companion test below.
+    """
     data = _seeded(3, total_moves=0, last_used=NOW)
     data.patterns[tag_pattern_key("meeting", DEST)] = PatternStat(
         count=4, created_at=NOW, last_seen=NOW
     )
     score = get_association_score(data, meeting_capture, DEST, LearningConfig(), now=NOW)
-    assert score == pytest.approx(0.5 * 0.04, rel=1e-12)  # 0.02
+    assert score == 0.0
+
+
+def test_total_moves_zero_with_patterns_is_reachable_through_load_learning(
+    tmp_path: Path, meeting_capture: NoteRecord
+) -> None:
+    """The partial-degradation path that makes the bullet above load-bearing:
+    a corrupt `statistics` block degrades to `Statistics()` (total_moves 0)
+    while the `patterns` table parses cleanly, so a damaged learning.json was
+    still steering suggestions."""
+    path = tmp_path / "learning.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "associations": {},
+                "patterns": {tag_pattern_key("meeting", DEST): {"count": 40, "last_seen": 0}},
+                "statistics": "CORRUPT",
+            }
+        ),
+        encoding="utf-8",
+    )
+    data = load_learning(path)
+    assert data.statistics.total_moves == 0
+    assert len(data.patterns) == 1
+    assert get_association_score(data, meeting_capture, DEST, LearningConfig(), now=NOW) == 0.0
 
 
 def test_malformed_learning_data_never_raises() -> None:
@@ -721,3 +775,240 @@ def test_scoring_survives_a_corrupt_learning_file(tmp_path: Path) -> None:
         get_association_score(data, make_record(tags=["x"]), DEST, LearningConfig(), now=NOW)
         == 0.0
     )
+
+
+# ===========================================================================
+# Phase-1 fix pass
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    "field_path",
+    [
+        ("associations", "count"),
+        ("patterns", "count"),
+        ("statistics", "total_moves"),
+        ("statistics", "destination_count"),
+    ],
+)
+@pytest.mark.parametrize("literal", ["Infinity", "-Infinity", "1e400"])
+def test_a_non_finite_integer_degrades_instead_of_crashing(
+    tmp_path: Path, field_path: tuple[str, str], literal: str
+) -> None:
+    """Spec 04 §3 ⚠: "loading malformed/legacy JSON must degrade to empty
+    data, never crash scoring".
+
+    `json.loads` produces `float('inf')` for a literal `Infinity` or an
+    out-of-range `1e400`, and `int(inf)` raises `OverflowError` — which
+    `_as_int` did not catch, so `load_learning` blew up with a raw traceback
+    that did not even go through the OrganizeError path. `organize suggest`
+    exited 1 with a stack trace.
+    """
+    section, leaf = field_path
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "associations": {},
+        "patterns": {},
+        "statistics": {"total_moves": 3, "destinations": {}, "last_updated": 0},
+    }
+    if section == "associations":
+        payload["associations"] = {
+            "tags:meeting": {
+                "created_at": 0,
+                "last_used": 0,
+                "destinations": {DEST: {"count": literal, "last_used": 0}},
+            }
+        }
+    elif section == "patterns":
+        payload["patterns"] = {tag_pattern_key("meeting", DEST): {"count": literal, "last_seen": 0}}
+    elif leaf == "total_moves":
+        payload["statistics"]["total_moves"] = literal
+    else:
+        payload["statistics"]["destinations"] = {DEST: literal}
+
+    text = json.dumps(payload).replace(f'"{literal}"', literal)
+    path = tmp_path / "learning.json"
+    path.write_text(text, encoding="utf-8")
+
+    data = load_learning(path)  # must not raise
+    assert isinstance(data, LearningData)
+    # And scoring off it stays finite.
+    score = get_association_score(
+        data,
+        NoteRecord(
+            path="/v/c.md",
+            filename="c.md",
+            title="c",
+            para_type="capture",
+            folder="raw_capture",
+            tags=["meeting"],
+        ),
+        DEST,
+        LearningConfig(),
+        now=NOW,
+    )
+    assert math.isfinite(score)
+
+
+def test_import_data_also_survives_a_non_finite_integer() -> None:
+    """`import_data` goes through the same `_data_from_raw` and used to raise
+    OverflowError instead of returning its documented failure value."""
+    raw = {
+        "schema_version": 1,
+        "associations": {
+            "tags:meeting": {
+                "created_at": 0,
+                "last_used": 0,
+                "destinations": {DEST: {"count": float("inf"), "last_used": 0}},
+            }
+        },
+        "statistics": {"total_moves": float("inf")},
+    }
+    data = import_data(raw)
+    assert data is not None
+    assert data.statistics.total_moves == 0
+
+
+def test_clear_returns_empty_learning_state() -> None:
+    """Spec 04 §6 lists `clear()` in the public API; it was not implemented."""
+    assert learn_mod.clear() == LearningData()
+
+
+# --- 08 §A23 / 04 §3 step 6: decay is actually SCHEDULED -------------------
+
+
+def test_maybe_apply_decay_runs_once_a_day_not_once_a_move() -> None:
+    """04 §3 step 6: "at most once per session or per day". `apply_decay` was
+    pure, correct, unit-tested — and called by NOTHING in production, so the
+    90-day eviction and the max_history cap never ran at all."""
+    config = LearningConfig(eviction_days=90, max_history=1000)
+    data = LearningData()
+    data.associations["stale"] = Association(last_used=NOW - 200 * SECONDS_PER_DAY)
+    data.associations["fresh"] = Association(last_used=NOW)
+    data.statistics = Statistics(total_moves=1, last_updated=NOW - 2 * SECONDS_PER_DAY)
+
+    learn_mod.maybe_apply_decay(data, config, now=NOW)
+    assert "stale" not in data.associations
+    assert "fresh" in data.associations
+
+
+def test_maybe_apply_decay_is_a_no_op_inside_the_day_window() -> None:
+    config = LearningConfig(eviction_days=90, max_history=1000)
+    data = LearningData()
+    data.associations["stale"] = Association(last_used=NOW - 200 * SECONDS_PER_DAY)
+    data.statistics = Statistics(total_moves=1, last_updated=NOW - 60.0)
+
+    learn_mod.maybe_apply_decay(data, config, now=NOW)
+    assert "stale" in data.associations, "decay must not run per move (04 §3 step 6)"
+
+
+def test_a_virgin_learning_file_decays_on_its_first_move() -> None:
+    """`last_updated == 0` opens the gate, so the very first accepted move on
+    an imported/stale file cleans it up."""
+    config = LearningConfig(eviction_days=90, max_history=1000)
+    data = LearningData()
+    data.associations["stale"] = Association(last_used=NOW - 200 * SECONDS_PER_DAY)
+    learn_mod.maybe_apply_decay(data, config, now=NOW)
+    assert data.associations == {}
+
+
+# --- 12 §2 "Uses" #2: learning is derived FROM the ActionRecord ------------
+
+
+def _action_record(tags: list[str], destination_file: str, operation: str = "move") -> Any:
+    from organize_core.actions import ActionRecord, CaptureState, TargetState
+
+    return ActionRecord(
+        id="act_test",
+        ts="2026-08-06T07:06:40Z",
+        actor="matt",
+        operation=operation,  # type: ignore[arg-type]
+        capture=CaptureState(
+            path="/v/capture/raw_capture/c.md",
+            content_hash="h",
+            frontmatter_before={"tags": tags, "sources": ["me"]},
+            body_before="body",
+        ),
+        targets=(
+            TargetState(
+                path=destination_file,
+                role="destination" if operation == "move" else "merge_target",
+                before_hash=None,
+                after_hash="a",
+                diff="",
+            ),
+        ),
+    )
+
+
+def test_record_action_keys_on_the_destination_folder() -> None:
+    """Spec 03 §6: "record_move fires with the target's FOLDER" — `suggest`
+    scores folder candidates, so a file-keyed association never reads back."""
+    data = learn_mod.record_action(
+        LearningData(), _action_record(["meeting"], f"{DEST}/note.md"), now=NOW
+    )
+    assert data is not None
+    assert list(data.statistics.destinations) == [DEST]
+
+
+def test_record_action_derives_the_same_key_as_record_move() -> None:
+    """The corpus-derived path and the NoteRecord path must agree, or
+    learning.json stops being rebuildable from the action log."""
+    capture = NoteRecord(
+        path="/v/capture/raw_capture/c.md",
+        filename="c.md",
+        title="c",
+        para_type="capture",
+        folder="raw_capture",
+        tags=["meeting", "impro"],
+        sources=["me"],
+    )
+    from_record = record_move(LearningData(), capture, DEST, now=NOW)
+    from_action = learn_mod.record_action(
+        LearningData(), _action_record(["meeting", "impro"], f"{DEST}/note.md"), now=NOW
+    )
+    assert from_action is not None
+    assert list(from_action.associations) == list(from_record.associations)
+    assert list(from_action.patterns) == list(from_record.patterns)
+
+
+def test_record_action_coerces_a_scalar_tags_field_like_the_index_does() -> None:
+    """The fixture vault has a note with `tags: daily_notes` (a scalar).
+    `NoteRecord.tags` coerces it to a one-element list, so the corpus-derived
+    view must too or the two paths produce different association keys."""
+    record = _action_record([], f"{DEST}/note.md")
+    record.capture.frontmatter_before["tags"] = "daily_notes"
+    view = learn_mod.capture_from_action(record)
+    assert view.tags == ("daily_notes",)
+
+
+def test_record_action_ignores_a_dry_run() -> None:
+    """A rehearsal is not a precedent — the same rule every corpus reader
+    applies (ActionContext.dry_run)."""
+    from organize_core.actions import ActionContext
+
+    record = _action_record(["meeting"], f"{DEST}/note.md")
+    record = replace_context(record, ActionContext(dry_run=True))
+    assert learn_mod.record_action(LearningData(), record, now=NOW) is None
+
+
+def replace_context(record: Any, context: Any) -> Any:
+    import dataclasses
+
+    return dataclasses.replace(record, context=context)
+
+
+@pytest.mark.parametrize("operation", ["archive", "create_folder", "meta_edit", "skip"])
+def test_record_action_ignores_operations_that_file_nothing(operation: str) -> None:
+    record = _action_record(["meeting"], f"{DEST}/note.md", operation=operation)
+    assert learn_mod.record_action(LearningData(), record, now=NOW) is None
+
+
+def test_record_action_learns_from_a_merge() -> None:
+    """Spec 03 §6's outcome table and 04 §3 both fire on merge."""
+    data = learn_mod.record_action(
+        LearningData(), _action_record(["meeting"], f"{DEST}/ideas.md", operation="merge"), now=NOW
+    )
+    assert data is not None
+    assert data.statistics.total_moves == 1
+    assert list(data.statistics.destinations) == [DEST]

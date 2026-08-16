@@ -322,7 +322,9 @@ def test_log_line_never_spans_two_lines() -> None:
     )
     rendered = format_log_line(op)
     assert "\n" not in rendered
-    assert parse_log_line(rendered).error == "boom second line"  # type: ignore[union-attr]
+    # One op == one line, AND the field survives: the newline is escaped, not
+    # collapsed away, so `parse_log_line` gives back exactly what was logged.
+    assert parse_log_line(rendered).error == "boom\nsecond line"  # type: ignore[union-attr]
 
 
 def test_parse_log_line_returns_none_for_garbage() -> None:
@@ -435,6 +437,7 @@ def test_move_writes_exactly_one_complete_action_record(
     assert rec["context"]["session_id"] == "ses_test"
     assert rec["context"]["vault_stats"] == {"total": 12, "capture_backlog": 5}
     assert rec["context"]["filters"] == {}
+    assert rec["context"]["dry_run"] is False  # a real operation is a precedent
     assert rec["capture"]["path"] == str(fixture_vault / QUIRK_FILES["current_schema"])
     assert rec["capture"]["frontmatter_before"]["tags"] == ["impro", "creativity"]
     assert rec["capture"]["frontmatter_before"]["processing_status"] == "raw"

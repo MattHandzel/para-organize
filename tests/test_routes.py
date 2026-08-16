@@ -640,3 +640,63 @@ def test_phase_four_entry_points_raise_a_clear_not_implemented(
     message = str(excinfo.value)
     assert name in message
     assert "Phase 4" in message
+
+
+# ---------------------------------------------------------------------------
+# Suggestion.type for route entries (integrator seam ruling)
+# ---------------------------------------------------------------------------
+#
+# `as_suggestion()` takes no Config, so it used to guess the PARA type from
+# the destination's leading path segment. That is right for a default vault
+# and wrong for one that renames a PARA root — the route entry would be typed
+# with the raw folder name while every SCORED suggestion for the same folder
+# was typed with the config KEY, and the UI groups on that field. `resolve()`
+# does have the Config, so it now fills `RouteMatch.para_type`.
+
+
+def test_route_suggestion_type_uses_the_configured_para_folder_names() -> None:
+    config = Config(
+        vault=VaultConfig(
+            root=VAULT_ROOT,
+            para_folders={
+                "projects": "p",  # renamed roots
+                "areas": "a",
+                "resources": "r",
+                "archives": "archive",
+            },
+        ),
+        routes=[route(["workout"], "a/health/training-log.md", mode="append")],
+    )
+    (match,) = resolve(["workout"], config)
+    assert match.para_type == "areas"
+    assert match.as_suggestion().type == "areas"
+
+
+def test_route_suggestion_type_still_works_for_the_default_layout() -> None:
+    config = make_config(route(["workout"], "areas/health/training-log.md"))
+    (match,) = resolve(["workout"], config)
+    assert match.para_type == "areas"
+    assert match.as_suggestion().type == "areas"
+
+
+def test_singular_archive_on_disk_is_reported_as_the_plural_type() -> None:
+    """spec 02 / 08 §C2: the folder is `archive`, the suggestion type is
+    `archives`. Both the configured and the fallback path must agree."""
+    config = make_config(route(["done"], "archive/reference/notes.md"))
+    (match,) = resolve(["done"], config)
+    assert match.para_type == "archives"
+    assert match.as_suggestion().type == "archives"
+
+
+def test_a_hand_built_route_match_still_derives_its_type() -> None:
+    """`para_type` defaults to empty, so a RouteMatch built without resolve()
+    (tests, future callers) falls back to the leading-segment reading rather
+    than reporting a blank type."""
+    match = RouteMatch(
+        route=route(["x"], "resources/performing/notes.md"),
+        route_name="x",
+        destination=VAULT_ROOT / "resources/performing/notes.md",
+        is_folder=False,
+    )
+    assert match.para_type == ""
+    assert match.as_suggestion().type == "resources"

@@ -68,9 +68,14 @@ from pathlib import Path
 from typing import Any
 
 from organize_core import API_VERSION
-from organize_core.actions import ActionRecorder
-from organize_core.config import Config
-from organize_core.errors import AlreadyRunning, OrganizeError, ServerError
+from organize_core.actions import ActionRecord, ActionRecorder, SuggestionShown
+from organize_core.config import (
+    Config,
+    MetadataFieldConfig,
+    coerce_metadata_value,
+    metadata_fields_by_key,
+)
+from organize_core.errors import AlreadyRunning, OrganizeError, ServerError, VaultError
 from organize_core.fileops import (
     FileSnapshot,
     OperationContext,
@@ -84,9 +89,15 @@ from organize_core.fileops import (
 )
 from organize_core.frontmatter import FrontmatterError, load_file
 from organize_core.index import NoteRecord, QueryCriteria, VaultIndex
-from organize_core.learn import LearningData, load_learning, record_move, save_learning
+from organize_core.learn import (
+    LearningData,
+    load_learning,
+    maybe_apply_decay,
+    record_action,
+    save_learning,
+)
 from organize_core.paths import CorePaths
-from organize_core.routes import merge_route_suggestions
+from organize_core.routes import get_description, merge_route_suggestions
 from organize_core.routes import resolve as resolve_routes
 from organize_core.session import Session, start_session
 from organize_core.suggest import CaptureFeaturesView, generate_candidates
@@ -105,6 +116,8 @@ RPC_METHODS: tuple[str, ...] = (
     "op.merge_commit",     # (path, target, content, snapshot) → OperationResult
     "op.archive",          # (path) → OperationResult                 spec 05 §3
     "meta.set",            # (path, changes) → OperationResult        spec 05 §5, 07
+    "meta.fields",         # () → metadata_fields[] + completions      spec 07, 10 §3
+    "meta.values",         # (key) → distinct values in the vault      spec 07 complete="existing"
     "folder.create",       # (para_type, name) → OperationResult      spec 05 §6
     "index.reindex",       # () → {total, duration}                   spec 03 §7
     "search.query",        # (criteria) → NoteRecord[]                spec 03 §2
@@ -163,6 +176,10 @@ _NOT_IMPLEMENTED_MESSAGE = (
 
 #: How long the accept loop blocks before re-checking stop/idle state.
 _ACCEPT_POLL_SECONDS = 0.05
+
+#: Practical AF_UNIX ``sun_path`` limit (108 bytes on Linux, 104 on BSD).
+#: Used only to explain a bind failure, never to pre-reject a path.
+_AF_UNIX_PATH_MAX = 104
 #: Cap on one request line; a client that never sends "\n" cannot OOM us.
 _MAX_LINE_BYTES = 8 * 1024 * 1024
 
@@ -174,6 +191,43 @@ class RpcError:
     data: dict[str, Any] | None = None
 
 
+#: Every protocol-level error carries the same `data:{kind, hint}` shape the
+#: -32000 domain errors do, so a client can render taxonomy + hint with ONE
+#: code path. Without it `note.get` with a bad path gave
+#: `{kind: "VaultError", hint: ...}` while a missing parameter gave a bare
+#: message, and the client needed a special case per error class.
+_PROTOCOL_ERROR_KINDS: dict[int, str] = {
+    PARSE_ERROR: "ParseError",
+    INVALID_REQUEST: "InvalidRequest",
+    METHOD_NOT_FOUND: "MethodNotFound",
+    INVALID_PARAMS: "InvalidParams",
+    INTERNAL_ERROR: "InternalError",
+}
+
+_PROTOCOL_ERROR_HINTS: dict[int, str] = {
+    PARSE_ERROR: "send one complete JSON object per line (newline-delimited JSON-RPC 2.0)",
+    INVALID_REQUEST: 'a request is {"jsonrpc": "2.0", "id": ..., "method": ..., "params": {...}}',
+    METHOD_NOT_FOUND: "see data.known_methods for the methods this core serves (spec 10 §2)",
+    INVALID_PARAMS: "check the parameter names and shapes for this method (spec 10 §2)",
+    INTERNAL_ERROR: "this is a core bug — check the server log and report it",
+}
+
+
+def _with_taxonomy(error: RpcError) -> RpcError:
+    """Fill in `data.kind`/`data.hint` for a protocol error that lacks them."""
+    if error.code == ORGANIZE_ERROR:
+        return error  # domain errors already carry their own kind + hint
+    kind = _PROTOCOL_ERROR_KINDS.get(error.code)
+    if kind is None:
+        return error
+    data = dict(error.data or {})
+    data.setdefault("kind", kind)
+    hint = _PROTOCOL_ERROR_HINTS.get(error.code)
+    if hint is not None:
+        data.setdefault("hint", hint)
+    return RpcError(error.code, error.message, data)
+
+
 class RpcException(Exception):
     """Carries an :class:`RpcError` (and, when known, the request id) out of
     decode/dispatch so the connection loop can encode it. Never fatal to the
@@ -181,7 +235,7 @@ class RpcException(Exception):
 
     def __init__(self, error: RpcError, *, request_id: int | str | None = None) -> None:
         super().__init__(error.message)
-        self.error = error
+        self.error = _with_taxonomy(error)
         self.request_id = request_id
 
 
@@ -610,9 +664,11 @@ class _Connection:
                     self.send(
                         encode_response(
                             None,
-                            error=RpcError(
-                                INVALID_REQUEST,
-                                f"request line exceeds {_MAX_LINE_BYTES} bytes",
+                            error=_with_taxonomy(
+                                RpcError(
+                                    INVALID_REQUEST,
+                                    f"request line exceeds {_MAX_LINE_BYTES} bytes",
+                                )
                             ),
                         )
                     )
@@ -648,7 +704,7 @@ class _Connection:
             logger.exception("server: unhandled error serving a request")
             self._respond(
                 request_id,
-                error=RpcError(INTERNAL_ERROR, f"{type(exc).__name__}: {exc}"),
+                error=_with_taxonomy(RpcError(INTERNAL_ERROR, f"{type(exc).__name__}: {exc}")),
             )
             return
         if had_id:
@@ -741,6 +797,8 @@ class OrganizeServer:
             "op.merge_commit": self._op_merge_commit,
             "op.archive": self._op_archive,
             "meta.set": self._meta_set,
+            "meta.fields": self._meta_fields,
+            "meta.values": self._meta_values,
             "folder.create": self._folder_create,
             "index.reindex": self._index_reindex,
             "search.query": self._search_query,
@@ -825,7 +883,23 @@ class OrganizeServer:
     # --- socket plumbing -------------------------------------------------
 
     def _bind(self) -> None:
-        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
+        """Bind the AF_UNIX socket, converting every OS-level failure into a
+        :class:`ServerError` with an actionable hint (09 §1.5).
+
+        The caller is a CLI that cannot attach a hint to an exception it did
+        not raise, so an unusable ``--socket`` used to surface as a bare
+        ``PermissionError: [Errno 13]``. Refusing to start is correct; the
+        message telling Matt WHY is the part that was missing.
+        """
+        try:
+            self.socket_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ServerError(
+                f"cannot create the socket directory {self.socket_path.parent}: "
+                f"{exc.strerror or exc}",
+                hint="pass --socket with a path inside a writable directory "
+                "(default: $XDG_RUNTIME_DIR/organize-core.sock, spec 10 §3)",
+            ) from exc
         if self.socket_path.exists():
             if self._socket_is_live():
                 raise AlreadyRunning(
@@ -835,13 +909,39 @@ class OrganizeServer:
             with contextlib.suppress(OSError):
                 self.socket_path.unlink()
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.bind(str(self.socket_path))
-        os.chmod(self.socket_path, 0o600)
-        sock.listen(64)
+        try:
+            sock.bind(str(self.socket_path))
+            os.chmod(self.socket_path, 0o600)
+            sock.listen(64)
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                sock.close()
+            raise ServerError(
+                f"cannot listen on {self.socket_path}: {exc.strerror or exc}",
+                hint=self._bind_hint(exc),
+            ) from exc
         sock.settimeout(_ACCEPT_POLL_SECONDS)
         self._server_sock = sock
         self._bound = True
         logger.info("server: listening on %s (api %d)", self.socket_path, API_VERSION)
+
+    def _bind_hint(self, exc: OSError) -> str:
+        parent = self.socket_path.parent
+        if exc.errno == errno.EACCES:
+            return f"{parent} is not writable by this user — choose a --socket path you own"
+        if exc.errno == errno.ENOENT:
+            return f"{parent} does not exist and could not be created"
+        # AF_UNIX paths are capped near 108 bytes. CPython raises a bare
+        # OSError("AF_UNIX path too long") with NO errno for this, so the
+        # length is the reliable signal — and it is the failure a deep tmp
+        # dir actually hits.
+        length = len(str(self.socket_path).encode("utf-8"))
+        if exc.errno == errno.ENAMETOOLONG or length >= _AF_UNIX_PATH_MAX:
+            return (
+                f"the socket path is {length} bytes; AF_UNIX allows about "
+                f"{_AF_UNIX_PATH_MAX} — use a shorter --socket path"
+            )
+        return "pass a different --socket path (default: $XDG_RUNTIME_DIR/organize-core.sock)"
 
     def _socket_is_live(self) -> bool:
         probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -912,10 +1012,21 @@ class OrganizeServer:
         self._touch()
 
     def _idle_expired(self) -> bool:
+        """Idle == no in-flight request AND no client attached.
+
+        A connected client is not idle even when it is silent: a Neovim
+        client holding an `events.subscribe` stream sends nothing for
+        minutes at a time, and shutting down under it dropped the
+        index-updated/op-progress stream with no notification. Only
+        `_last_activity` and `_inflight` used to be consulted.
+        """
         if self.idle_timeout_seconds is None or self.idle_timeout_seconds <= 0:
             return False
         with self._inflight_lock:
             if self._inflight:
+                return False
+        with self._connections_lock:
+            if self._connections:
                 return False
         return (time.monotonic() - self._last_activity) > self.idle_timeout_seconds
 
@@ -982,10 +1093,28 @@ class OrganizeServer:
 
     # --- handlers: reads -------------------------------------------------
 
+    #: Params `session.start` understands besides the filters themselves.
+    _SESSION_START_RESERVED: frozenset[str] = frozenset({"filters", "session_id", "actor", "dry_run"})
+
     def _session_start(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
+        """``session.start`` (spec 03 §2).
+
+        Filters may be nested under ``filters`` or passed at the top level,
+        matching ``search.query`` — and an unknown top-level key is a HARD
+        ERROR naming the key. Previously a top-level ``{"tags": [...]}`` was
+        silently ignored and the client got a full, unfiltered session back:
+        a silent wrong answer where the rest of this API is loud.
+        """
         raw_filters = params.get("filters") or {}
         if not isinstance(raw_filters, dict):
             raise _invalid_params("'filters' must be an object of filter=value pairs")
+        top_level = {k: v for k, v in params.items() if k not in self._SESSION_START_RESERVED}
+        overlap = set(top_level) & set(raw_filters)
+        if overlap:
+            raise _invalid_params(
+                f"filter(s) {sorted(overlap)} given both at the top level and inside 'filters'"
+            )
+        raw_filters = {**raw_filters, **top_level}
         criteria = QueryCriteria.from_filter_args(raw_filters) if raw_filters else None
         session = start_session(self.index, criteria)
         with self._sessions_lock:
@@ -999,15 +1128,11 @@ class OrganizeServer:
         }
 
     def _note_get(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
-        path = self._vault_path(_require(params, "path"))
-        record = self.index.get(path)
-        if record is None:
-            record = self.index.update_file(path)
-        if record is None:
-            raise ServerError(
-                f"no note at {path}",
-                hint="check the path is inside the vault and the file exists",
-            )
+        # Goes through _record_for so note.get and the op.* methods cannot
+        # drift on how a missing note is reported (this used to be a second,
+        # subtly different copy of the same lookup).
+        record = self._record_for(_require(params, "path"))
+        path = Path(record.path)
         payload: dict[str, Any] = {"record": asdict(record), "parse_error": False}
         try:
             document = load_file(path)
@@ -1104,8 +1229,8 @@ class OrganizeServer:
         destination = self._vault_path(_require(params, "destination"))
         ctx = self._context(params)
         result = move_to_destination(ctx, record, destination)
-        if result.ok and not result.dry_run:
-            self._record_learning(record, destination)
+        # Learning is recorded by `ctx.on_record`, off the ActionRecord that
+        # was actually written (12 §2 "Uses" #2) — not by a second write here.
         return asdict(result)
 
     def _op_merge_preview(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
@@ -1125,8 +1250,6 @@ class OrganizeServer:
             edited_content=params.get("content"),
             target_snapshot=snapshot,
         )
-        if result.ok and not result.dry_run:
-            self._record_learning(record, target.parent)
         return asdict(result)
 
     def _op_archive(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
@@ -1134,11 +1257,81 @@ class OrganizeServer:
         return asdict(archive_capture(self._context(params), record))
 
     def _meta_set(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
+        """``meta.set`` (spec 07 + 05 §5).
+
+        Every incoming value goes through the SAME ``metadata_fields``
+        coercion the CLI uses (``config.coerce_metadata_value``): list
+        splitting, kebab normalization, enum membership, boolean/number
+        typing. Spec 10 §3 puts ``metadata_fields`` in core config so that
+        "CLI and UI can never disagree"; while this handler passed
+        ``params['changes']`` straight to ``update_frontmatter``, the nvim
+        client — whose only write path is RPC — could write
+        ``tags: ['foo, Bar Baz']`` and ``importance: totally-invalid`` into
+        the vault, failing doc 07 acceptance tests 1 and 2 on this boundary.
+
+        ``append = false`` on a list field REPLACES rather than merges, same
+        as ``organize set-meta`` (``replace_keys``).
+        """
         path = self._vault_path(_require(params, "path"))
         changes = _require(params, "changes")
         if not isinstance(changes, dict):
             raise _invalid_params("'changes' must be an object of field→value pairs")
-        return asdict(update_frontmatter(self._context(params), path, changes))
+        fields = metadata_fields_by_key(self.config)
+        coerced: dict[str, Any] = {}
+        replace_keys: list[str] = []
+        for key, value in changes.items():
+            entry = fields.get(str(key))
+            coerced[str(key)] = coerce_metadata_value(entry, str(key), value)
+            if entry is not None and entry.type == "list" and not entry.append:
+                replace_keys.append(str(key))
+        return asdict(
+            update_frontmatter(
+                self._context(params), path, coerced, replace_keys=frozenset(replace_keys)
+            )
+        )
+
+    def _meta_fields(self, _conn: _Connection | None, _params: dict[str, Any]) -> Any:
+        """``meta.fields`` — the doc-07 field definitions, completion values
+        resolved (spec 07 "Config schema"; spec 10 §3).
+
+        Doc 07 calls completion "what makes tag entry fast and consistent",
+        and doc 10 §3 puts ``metadata_fields`` in core config precisely so
+        the UI reads it FROM the core. Neither surface exposed it, and
+        ``VaultIndex.values_of`` — which computes ``complete = "existing"``
+        — had zero callers outside its own tests, so the feature worked
+        in-core and was unreachable from any client.
+        """
+        out: list[dict[str, Any]] = []
+        for entry in self.config.metadata_fields:
+            out.append(
+                {
+                    "key": entry.key,
+                    "type": entry.type,
+                    "keymap": entry.keymap,
+                    "prompt": entry.prompt,
+                    "append": entry.append,
+                    "complete": entry.complete,
+                    "values": list(entry.values),
+                    "normalize": entry.normalize,
+                    "completions": self._completions_for(entry),
+                }
+            )
+        return {"fields": out}
+
+    def _meta_values(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
+        """``meta.values`` — distinct values of one frontmatter key across the
+        indexed vault (spec 07 ``complete = "existing"``)."""
+        key = str(_require(params, "key"))
+        return {"key": key, "values": list(self.index.values_of(key))}
+
+    def _completions_for(self, entry: MetadataFieldConfig) -> list[str]:
+        if entry.complete == "existing":
+            return list(self.index.values_of(entry.key))
+        if isinstance(entry.complete, list):
+            return [str(value) for value in entry.complete]
+        if entry.type == "enum":
+            return list(entry.values)
+        return []
 
     def _folder_create(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
         para_type = str(_require(params, "para_type"))
@@ -1165,6 +1358,16 @@ class OrganizeServer:
     # --- helpers ---------------------------------------------------------
 
     def _context(self, params: dict[str, Any]) -> OperationContext:
+        """The per-call :class:`OperationContext`.
+
+        ``suggestions_shown`` / ``chosen_rank`` / ``durations_ms`` /
+        ``auto_tags_present`` / ``filters`` are per-CALL decision context
+        (spec 12 §2), so they are read off the op params. They used to be
+        silently discarded, which made 12 §3's acceptance test — "a session
+        of 5 actions yields 5 records with … correct chosen_ranks" —
+        unsatisfiable through the product, and left
+        ``actions stats --json`` reporting ``top_accept_rate: null`` forever.
+        """
         return OperationContext(
             config=self.config,
             index=self.index,
@@ -1174,6 +1377,15 @@ class OrganizeServer:
             dry_run=bool(params.get("dry_run", False)),
             actor=str(params.get("actor") or "matt"),
             session_id=params.get("session_id"),
+            suggestions_shown=_suggestions_shown_from(params.get("suggestions_shown")),
+            chosen_rank=_opt_rank(params.get("chosen_rank")),
+            durations_ms=_durations_from(params.get("durations_ms")),
+            auto_tags_present=tuple(
+                str(tag) for tag in (params.get("auto_tags_present") or ())
+            ),
+            filters=dict(params.get("filters") or {}),
+            describe=lambda folder: get_description(folder, self.index, self.config),
+            on_record=self._learn_from_action,
         )
 
     def _vault_path(self, value: Any) -> Path:
@@ -1196,14 +1408,31 @@ class OrganizeServer:
         return candidate
 
     def _record_for(self, value: Any) -> NoteRecord:
+        """Resolve a client-supplied path to the indexed record every fileop
+        requires (05 §2 / 08 §A14 — never a bare string).
+
+        A path that names no note is a ``VaultError``, NOT a ``ServerError``:
+        the server is fine, the request was wrong. This matters because
+        ``error.data.kind`` is what a client branches on — ``ServerError``
+        invites a reconnect/retry, while the only useful response here is to
+        fix the path. It also keeps the two frontends aligned; ``organize
+        move`` already raised ``VaultError`` for the same mistake, and
+        ``test_the_two_doors_reject_the_same_bad_move`` pins that they agree.
+        """
         path = self._vault_path(value)
         record = self.index.get(path)
-        if record is None:
+        if record is None and path.is_file():
             record = self.index.update_file(path)
         if record is None:
-            raise ServerError(
-                f"no note at {path}",
-                hint="check the path is inside the vault and the file exists",
+            if not path.is_file():
+                raise VaultError(
+                    f"note not found: {path}",
+                    hint=f"pass a path relative to the vault root ({self.config.vault.root}) "
+                    "or an absolute path",
+                )
+            raise VaultError(
+                f"{path} is inside the vault but not indexable",
+                hint="check [vault] ignore_patterns / max_file_size, or reindex",
             )
         return record
 
@@ -1216,8 +1445,15 @@ class OrganizeServer:
         return folders
 
     def _archive_folder(self) -> Path:
+        # `.resolve()` matches `cli._archive_folder`; without it a symlinked
+        # vault root made the two doors emit DIFFERENT archive-suggestion
+        # paths for the same vault (04 §1).
         archives = self.config.vault.para_folders.get("archives", "archive")
-        return Path(self.config.vault.root) / archives / self.config.vault.archive_capture_path
+        path = Path(self.config.vault.root) / archives / self.config.vault.archive_capture_path
+        try:
+            return path.resolve()
+        except OSError:  # pragma: no cover - resolve() is non-strict
+            return path.absolute()
 
     def _learning_data(self) -> LearningData:
         with self._learning_lock:
@@ -1225,16 +1461,33 @@ class OrganizeServer:
                 self._learning = load_learning(self.paths.learning_path)
             return self._learning
 
-    def _record_learning(self, record: NoteRecord, destination_folder: Path) -> None:
-        """Spec 03 §6: accept/merge fire ``record_move`` with the destination
-        FOLDER. Decay is deliberately not applied here (04 §3.6)."""
+    def _learn_from_action(self, record: ActionRecord) -> None:
+        """Fold one WRITTEN ActionRecord into learning.json (12 §2 "Uses" #2).
+
+        Wired to ``OperationContext.on_record``, so it fires exactly once per
+        persisted record instead of running as a second, independent write
+        alongside the recorder — the two stores could otherwise disagree
+        (a lost action line still updated learning.json). Spec 03 §6:
+        accept/merge fire ``record_move`` with the destination FOLDER, which
+        ``learn.destination_from_action`` derives from the record's targets.
+
+        Decay runs here too, through ``learn.maybe_apply_decay`` — 04 §3 step
+        6 says "at most once per session or per day", NOT "never". Nothing in
+        production called ``apply_decay``, so the 90-day eviction and the
+        ``max_history`` cap were dead code. The day gate lives in ``learn``
+        so this root and the CLI share one schedule.
+        """
         with self._learning_lock:
             data = self._learning
             if data is None:
                 data = load_learning(self.paths.learning_path)
-            self._learning = record_move(
-                data, record, str(destination_folder), now=time.time()
-            )
+            now = time.time()
+            data = maybe_apply_decay(data, self.config.suggestions.learning, now=now)
+            updated = record_action(data, record, now=now)
+            if updated is None:
+                self._learning = data
+                return
+            self._learning = updated
             save_learning(self.paths.learning_path, self._learning)
 
 
@@ -1251,6 +1504,39 @@ def _require(params: dict[str, Any], key: str) -> Any:
 
 def _invalid_params(message: str) -> RpcException:
     return RpcException(RpcError(INVALID_PARAMS, message))
+
+
+def _suggestions_shown_from(raw: Any) -> tuple[SuggestionShown, ...]:
+    """Validate ``params['suggestions_shown']`` (spec 12 §2 counterfactual)."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise _invalid_params("'suggestions_shown' must be an array of {path, score, rank, reasons}")
+    try:
+        return tuple(SuggestionShown.from_json(item) for item in raw)
+    except OrganizeError as exc:
+        raise _invalid_params(f"'suggestions_shown' is malformed: {exc}") from exc
+
+
+def _opt_rank(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise _invalid_params("'chosen_rank' must be an integer (1 == the top suggestion)")
+    return raw
+
+
+def _durations_from(raw: Any) -> dict[str, int]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise _invalid_params("'durations_ms' must be an object of phase→milliseconds")
+    out: dict[str, int] = {}
+    for key, value in raw.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _invalid_params(f"'durations_ms.{key}' must be a number of milliseconds")
+        out[str(key)] = int(value)
+    return out
 
 
 def _snapshot_from(raw: Any) -> FileSnapshot | None:
