@@ -289,6 +289,26 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
 - **Known divergence for the integrator**: fileops/cli docstrings still
   say dry-run means "no log mutation" — reconcile docstrings to ruling (a)
   post-hold.
+- **Seam rulings for the INTEGRATOR (approved, implement these)**:
+  (1) actions.py: move `DRY_RUN_FILTER_KEY` into actions.py as the single
+  home (cli imports it); add `ActionRecord.is_dry_run` property reading
+  `context.filters[DRY_RUN_FILTER_KEY]`; `ActionRecorder.query()` gains
+  keyword-only `include_dry_run: bool = False` with stats()/export()
+  flowing through query. Then DELETE cli.py's `_CorpusView` subclass. No
+  schema change.
+  (2) fileops.update_frontmatter: add keyword-only
+  `replace_keys: frozenset[str] = frozenset()` — listed keys REPLACE
+  instead of merging (default merge behavior unchanged, update_tags
+  untouched). Rationale: spec 07 `append = false` on a list field must be
+  ONE logical edit = ONE ActionRecord/oplog line; the clear-then-set
+  workaround corrupts the doc-12 one-action-one-record property.
+  (3) server.py: socket/bind failures raise `ServerError(message, hint)`
+  naming the offending path + override channels (--socket /
+  [server] socket_path / --runtime-dir), never a bare OSError.
+- **Regression tests owed** (cli-blackbox seat or integrator): (i) literal
+  `$` in vault filenames resolvable (expansion-order defect, fixed); (ii)
+  `set-meta` on a note with NO frontmatter block works per spec 07
+  annotate-without-filing (raw AttributeError, fixed).
 - **`--json` flag**: the per-subcommand `--json` (machine-readable output)
   added by the cli+server seat is an approved ADDITIVE surface change —
   spec 10 §2 makes other frontends (Claude agents) first-class CLI
