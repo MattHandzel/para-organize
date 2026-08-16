@@ -1440,3 +1440,33 @@ recorded here; they ARE binding precedent:
   test must fail BOTH when the base class grows the hook (delete the
   shim) AND when the base gains the hook without the runner call — the
   half-landed state made undeniable.
+
+## Phase-4 rulings, auto_tagger close + consolidated integrator checklist (architect, 2026-08-16)
+
+- auto_tagger decisions ruled: (a) `consumers.auto_tagger.backend`
+  refused with hint to `[llm] backend` (one-client law 09 §2); (b)
+  `auto_tag: done` without hash honored FINAL; the body-only
+  auto_tag_hash is blessed machine-bookkeeping frontmatter (documented
+  here + example-config comment so curation tooling never flags it); (c)
+  malformed LLM response ⇒ ERROR retried / well-formed empty ⇒ SKIP
+  terminal; (d) `[consumers.auto_tagger]` example block exists — seat
+  supplies text, integrator applies (config single-writer).
+- **CONSOLIDATED INTEGRATOR CHECKLIST (one pass, full gate)**:
+  1. base.py: RunContext.op_context field + Consumer.bind(ctx) default
+     no-op with cheapness docstring.
+  2. runner.py: bind() with SKIP-on-raise + error count + exit 1 (never
+     continue-unbound); per-consumer op_context via
+     dataclasses.replace(actor="consumer:<name>"); dry_run invariant.
+  3. cli.cmd_run_consumers: composition-root op_context through; ONE
+     end-of-run index flush.
+  4. config.py: reject auto=true+mode=integrate with ConfigError +
+     Phase-5 hint; add the [consumers.auto_tagger] example block.
+  5. Tests: re-point three pending-set stub-gate tests at a synthetic
+     in-test stub type; retire test_routes_describe_write_is_phase_4.
+  6. Plus (from f24ee2e): fileops.move_to_destination keyword-only
+     archive: bool = True with deferred index capture-entry removal.
+  ACCEPTANCE SIGNALS (designed to flip): auto_tagger's pipeline suite
+  stays green unmodified; tag_router's shim-retirement test goes RED
+  demanding the shim deletion; tag_router's runner-driven goldens go
+  green against real wiring. Any signal not firing as described = wrong
+  landing.
