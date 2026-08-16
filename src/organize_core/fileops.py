@@ -144,10 +144,15 @@ from organize_core.index import NoteRecord, VaultIndex
 
 logger = logging.getLogger(__name__)
 
-OperationType = Literal["move", "archive", "merge", "append", "integrate", "create_folder", "metadata"]
+OperationType = Literal[
+    "move", "archive", "merge", "append", "integrate", "create_folder", "metadata", "skip"
+]
 
 #: fileops op type -> spec 12 §2 ActionRecord operation name.
+#: ``skip`` is the one entry whose operation never reaches :func:`_log` —
+#: it changes no file, so it has no operation-log line (see `skip_capture`).
 _ACTION_OPERATION: dict[str, str] = {
+    "skip": "skip",
     "move": "move",
     "archive": "archive",
     "merge": "merge",
@@ -2024,6 +2029,52 @@ def update_tags(ctx: OperationContext, path: Path, new_tags: list[str]) -> Opera
     return _apply_frontmatter_changes(
         ctx, path, {"tags": list(new_tags)}, op_type="metadata", action="tag_edit"
     )
+
+
+def skip_capture(ctx: OperationContext, capture: NoteRecord) -> None:
+    """Spec 03 §2/§6: record that the user skipped this capture.
+
+    The one recorded operation that changes NO file, which drives two
+    deliberate asymmetries:
+
+    - **No operation-log line.** The oplog records what happened to the
+      VAULT; an OK line for an operation that touched nothing would claim a
+      mutation that never happened, and a reader reconciling the log against
+      the vault would find nothing to match it to.
+    - **An ActionRecord IS written.** Doc 12 §2 wants the counterfactual, and
+      "these suggestions were on screen and the user chose none of them" is
+      exactly the decision a skip carries. Skips are also what
+      ``actions stats`` measures acceptance rate AGAINST.
+
+    NOT a learning signal: doc 04 §3 gives a skip no negative weight, and
+    ``learn.record_action`` already returns ``None`` for ``operation="skip"``,
+    so the ``on_record`` wiring folds nothing into learning.json. That is
+    load-bearing rather than incidental — pinned by the trap test asserting
+    learning.json is byte-identical across a skip.
+
+    It lives here, despite touching no file, because this is the ONE place an
+    ActionRecord is built. A second builder in the server would duplicate
+    capture-state, vault-stats and actor handling and could drift from it.
+
+    Session bookkeeping (``Session.skipped``) is the CALLER's job: this
+    function is the record half, and the session is the server's state.
+    """
+    now = ctx.clock()
+    source = Path(capture.path)
+    if source.is_file():
+        # Lenient read on purpose: a skip never rewrites the note, so a byte
+        # we could not decode strictly must not stop the user moving on.
+        text = _read_text(source)
+        doc = _parse_named(text, source)
+        capture_state = _capture_state(source, text, doc)
+    else:
+        # A capture that vanished under an open session is still skippable —
+        # skip is session bookkeeping, not a file operation — so the decision
+        # is recorded with the same degenerate state `new_folder` uses.
+        capture_state = CaptureState(
+            path=str(source), content_hash="", frontmatter_before={}, body_before=""
+        )
+    _record_action(ctx, op_type="skip", capture=capture_state, now=now)
 
 
 def new_folder(ctx: OperationContext, para_type: str, name: str) -> OperationResult:

@@ -75,7 +75,13 @@ from organize_core.config import (
     coerce_metadata_value,
     metadata_fields_by_key,
 )
-from organize_core.errors import AlreadyRunning, OrganizeError, ServerError, VaultError
+from organize_core.errors import (
+    AlreadyRunning,
+    OrganizeError,
+    ServerError,
+    SessionError,
+    VaultError,
+)
 from organize_core.fileops import (
     FileSnapshot,
     OperationContext,
@@ -85,6 +91,7 @@ from organize_core.fileops import (
     merge_preview,
     move_to_destination,
     new_folder,
+    skip_capture,
     update_frontmatter,
 )
 from organize_core.frontmatter import FrontmatterError, load_file
@@ -105,7 +112,7 @@ from organize_core.learn import (
 from organize_core.paths import CorePaths
 from organize_core.routes import get_description, merge_route_suggestions
 from organize_core.routes import resolve as resolve_routes
-from organize_core.session import Session, start_session
+from organize_core.session import Outcome, Session, start_session
 from organize_core.suggest import CaptureFeaturesView, generate_candidates
 from organize_core.suggest import suggest as rank_suggestions
 
@@ -121,6 +128,7 @@ RPC_METHODS: tuple[str, ...] = (
     "op.merge_preview",    # (path, target) → {content, snapshot}     spec 03 §5, 05 §4
     "op.merge_commit",     # (path, target, content, snapshot) → OperationResult
     "op.archive",          # (path) → OperationResult                 spec 05 §3
+    "op.skip",             # (note, session_id) → {ok, outcome}       spec 03 §2/§6
     "meta.set",            # (path, changes) → OperationResult        spec 05 §5, 07
     "meta.fields",         # () → metadata_fields[] + completions      spec 07, 10 §3
     "meta.values",         # (key) → distinct values in the vault      spec 07 complete="existing"
@@ -144,6 +152,7 @@ MUTATING_METHODS: frozenset[str] = frozenset(
         "op.merge_preview",
         "op.merge_commit",
         "op.archive",
+        "op.skip",
         "meta.set",
         "folder.create",
         "index.reindex",
@@ -154,7 +163,12 @@ MUTATING_METHODS: frozenset[str] = frozenset(
 #: The subset of :data:`MUTATING_METHODS` that can change the index, and so
 #: emits ``index-updated``. ``op.merge_preview`` is queued for snapshot
 #: consistency but writes nothing, so it must not claim the index moved.
-INDEX_CHANGING_METHODS: frozenset[str] = MUTATING_METHODS - {"op.merge_preview"}
+#: ``op.skip`` joins ``op.merge_preview`` in the exclusion: both are queued
+#: through the single writer (a skip appends to the actions corpus, a state
+#: file), but neither touches a note, so neither may claim the index moved —
+#: an ``index-updated`` per skip would make every client refetch on a
+#: keystroke that changed nothing in the vault.
+INDEX_CHANGING_METHODS: frozenset[str] = MUTATING_METHODS - {"op.merge_preview", "op.skip"}
 
 #: Events pushed to subscribed connections (spec 10 §2).
 EVENT_INDEX_UPDATED = "index-updated"
@@ -886,6 +900,7 @@ class OrganizeServer:
             "op.merge_preview": self._op_merge_preview,
             "op.merge_commit": self._op_merge_commit,
             "op.archive": self._op_archive,
+            "op.skip": self._op_skip,
             "meta.set": self._meta_set,
             "meta.fields": self._meta_fields,
             "meta.values": self._meta_values,
@@ -1378,6 +1393,53 @@ class OrganizeServer:
     def _op_archive(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
         record = self._record_for(_require(params, "path"))
         return asdict(archive_capture(self._context(params), record))
+
+    def _op_skip(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
+        """``op.skip`` — spec 03 §2/§6: this capture is skipped for this
+        session. Takes ``note`` (not ``path``: it names the capture being
+        decided about, not a file being operated on) and a REQUIRED
+        ``session_id``, because a skip that belongs to no session is not a
+        decision anyone can read back — 03 §6 scopes "skipped" to a session.
+
+        Mutating (it appends to the actions corpus, a state file, so it goes
+        through the one writer) but NOT index-changing: no note moves.
+
+        Dry-run records the decision with ``context.dry_run = true`` and
+        leaves session state alone, so a rehearsal cannot silently consume
+        the backlog.
+        """
+        record = self._record_for(_require(params, "note"))
+        session = self._session_for(_require(params, "session_id"))
+        ctx = self._context(params)
+        # Membership is checked on BOTH paths so a dry run cannot succeed
+        # where the real call would raise; only the state update is skipped.
+        if all(item.path != record.path for item in session.captures):
+            raise SessionError(
+                f"{record.path} is not part of session {session.session_id}",
+                hint="op.skip only accepts captures from this session's list",
+            )
+        skip_capture(ctx, record)
+        if not ctx.dry_run:
+            session.mark_processed(record.path, Outcome.SKIPPED)
+        return {"ok": True, "outcome": Outcome.SKIPPED.value}
+
+    def _session_for(self, value: Any) -> Session:
+        """The live session named by ``session_id``.
+
+        A stale or invented id is a ``SessionError``, not a ``ServerError``:
+        the server is healthy and a reconnect will not help — the client must
+        start a session (spec 03 §2). Sessions live in memory, so a core
+        restart legitimately invalidates every id a client is holding.
+        """
+        session_id = str(value).strip()
+        with self._sessions_lock:
+            session = self._sessions.get(session_id)
+        if session is None:
+            raise SessionError(
+                f"unknown session {session_id!r}",
+                hint="call session.start first; sessions do not survive a core restart",
+            )
+        return session
 
     def _meta_set(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
         """``meta.set`` (spec 07 + 05 §5).

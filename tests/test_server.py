@@ -1115,6 +1115,164 @@ def test_readers_are_not_starved_by_a_queue_of_writers() -> None:
 
 
 # ---------------------------------------------------------------------------
+# op.skip (spec 03 §2/§6 decision + 12 §2 record)
+# ---------------------------------------------------------------------------
+
+
+def _action_records(server: OrganizeServer) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for month in sorted(server.recorder.actions_dir.glob("*.jsonl"))
+        for line in month.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_op_skip_records_the_decision_and_marks_the_session(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    session = client.result("session.start")
+    capture = session["captures"][0]
+
+    result = client.result(
+        "op.skip",
+        note=capture["path"],
+        session_id=session["session_id"],
+        suggestions_shown=[{"path": "/vault/areas/health", "score": 3.7, "rank": 1}],
+        durations_ms={"decision": 1200},
+    )
+    assert result == {"ok": True, "outcome": "skipped"}
+
+    live = server._sessions[session["session_id"]]
+    assert capture["path"] in live.skipped
+    assert live.counts().skipped == 1
+
+    (record,) = [r for r in _action_records(server) if r["operation"] == "skip"]
+    assert record["capture"]["path"] == capture["path"]
+    assert record["actor"] == "matt", "the core fills the actor, not the client"
+    assert record["context"]["session_id"] == session["session_id"]
+    assert record["context"]["dry_run"] is False
+    # The counterfactual is the whole point of recording a skip: these are
+    # the suggestions the user saw and declined.
+    assert record["context"]["durations_ms"] == {"decision": 1200}
+    assert record["context"]["suggestions_shown"][0]["rank"] == 1
+    assert record["context"]["vault_stats"], "core fills vault_stats"
+    assert record["capture"]["content_hash"], "core fills the capture state"
+
+
+def test_op_skip_touches_neither_the_vault_nor_the_operation_log(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    """Spec 03 §6: skip has no file effect. The oplog records what happened
+    to the VAULT, so a no-op must not appear in it at all — a line there
+    would claim a mutation that never happened."""
+    session = client.result("session.start")
+    capture = session["captures"][0]
+    source = Path(capture["path"])
+    before = source.read_bytes()
+    log_path = server.oplog.log_file
+    log_before = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+
+    client.result("op.skip", note=capture["path"], session_id=session["session_id"])
+
+    assert source.read_bytes() == before, "the note is untouched"
+    log_after = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+    assert log_after == log_before, "no operation-log line for a skip"
+
+
+def test_op_skip_requires_a_session_id(client: RpcClient) -> None:
+    """03 §6 scopes "skipped" to a session, so a skip belonging to none is
+    not a decision anyone can read back."""
+    session = client.result("session.start")
+    error = client.error("op.skip", note=session["captures"][0]["path"])
+    assert error["code"] == INVALID_PARAMS
+    assert "session_id" in error["message"]
+
+
+def test_op_skip_rejects_an_unresolvable_session(client: RpcClient) -> None:
+    session = client.result("session.start")
+    error = client.error(
+        "op.skip", note=session["captures"][0]["path"], session_id="ses_not_a_real_id"
+    )
+    assert error["code"] == ORGANIZE_ERROR
+    assert error["data"]["kind"] == "SessionError"
+
+
+def test_op_skip_rejects_a_note_outside_the_session(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    """An INDEXED note that simply is not in this session's capture list —
+    distinct from an unknown path, which is a VaultError from `_record_for`
+    before the session is ever consulted."""
+    session = client.result("session.start")
+    outsider = str(vault_of(server) / "resources/performing/impro.md")
+    assert outsider not in {c["path"] for c in session["captures"]}
+    error = client.error("op.skip", note=outsider, session_id=session["session_id"])
+    assert error["code"] == ORGANIZE_ERROR
+    assert error["data"]["kind"] == "SessionError"
+
+    unknown = client.error(
+        "op.skip", note="capture/raw_capture/nope.md", session_id=session["session_id"]
+    )
+    assert unknown["data"]["kind"] == "VaultError"
+
+
+def test_op_skip_dry_run_records_but_leaves_the_session_alone(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    """A rehearsal must not silently consume the backlog."""
+    session = client.result("session.start")
+    capture = session["captures"][0]
+
+    result = client.result(
+        "op.skip", note=capture["path"], session_id=session["session_id"], dry_run=True
+    )
+    assert result == {"ok": True, "outcome": "skipped"}
+
+    live = server._sessions[session["session_id"]]
+    assert live.skipped == set(), "dry-run leaves session state untouched"
+    assert live.counts().skipped == 0
+
+    (record,) = [r for r in _action_records(server) if r["operation"] == "skip"]
+    assert record["context"]["dry_run"] is True
+
+
+def test_op_skip_records_an_action_but_never_touches_learning(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    """TRAP TEST (doc 04 §3): a skip carries NO learning signal, positive or
+    negative. It guards the `on_record` wiring — `skip_capture` goes through
+    the same `_record_action` path as a move, so the only thing stopping a
+    skip from teaching the learner is `learn.record_action` returning None
+    for it. Wire a skip to anything that writes learning.json and this fails.
+
+    A real move runs FIRST so learning.json EXISTS with content: asserting
+    an absent file stays absent would pass even if the guarantee broke.
+    """
+    session = client.result("session.start")
+    mover, skipper = session["captures"][0], session["captures"][1]
+    destination = str(vault_of(server) / "areas/health")
+
+    assert client.result(
+        "op.move", path=mover["path"], destination=destination,
+        session_id=session["session_id"],
+    )["ok"]
+
+    learning_path = server.paths.learning_path
+    learning_before = learning_path.read_bytes()
+    assert learning_before, "the move must have written learning.json"
+    actions_before = len(_action_records(server))
+
+    client.result("op.skip", note=skipper["path"], session_id=session["session_id"])
+
+    assert len(_action_records(server)) == actions_before + 1, "the skip IS recorded"
+    assert _action_records(server)[-1]["operation"] == "skip"
+    assert learning_path.read_bytes() == learning_before, (
+        "a skip must leave learning.json byte-identical (04 §3: no signal)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Full session lifecycle (spec 10 §2 consequence 1)
 # ---------------------------------------------------------------------------
 

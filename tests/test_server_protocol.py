@@ -91,8 +91,13 @@ SPEC_10_METHODS: tuple[str, ...] = (
 #: the destination picker and the 03 §3 browse view have no source for the
 #: folder tree (`VaultIndex.para_subfolders`/`folder_children` had no RPC
 #: surface). Anything else added here fails this test, which is the point.
+#: `op.skip` is the one WRITING addition: spec 03 §2/§6 makes skip a
+#: first-class session decision with an ActionRecord (12 §2 counts it, and
+#: `actions stats` measures acceptance rate against it), but spec 10 §2's
+#: list has no method for it, so the decision was unrecordable from the nvim
+#: client — the counterfactual silently lost every time a user pressed `s`.
 EXTRA_METHODS: frozenset[str] = frozenset(
-    {"meta.fields", "meta.values", "folder.list", "folder.children"}
+    {"meta.fields", "meta.values", "folder.list", "folder.children", "op.skip"}
 )
 
 
@@ -112,6 +117,7 @@ def test_mutating_methods_are_exactly_the_dispatch_contract() -> None:
             "op.merge_preview",
             "op.merge_commit",
             "op.archive",
+            "op.skip",
             "meta.set",
             "folder.create",
             "index.reindex",
@@ -804,4 +810,7 @@ def test_dispatch_auto_methods_raise_the_not_implemented_rpc_error(
 def test_index_changing_methods_exclude_the_read_only_preview() -> None:
     assert "op.merge_preview" in MUTATING_METHODS
     assert "op.merge_preview" not in INDEX_CHANGING_METHODS
-    assert INDEX_CHANGING_METHODS == MUTATING_METHODS - {"op.merge_preview"}
+    # `op.skip` is queued (it appends to the actions corpus) but moves no
+    # note, so it must not claim the index changed either.
+    assert "op.skip" not in INDEX_CHANGING_METHODS
+    assert INDEX_CHANGING_METHODS == MUTATING_METHODS - {"op.merge_preview", "op.skip"}
