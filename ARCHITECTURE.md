@@ -1245,3 +1245,31 @@ on NixOS is not the interactive shell's — is now covered by `organize health`
 resolved, and a miss is a WARNING naming the consumer, the option and the
 fix (an absolute path in the config). It is a setup-time answer instead of a
 per-note ERROR at the far end of a ten-minute timer.
+
+## Phase-4 rulings (architect, routed 2026-08-16 — CORRECTS the workflow briefs)
+
+- **CRITICAL — tag_router no-ai (corrects the seat brief's "mechanical
+  move allowed" reading)**: `tag_router.should_process` returns False for
+  no_ai captures — ALL modes, unconditionally. A doc-05 move WRITES the
+  note's frontmatter (type tag + processing_status on the copy); spec 02's
+  vault law forbids AUTOMATED tooling writing a no-ai note; the
+  interactive exception is keyed to Matt's explicit keystrokes and an
+  unattended consumer has none. Pin with: no-ai capture bearing a matching
+  auto=true route → filtered, zero emissions, vault untouched.
+- **routes.apply_route/apply_all are ACTOR-AWARE on no-ai TARGETS**:
+  automated actors (consumer:*, auto-organize) refuse append into a no-ai
+  target (an unattended append writes the target — same law), not only
+  integrate. Actor "matt" (UI acceptance = explicit keystroke) may
+  move/append with the no-ai field preserved. Integrate refuses for EVERY
+  actor (12 §1).
+- **auto_tags participate in routing BY CONSTRUCTION, knob-free**: 11 §2
+  writes machine tags to both tags and auto_tags; routes consume tags. The
+  consent gate for the machine chain is the per-route `auto = false`
+  default; 12 §2's auto_tags_present records provenance in every record.
+  No opt-out config key.
+- **Self-removing skipif pattern (approved)**: goldens gated on a stubbed
+  seam use a probe that skips ONLY while the seam raises
+  NotImplementedError — they auto-activate when it lands; never a bare
+  skip mark someone must remember to delete. Bonus property to state in
+  tests: a stub translated to Status.ERROR retries next run (06 §1), so
+  pre-landing notes process automatically on the first run after.
