@@ -1375,3 +1375,25 @@ recorded here; they ARE binding precedent:
   interactive route acceptance in the UI (actor matt) folds as a normal
   accept; integrate records use the verdict-based reading (verdict
   accepted/edited = Matt-decided even though actor is claude-integrate).
+
+## Phase-4 ruling, tag_router seam B (architect, routed 2026-08-16)
+
+- **NO EMISSION for a non-auto route match** (corrects the seat brief's
+  "proposal emission" — spec 11 §1: "Non-auto routes only surface in the
+  UI"). The should_process gate is: matches an auto=true route. A capture
+  matching ONLY non-auto routes never reaches handle — it is a FILTER
+  miss, re-evaluated every run. Consequences: flipping a route to
+  auto=true fires on the very next run at the unchanged hash (nothing was
+  checkpointed); the UI/`organize routes resolve` is the proposal
+  surface, not the store. Required pin: capture matching only non-auto
+  routes ⇒ filtered, ZERO emission rows; flip to auto=true ⇒ next run
+  applies at the unchanged hash.
+- **tag_router's self-built OperationContext is INTERIM ONLY**: when the
+  RunContext.op_context seam lands, tag_router consumes the shared field
+  and deletes its own construction (one construction site in the
+  composition root; per-consumer actor via dataclasses.replace).
+- **Process rule (orchestrator-adopted after four brief divergences)**:
+  workflow briefs must QUOTE ARCHITECTURE.md rulings and spec lines
+  VERBATIM with commit hash / doc-section cites; seats treat any uncited
+  brief mandate touching persistence or the vault as requiring a ruling
+  before implementation.
