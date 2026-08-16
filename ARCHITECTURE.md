@@ -73,8 +73,9 @@ everything ◀── cli, server (composition roots)
 | **deep_research** | `consumers/deep_research.py` | `tests/test_consumer_research*.py` | 06 §3.4, 08 §B15 | base |
 | **tag_router** *(Phase 4)* | `consumers/tag_router.py` | `tests/test_consumer_router*.py` | 11 §1 | base, routes |
 | **auto_tagger** *(Phase 4)* | `consumers/auto_tagger.py` | `tests/test_consumer_tagger*.py` | 11 §2 | base, llm, frontmatter, index |
-| **cli+server** (integration seat) | `cli.py`, `server.py` | `tests/test_server*.py` ONLY — never `tests/test_cli*.py` | 10 §1-2, 06 §4, 09 §4/§5.6 | everything (composition root) |
-| **cli-blackbox** (test seat) | — (no src files; defects in cli.py are REPORTED to the integrator, never edited) | `tests/test_cli*.py` (subprocess-driven, real `organize` binary, fixture vault + ORGANIZE_CORE_* tmp paths) | 10 §1, 06 §4, 09 §5.6 | cli+server (behavior under test) |
+| **cli** (integration seat) | `cli.py` (no test_cli*) | — (defects found by the blackbox seat are reported, not self-tested) | 10 §1, 06 §4, 09 §5.6 | everything (composition root) |
+| **server** (integration seat) | `server.py` | `tests/test_server*.py` | 10 §1-2, 09 §4 | everything (composition root) |
+| **cli-blackbox** (test seat) | — (no src files; defects in cli.py are REPORTED to the integrator, never edited) | `tests/test_cli*.py` (subprocess-driven, real `organize` binary, fixture vault + ORGANIZE_CORE_* tmp paths) | 10 §1, 06 §4, 09 §5.6 | cli (behavior under test) |
 | **paths** *(integrator)* | `paths.py` | `tests/test_paths*.py` | 10 §3 | — |
 
 `cli` and `server` are integration seats — schedule them after the modules
@@ -261,13 +262,33 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
 
 ## Integrator rulings (post-scaffold)
 
-- **cli.py ownership (2026-08-16 collision)**: two seats independently
-  implemented `cli.py`; the combined cli+server implementation at HEAD
-  stands (it is the coherent pair). From here: `cli.py` + `server.py`
-  belong to the **cli+server** seat; ALL `tests/test_cli*.py` belong to
-  the **cli-blackbox** seat, which tests the shipped binary via subprocess
-  and reports defects to the integrator instead of editing `cli.py`.
-  Neither seat touches the other's files.
+- **cli.py ownership (2026-08-16 collision, CORRECTED)**: the first
+  version of this ruling described a combined "cli+server seat" — that was
+  factually wrong. Actual state: the **cli** seat wrote and owns the
+  current `cli.py`; a separate **server** seat owns `server.py` +
+  `tests/test_server*.py`; ALL `tests/test_cli*.py` belong to the
+  **cli-blackbox** seat, which tests the shipped binary via subprocess and
+  reports defects to the integrator instead of editing `cli.py`. Neither
+  seat touches the others' files.
+- **CLI behavioral rulings (binding on test writers)**:
+  (a) `--dry-run move` is vault-write-free but NOT state-silent: it writes
+  `[DRY-RUN]` operations.log lines and a dry-run-marked ActionRecord
+  (09 §5.6 log-only intent); index/learning updates are skipped;
+  `actions stats/query` exclude dry-run records by default. Tests assert
+  zero VAULT writes — not "no ActionRecord".
+  (b) `suggest` output is routes-merged per ruling #10: combined list
+  capped, routes + archive always survive, scored entries may truncate
+  out. In `--json`, route entries are identified by the populated `route`
+  field, not a sentinel score.
+  (c) `health` exits 0 when warnings-only (still printed), 1 on any ERROR;
+  `--strict` promotes warnings. First-run "no index snapshot" is a
+  warning, never a failure.
+- **Additive CLI surfaces approved**: per-subcommand `--json` (see above),
+  global `--debug`, `routes describe` read-only form,
+  `health --example-config`.
+- **Known divergence for the integrator**: fileops/cli docstrings still
+  say dry-run means "no log mutation" — reconcile docstrings to ruling (a)
+  post-hold.
 - **`--json` flag**: the per-subcommand `--json` (machine-readable output)
   added by the cli+server seat is an approved ADDITIVE surface change —
   spec 10 §2 makes other frontends (Claude agents) first-class CLI
