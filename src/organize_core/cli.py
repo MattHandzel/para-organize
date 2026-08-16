@@ -1267,6 +1267,34 @@ def _state_issues(paths: CorePaths, config: Config) -> list[HealthIssue]:
     return issues
 
 
+def _socket_issues(paths: CorePaths, config: Config) -> list[HealthIssue]:
+    """WARNING when the resolved socket path is too long for AF_UNIX.
+
+    `bind()` fails with a bare "AF_UNIX path too long" and no errno, so a
+    deep `$XDG_RUNTIME_DIR` (or a tmp-dir override) turns into a `serve` that
+    cannot start for a reason nothing explains. Health is the place that is
+    supposed to say so BEFORE the daemon is expected to come up. It stays a
+    warning — the limit is platform-dependent (108 bytes on Linux, 104 on
+    BSD) and this check is a prediction, not the bind itself, so per the
+    recorded exit policy it prints and still exits 0.
+    """
+    from organize_core.server import _AF_UNIX_PATH_MAX
+
+    socket_path = Path(config.server.socket_path or paths.socket_path)
+    length = len(str(socket_path).encode("utf-8"))
+    if length < _AF_UNIX_PATH_MAX:
+        return []
+    return [
+        HealthIssue(
+            severity="warning",
+            message=f"socket path is {length} bytes, at or over the ~{_AF_UNIX_PATH_MAX}-byte "
+            f"AF_UNIX limit: {socket_path}",
+            hint="`organize serve` will fail to bind — shorten it with `--socket PATH`, "
+            "[server] socket_path, or --runtime-dir / $ORGANIZE_CORE_RUNTIME_DIR",
+        )
+    ]
+
+
 def cmd_health(args: argparse.Namespace) -> int:
     if args.example_config:
         _emit(example_config_toml())
@@ -1285,6 +1313,7 @@ def cmd_health(args: argparse.Namespace) -> int:
     if config is not None:
         issues.extend(check_vault(config))
         issues.extend(_state_issues(paths, config))
+        issues.extend(_socket_issues(paths, config))
         if paths.index_path.exists():
             try:
                 index = _open_index(paths, config)

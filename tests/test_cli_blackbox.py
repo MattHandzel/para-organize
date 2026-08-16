@@ -529,6 +529,30 @@ def test_health_warns_when_the_index_snapshot_is_absent(core: Core) -> None:
     assert strict.returncode == 1, "--strict promotes warnings to failures"
 
 
+def test_health_warns_when_the_socket_path_is_too_long_for_af_unix(core: Core) -> None:
+    """A deep runtime dir makes `serve` fail to bind with a bare "AF_UNIX path
+    too long" (no errno), so health has to predict it before the daemon is
+    expected to come up. Warning, not error: it stays exit 0."""
+    core.index()  # health is otherwise green here — the socket is the only issue
+    deep = core.runtime_dir / ("d" * 100)
+    deep.mkdir(parents=True)
+    env = {**core.env, "ORGANIZE_CORE_RUNTIME_DIR": str(deep)}
+
+    proc = core.run("health", "--json", env=env)
+    assert proc.returncode == 0, "warnings alone never fail health"
+    payload = json.loads(proc.stdout)
+    assert len(payload["issues"]) == 1, payload["issues"]
+    issue = payload["issues"][0]
+    assert issue["severity"] == "warning"
+    assert "socket path" in issue["message"]
+    assert str(deep / "organize-core.sock") in issue["message"]
+    assert "--socket" in issue["hint"]
+    assert "[server] socket_path" in issue["hint"]
+    assert "--runtime-dir" in issue["hint"]
+
+    assert core.run("health", "--strict", env=env).returncode == 1
+
+
 def test_health_reports_a_bad_vault_root(core: Core) -> None:
     (core.config_dir / "config.toml").write_text(
         _config_text(core.vault / "does-not-exist"), encoding="utf-8"

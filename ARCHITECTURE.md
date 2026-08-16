@@ -317,6 +317,15 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
 - **Additive CLI surfaces approved**: per-subcommand `--json` (see above),
   global `--debug`, `routes describe` read-only form,
   `health --example-config`.
+- **Additive read-only RPC extras approved**: `meta.fields` / `meta.values`
+  (spec 07 completion, otherwise unreachable from a thin client) and now
+  `folder.list` / `folder.children` — spec 10 §1 forbids the nvim client
+  from scanning the vault, so the destination picker and the 03 §3 browse
+  view need `VaultIndex.para_subfolders`/`folder_children` over the wire.
+  `folder.list` enumerates from DISK (an empty folder is still a valid
+  destination) and is uncapped; capping is `suggest.for_note`'s job. The
+  `EXTRA_METHODS` set in `tests/test_server_protocol.py` pins the list and
+  fails on any further addition — that failure IS the approval step.
 - **Known divergence for the integrator**: fileops/cli docstrings still
   say dry-run means "no log mutation" — reconcile docstrings to ruling (a)
   post-hold.

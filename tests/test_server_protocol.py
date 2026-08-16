@@ -82,9 +82,15 @@ SPEC_10_METHODS: tuple[str, ...] = (
 #: "what makes tag entry fast and consistent" and spec 10 §3 puts
 #: `metadata_fields` in CORE config so the UI reads it from the core — but
 #: neither surface exposed the definitions or `VaultIndex.values_of`, so the
-#: doc-07 feature was unreachable from any thin client. Anything else added
-#: here fails this test, which is the point.
-EXTRA_METHODS: frozenset[str] = frozenset({"meta.fields", "meta.values"})
+#: doc-07 feature was unreachable from any thin client. `folder.list` /
+#: `folder.children` are the same shape of gap for the SAME reason: spec 10
+#: §1 forbids a thin client from walking the vault itself, so without them
+#: the destination picker and the 03 §3 browse view have no source for the
+#: folder tree (`VaultIndex.para_subfolders`/`folder_children` had no RPC
+#: surface). Anything else added here fails this test, which is the point.
+EXTRA_METHODS: frozenset[str] = frozenset(
+    {"meta.fields", "meta.values", "folder.list", "folder.children"}
+)
 
 
 def test_rpc_methods_are_exactly_the_spec_10_names_in_order() -> None:

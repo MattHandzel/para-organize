@@ -612,6 +612,122 @@ def test_folder_create_makes_the_directory(client: RpcClient, server: OrganizeSe
     assert (vault_of(server) / "projects/newsletter").is_dir()
 
 
+def test_folder_list_returns_every_para_subfolder_uncapped(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    vault = vault_of(server)
+    folders = client.result("folder.list")["folders"]
+    assert {entry["path"] for entry in folders} == {
+        str(vault / "projects/blog"),
+        str(vault / "projects/kms"),
+        str(vault / "areas/health"),
+        str(vault / "areas/relationships"),
+        str(vault / "resources/performing"),
+        str(vault / "resources/answers"),
+        str(vault / "archive/capture"),
+    }
+    # `resources/flashcards` is in the default ignore_patterns — an ignored
+    # folder is not offerable as a destination.
+    by_path = {entry["path"]: entry for entry in folders}
+    assert by_path[str(vault / "projects/blog")]["name"] == "blog"
+    assert by_path[str(vault / "projects/blog")]["type"] == "project"
+    assert by_path[str(vault / "areas/health")]["type"] == "area"
+    assert by_path[str(vault / "archive/capture")]["type"] == "archive"
+
+
+def test_folder_list_includes_a_folder_with_no_notes_in_it(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    """Disk enumeration, not index enumeration: a folder holding zero notes
+    is still a legal destination, and `areas/relationships` is exactly that
+    in the fixture vault."""
+    vault = vault_of(server)
+    empty = vault / "areas/relationships"
+    assert empty.is_dir()
+    assert not list(empty.iterdir())
+    paths = [entry["path"] for entry in client.result("folder.list", para_type="areas")["folders"]]
+    assert paths == [str(vault / "areas/health"), str(empty)]
+
+    client.result("folder.create", para_type="areas", name="sleep")
+    paths = [entry["path"] for entry in client.result("folder.list", para_type="areas")["folders"]]
+    assert str(vault / "areas/sleep") in paths
+
+
+def test_folder_list_carries_the_spec_11_3_description(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    vault = vault_of(server)
+    folders = client.result("folder.list", para_type="areas")["folders"]
+    by_path = {entry["path"]: entry for entry in folders}
+    assert by_path[str(vault / "areas/health")]["description"] == (
+        "Ongoing health practice — training log, sleep, injuries. "
+        "Not general health research (that goes to resources)."
+    )
+    # Omitted, not null, for a folder that has none.
+    assert "description" not in by_path[str(vault / "areas/relationships")]
+
+
+def test_folder_list_accepts_the_singular_para_type(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    assert client.result("folder.list", para_type="project") == client.result(
+        "folder.list", para_type="projects"
+    )
+
+
+def test_folder_list_rejects_an_unknown_para_type(client: RpcClient) -> None:
+    error = client.error("folder.list", para_type="notions")
+    assert error["code"] == ORGANIZE_ERROR
+    assert error["data"]["kind"] == "ConfigError"
+    assert "areas" in error["data"]["hint"]
+
+
+def test_folder_children_returns_dirs_and_notes(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    vault = vault_of(server)
+    result = client.result("folder.children", path="resources")
+    assert [entry["path"] for entry in result["dirs"]] == [
+        str(vault / "resources/answers"),
+        str(vault / "resources/performing"),
+    ], "ignore_patterns applies to browsing too (resources/flashcards is ignored)"
+    assert all("type" not in entry for entry in result["dirs"])
+    assert result["notes"] == []
+
+    result = client.result("folder.children", path="projects/blog")
+    assert result["dirs"] == []
+    assert result["notes"] == [
+        {
+            "path": str(vault / QUIRK_FILES["merge_target"]),
+            "title": "Blog ideas",
+            "aliases": ["ideas"],
+            "para_type": "project",
+        }
+    ]
+
+
+def test_folder_children_of_an_out_of_vault_path_is_a_vault_error(client: RpcClient) -> None:
+    error = client.error("folder.children", path="../../etc")
+    assert error["code"] == ORGANIZE_ERROR
+    assert error["data"]["kind"] == "VaultError"
+    assert error["data"]["hint"]
+
+
+def test_folder_children_of_a_missing_folder_is_a_vault_error(client: RpcClient) -> None:
+    error = client.error("folder.children", path="areas/nonexistent")
+    assert error["code"] == ORGANIZE_ERROR
+    assert error["data"]["kind"] == "VaultError"
+    assert "folder not found" in error["message"]
+
+
+def test_folder_read_methods_never_enter_the_writer_queue(
+    client: RpcClient, server: OrganizeServer
+) -> None:
+    client.result("folder.list")
+    client.result("folder.children", path="areas")
+    assert server.writer.completed == 0
+
+
 def test_index_reindex_reports_total_and_duration(client: RpcClient) -> None:
     result = client.result("index.reindex")
     assert result["total"] == 21

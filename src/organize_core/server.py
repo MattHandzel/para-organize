@@ -88,7 +88,13 @@ from organize_core.fileops import (
     update_frontmatter,
 )
 from organize_core.frontmatter import FrontmatterError, load_file
-from organize_core.index import NoteRecord, QueryCriteria, VaultIndex
+from organize_core.index import (
+    PARA_KEY_TO_TYPE,
+    PARA_TYPE_TO_KEY,
+    NoteRecord,
+    QueryCriteria,
+    VaultIndex,
+)
 from organize_core.learn import (
     LearningData,
     load_learning,
@@ -119,6 +125,8 @@ RPC_METHODS: tuple[str, ...] = (
     "meta.fields",         # () → metadata_fields[] + completions      spec 07, 10 §3
     "meta.values",         # (key) → distinct values in the vault      spec 07 complete="existing"
     "folder.create",       # (para_type, name) → OperationResult      spec 05 §6
+    "folder.list",         # (para_type?) → every PARA subfolder       spec 04 §1, 10 §1
+    "folder.children",     # (path) → {dirs[], notes[]} for browsing   spec 03 §3
     "index.reindex",       # () → {total, duration}                   spec 03 §7
     "search.query",        # (criteria) → NoteRecord[]                spec 03 §2
     "routes.resolve",      # (path) → RouteMatch[]                    spec 11 §1
@@ -800,6 +808,8 @@ class OrganizeServer:
             "meta.fields": self._meta_fields,
             "meta.values": self._meta_values,
             "folder.create": self._folder_create,
+            "folder.list": self._folder_list,
+            "folder.children": self._folder_children,
             "index.reindex": self._index_reindex,
             "search.query": self._search_query,
             "routes.resolve": self._routes_resolve,
@@ -1338,6 +1348,66 @@ class OrganizeServer:
         name = str(_require(params, "name"))
         return asdict(new_folder(self._context(params), para_type, name))
 
+    def _folder_list(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
+        """``folder.list`` — every immediate PARA subfolder, with its spec 11
+        §3 description where one exists. Read-only; never queued.
+
+        Enumerated from DISK (``VaultIndex.para_subfolders``), not from the
+        indexed notes, so a freshly created and still-empty folder is
+        offerable as a destination — the picker's whole job is choosing where
+        a note goes, and a folder is a legitimate answer before it holds
+        anything. Uncapped for the same reason: capping is a RANKING concern
+        (``suggest.for_note``), and a browse list that silently omits folders
+        cannot serve as the 03 §3 "see everything" fallback.
+
+        This exists because spec 10 §1 makes the core the only reader of the
+        vault: a thin client may not walk the filesystem itself, so without
+        this method the nvim destination picker has no source for the list
+        at all.
+        """
+        requested = params.get("para_type")
+        keys = (
+            list(self.config.vault.para_folders)
+            if requested is None
+            else [PARA_TYPE_TO_KEY.get(str(requested).strip().casefold(), str(requested))]
+        )
+        folders: list[dict[str, Any]] = []
+        for key in keys:
+            para_type = PARA_KEY_TO_TYPE.get(key, key)
+            for folder in self.index.para_subfolders(key):
+                folders.append(self._folder_entry(folder, para_type=para_type))
+        return {"folders": folders}
+
+    def _folder_children(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
+        """``folder.children`` — one directory level for 03 §3 browsing:
+        subfolders (with descriptions) plus the notes directly inside."""
+        folder = self._vault_folder(_require(params, "path"))
+        subdirs, notes = self.index.folder_children(folder)
+        return {
+            "dirs": [self._folder_entry(subdir) for subdir in subdirs],
+            "notes": [
+                {
+                    "path": record.path,
+                    "title": record.title,
+                    "aliases": list(record.aliases),
+                    "para_type": record.para_type,
+                }
+                for record in notes
+            ],
+        }
+
+    def _folder_entry(self, folder: Path, *, para_type: str | None = None) -> dict[str, Any]:
+        """One folder as the wire shape. ``description`` is OMITTED rather
+        than null when the folder has none, so a client can test presence
+        without a per-language null dance."""
+        entry: dict[str, Any] = {"path": str(folder), "name": folder.name}
+        if para_type is not None:
+            entry["type"] = para_type
+        description = get_description(folder, self.index, self.config)
+        if description:
+            entry["description"] = description
+        return entry
+
     def _index_reindex(self, _conn: _Connection | None, _params: dict[str, Any]) -> Any:
         return self.index.full_reindex()
 
@@ -1406,6 +1476,27 @@ class OrganizeServer:
                 hint="paths are vault-relative or absolute inside the vault",
             )
         return candidate
+
+    def _vault_folder(self, value: Any) -> Path:
+        """Resolve a client-supplied path that must name a FOLDER in the
+        vault.
+
+        Both failures are ``VaultError``, for the reason spelled out in
+        :meth:`_record_for`: ``error.data.kind`` is what a client branches
+        on, and ``ServerError`` invites a reconnect/retry when the only
+        useful response is to fix the path.
+        """
+        try:
+            path = self._vault_path(value)
+        except ServerError as exc:
+            raise VaultError(str(exc), hint=exc.hint) from exc
+        if not path.is_dir():
+            raise VaultError(
+                f"folder not found: {path}",
+                hint=f"pass a folder path relative to the vault root ({self.config.vault.root}) "
+                "or an absolute path inside it",
+            )
+        return path
 
     def _record_for(self, value: Any) -> NoteRecord:
         """Resolve a client-supplied path to the indexed record every fileop
