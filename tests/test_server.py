@@ -649,6 +649,45 @@ def test_operation_context_filters_reject_an_array_as_a_client_error(
     assert not (vault_of(server) / "areas/never-created").exists()
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        pytest.param(5, id="scalar-raised-TypeError-as--32603"),
+        pytest.param("todo", id="bare-string-exploded-into-characters"),
+        pytest.param({"tag": "todo"}, id="object"),
+        pytest.param(["todo", 7], id="non-string-item"),
+    ],
+)
+def test_operation_context_auto_tags_reject_a_bad_shape_as_a_client_error(
+    client: RpcClient, server: OrganizeServer, bad: Any
+) -> None:
+    """`auto_tags_present` was `tuple(str(t) for t in (raw or ()))`, which
+    failed two ways: a SCALAR raised TypeError and escaped as -32603
+    INTERNAL_ERROR, and a bare STRING silently exploded into one tag per
+    CHARACTER — a wrong answer written into the action record rather than an
+    error. Every bad shape is now -32602 naming the field, and the operation
+    must not have run."""
+    error = client.error(
+        "folder.create", para_type="areas", name="never-tagged", auto_tags_present=bad
+    )
+    assert error["code"] == INVALID_PARAMS
+    assert error["code"] != INTERNAL_ERROR
+    assert "auto_tags_present" in error["message"]
+    assert not (vault_of(server) / "areas/never-tagged").exists()
+
+
+def test_operation_context_auto_tags_accepts_a_list_of_strings(client: RpcClient) -> None:
+    """The valid shape still passes, including the empty list — lua encodes
+    an empty table as `[]`, which is already the right shape for a LIST-typed
+    field and needs no coercion."""
+    assert client.result(
+        "folder.create", para_type="areas", name="tagged-ok", auto_tags_present=["auto/idea"]
+    )["ok"]
+    assert client.result(
+        "folder.create", para_type="areas", name="tagged-empty", auto_tags_present=[]
+    )["ok"]
+
+
 def test_meta_set_refuses_a_no_ai_note_for_an_ai_actor(client: RpcClient) -> None:
     error = client.error(
         "meta.set",

@@ -1472,8 +1472,8 @@ class OrganizeServer:
             suggestions_shown=_suggestions_shown_from(params.get("suggestions_shown")),
             chosen_rank=_opt_rank(params.get("chosen_rank")),
             durations_ms=_durations_from(params.get("durations_ms")),
-            auto_tags_present=tuple(
-                str(tag) for tag in (params.get("auto_tags_present") or ())
+            auto_tags_present=_string_list_from(
+                params.get("auto_tags_present"), "auto_tags_present"
             ),
             filters=_filters_from(params.get("filters")),
             describe=lambda folder: get_description(folder, self.index, self.config),
@@ -1654,6 +1654,31 @@ def _filters_from(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise _invalid_params("'filters' must be an object of filter=value pairs")
     return dict(raw)
+
+
+def _string_list_from(raw: Any, field: str) -> tuple[str, ...]:
+    """A LIST-typed request field of plain strings (spec 12 §2 context).
+
+    This was inlined as ``tuple(str(tag) for tag in (raw or ()))``, which
+    failed two ways on a malformed request: a SCALAR raised TypeError and
+    escaped as -32603 INTERNAL_ERROR — the core reporting its own fault for
+    a client type error — and a bare STRING silently exploded into one tag
+    per CHARACTER, a wrong answer written straight into the action record.
+
+    The rules mirror ``actions._str_tuple``, which validates this same field
+    when a record is read back, so the door cannot accept a shape the record
+    layer would later reject.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise _invalid_params(f"{field!r} must be an array of strings")
+    for item in raw:
+        if not isinstance(item, str):
+            raise _invalid_params(
+                f"{field!r} must contain only strings, got {type(item).__name__}"
+            )
+    return tuple(raw)
 
 
 def _durations_from(raw: Any) -> dict[str, int]:
