@@ -296,6 +296,19 @@ def handshake_line() -> str:
     return json.dumps({"apiVersion": API_VERSION}, ensure_ascii=False) + "\n"
 
 
+def empty_array_as_object(raw: Any) -> Any:
+    """An EMPTY JSON array, wherever an OBJECT is expected, reads as ``{}``.
+
+    lua has one value for both shapes, so ``vim.json.encode({})`` emits ``[]``
+    everywhere the nvim client means an empty object — for ``params`` itself
+    and for object-typed fields inside it (``criteria``, ``filters``,
+    ``changes``, ...). An empty array carries no positional argument, so
+    reading it as ``{}`` costs nothing; a NON-empty array is a real
+    positional/type error and is returned unchanged for the caller to reject.
+    """
+    return {} if isinstance(raw, list) and not raw else raw
+
+
 def decode_request(line: str) -> tuple[int | str | None, str, dict[str, Any]]:
     """Parse one request line → (id, method, params). Malformed ⇒ raises
     with PARSE_ERROR/INVALID_REQUEST semantics for the caller to encode."""
@@ -336,6 +349,7 @@ def decode_request(line: str) -> tuple[int | str | None, str, dict[str, Any]]:
     params = payload.get("params", {})
     if params is None:
         params = {}
+    params = empty_array_as_object(params)
     if not isinstance(params, dict):
         raise RpcException(
             RpcError(
@@ -1115,7 +1129,7 @@ class OrganizeServer:
         silently ignored and the client got a full, unfiltered session back:
         a silent wrong answer where the rest of this API is loud.
         """
-        raw_filters = params.get("filters") or {}
+        raw_filters = empty_array_as_object(params.get("filters") or {})
         if not isinstance(raw_filters, dict):
             raise _invalid_params("'filters' must be an object of filter=value pairs")
         top_level = {k: v for k, v in params.items() if k not in self._SESSION_START_RESERVED}
@@ -1182,7 +1196,7 @@ class OrganizeServer:
         return [asdict(suggestion) for suggestion in merged]
 
     def _search_query(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
-        raw = params.get("criteria", params)
+        raw = empty_array_as_object(params.get("criteria", params))
         if not isinstance(raw, dict):
             raise _invalid_params("'criteria' must be an object of filter=value pairs")
         criteria = QueryCriteria.from_filter_args(
@@ -1283,7 +1297,7 @@ class OrganizeServer:
         as ``organize set-meta`` (``replace_keys``).
         """
         path = self._vault_path(_require(params, "path"))
-        changes = _require(params, "changes")
+        changes = empty_array_as_object(_require(params, "changes"))
         if not isinstance(changes, dict):
             raise _invalid_params("'changes' must be an object of field→value pairs")
         fields = metadata_fields_by_key(self.config)
@@ -1364,6 +1378,11 @@ class OrganizeServer:
         vault: a thin client may not walk the filesystem itself, so without
         this method the nvim destination picker has no source for the list
         at all.
+
+        The optional ``para_type`` FILTER param addresses a
+        ``vault.para_folders`` KEY, not a type value, so it is plural
+        (``projects``); the singular is accepted and normalized to the key.
+        The emitted ``type`` is the singular type VALUE.
         """
         requested = params.get("para_type")
         keys = (
@@ -1373,6 +1392,9 @@ class OrganizeServer:
         )
         folders: list[dict[str, Any]] = []
         for key in keys:
+            # `type` is the SINGULAR ParaType: every type VALUE on the wire is
+            # singular. The `para_type` REQUEST param above is the exception —
+            # it addresses a `vault.para_folders` KEY, so it takes either form.
             para_type = PARA_KEY_TO_TYPE.get(key, key)
             for folder in self.index.para_subfolders(key):
                 folders.append(self._folder_entry(folder, para_type=para_type))
@@ -1620,6 +1642,7 @@ def _opt_rank(raw: Any) -> int | None:
 def _durations_from(raw: Any) -> dict[str, int]:
     if raw is None:
         return {}
+    raw = empty_array_as_object(raw)
     if not isinstance(raw, dict):
         raise _invalid_params("'durations_ms' must be an object of phase→milliseconds")
     out: dict[str, int] = {}
@@ -1633,6 +1656,9 @@ def _durations_from(raw: Any) -> dict[str, int]:
 def _snapshot_from(raw: Any) -> FileSnapshot | None:
     if raw is None:
         return None
+    # NOT routed through `empty_array_as_object`: an empty snapshot is never
+    # a valid one, so coercing `[]` to `{}` would only swap this precise
+    # message for a vaguer "missing or malformed field" on the same rejection.
     if not isinstance(raw, dict):
         raise _invalid_params("'snapshot' must be the object returned by op.merge_preview")
     try:

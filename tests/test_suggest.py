@@ -502,7 +502,9 @@ def test_ranking_projects_beats_areas_beats_resources_exact_scores() -> None:
     ]
     result = suggest(IMPRO_CAPTURE, candidates, DEFAULTS, EMPTY_LEARNING, now=NOW)
 
-    assert [s.type for s in result] == ["projects", "areas", "resources"]
+    # Candidates carry the PLURAL `para_folders` key; the emitted
+    # `Suggestion.type` is the SINGULAR wire vocabulary.
+    assert [s.type for s in result] == ["project", "area", "resource"]
     assert result[0].score == pytest.approx(3.8, rel=1e-12)
     assert result[1].score == pytest.approx(3.7, rel=1e-12)
     assert result[2].score == pytest.approx(3.6, rel=1e-12)
@@ -560,7 +562,7 @@ def test_archive_entry_is_appended_with_the_spec_shape() -> None:
     assert result[-1] == Suggestion(
         path=ARCHIVE_PATH,
         name=ARCHIVE_SUGGESTION_NAME,
-        type="archives",
+        type="archive",
         score=0.1,
         reasons=("Safe default option",),
     )
@@ -600,7 +602,7 @@ def test_list_length_is_exactly_max_suggestions_including_archive() -> None:
         archive_path=ARCHIVE_PATH,
     )
     assert len(result) == DEFAULTS.max_suggestions == 10
-    assert len([s for s in result if s.type != "archives"]) == 9
+    assert len([s for s in result if s.type != "archive"]) == 9
     assert result[-1].name == ARCHIVE_SUGGESTION_NAME
 
 
@@ -610,7 +612,7 @@ def test_list_length_is_exactly_max_suggestions_without_archive() -> None:
     result = suggest(IMPRO_CAPTURE, candidates, config, EMPTY_LEARNING, now=NOW,
                      archive_path=ARCHIVE_PATH)
     assert len(result) == 10
-    assert all(s.type != "archives" for s in result)
+    assert all(s.type != "archive" for s in result)
 
 
 @pytest.mark.parametrize("max_suggestions", [1, 2, 3, 5, 10, 11])
@@ -632,7 +634,7 @@ def test_truncation_keeps_the_highest_scoring_entries() -> None:
         IMPRO_CAPTURE, candidates, config, EMPTY_LEARNING, now=NOW,
         archive_path=ARCHIVE_PATH,
     )
-    assert [s.type for s in result] == ["projects", "areas", "archives"]
+    assert [s.type for s in result] == ["project", "area", "archive"]
 
 
 def test_suggest_never_scores_an_archive_candidate() -> None:

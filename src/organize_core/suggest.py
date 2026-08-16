@@ -36,12 +36,19 @@ from dataclasses import dataclass
 
 from organize_core import frontmatter
 from organize_core.config import SuggestionsConfig
-from organize_core.index import NoteRecord
+from organize_core.index import PARA_KEY_TO_TYPE, NoteRecord
 from organize_core.learn import LearningData, get_association_score
 
 ARCHIVE_SUGGESTION_NAME = "Archive Now"
 ARCHIVE_SUGGESTION_SCORE = 0.1
 ARCHIVE_SUGGESTION_REASON = "Safe default option"
+
+#: ``Suggestion.type`` of the synthetic archive entry. Defined here, beside
+#: the rest of that entry, and re-exported by ``routes`` (which cannot be
+#: imported from here — routes imports suggest); one definition, so the
+#: value cannot drift between the module that emits it and the one that
+#: recognizes it.
+ARCHIVE_SUGGESTION_TYPE = "archive"
 
 # Spec 04 §2 #5: aliases that are really the capture id are not names.
 _CAPTURE_ALIAS_PREFIX = "capture_"
@@ -60,7 +67,11 @@ class Candidate:
     path: str
     name: str
     normalized_name: str
-    type: str  # "projects" | "areas" | "resources"
+    #: The ``vault.para_folders`` KEY this candidate came from, so PLURAL
+    #: ("projects" | "areas" | "resources") — `generate_candidates` is fed
+    #: that dict and `_type_bonus` is keyed by it. It is converted to the
+    #: singular wire vocabulary when a `Suggestion` is built from it.
+    type: str
 
 
 @dataclass(frozen=True)
@@ -71,7 +82,10 @@ class Suggestion:
 
     path: str
     name: str
-    type: str  # "projects" | "areas" | "resources" | "archives"
+    #: SINGULAR ParaType — "project" | "area" | "resource" | "archive" (and
+    #: "other" for a route destination outside any PARA root). Every type
+    #: VALUE on the wire is singular; plural names a `para_folders` KEY only.
+    type: str
     score: float
     reasons: tuple[str, ...] = ()
     route: str | None = None  # route name, when route-sourced
@@ -240,6 +254,8 @@ def calculate_score(
 
 
 def _type_bonus(candidate_type: str, config: SuggestionsConfig) -> float:
+    # Keyed by the PLURAL `para_folders` key, which is what `Candidate.type`
+    # holds — not the singular wire type.
     bonus = config.weights.type_bonus
     return {
         "projects": bonus.projects,
@@ -295,7 +311,7 @@ def suggest(
     - truncate so the returned list is EXACTLY ≤ ``max_suggestions``
       INCLUDING the synthetic archive entry (off-by-one fixed, 04 §1);
     - when ``always_show_archive`` and ``archive_path``: append
-      ``Suggestion(name="Archive Now", type="archives", score=0.1,
+      ``Suggestion(name="Archive Now", type="archive", score=0.1,
       reasons=("Safe default option",), path=archive_path)``.
 
     Route injection (11 §1) happens ABOVE this layer (routes.merge_route_
@@ -314,7 +330,10 @@ def suggest(
             Suggestion(
                 path=candidate.path,
                 name=candidate.name,
-                type=candidate.type,
+                # `Candidate.type` is the plural config KEY; the wire type is
+                # singular. An unrecognized key (a vault with a custom PARA
+                # root) passes through rather than being blanked.
+                type=PARA_KEY_TO_TYPE.get(candidate.type, candidate.type),
                 score=score,
                 reasons=tuple(reasons),
             )
@@ -336,7 +355,7 @@ def suggest(
             Suggestion(
                 path=archive_path or "",
                 name=ARCHIVE_SUGGESTION_NAME,
-                type="archives",
+                type=ARCHIVE_SUGGESTION_TYPE,
                 score=ARCHIVE_SUGGESTION_SCORE,
                 reasons=(ARCHIVE_SUGGESTION_REASON,),
             )

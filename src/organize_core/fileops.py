@@ -125,6 +125,7 @@ from organize_core.actions import (
 from organize_core.config import Config
 from organize_core.errors import (
     ConcurrentModificationError,
+    ConfigError,
     FrontmatterError,
     NoAiRefusal,
     OperationError,
@@ -1905,8 +1906,10 @@ def new_folder(ctx: OperationContext, para_type: str, name: str) -> OperationRes
     validate name (no path separators, non-empty); log ``create_folder``.
     The auto-move-current-capture behavior lives in the session layer.
 
-    ``para_type`` accepts either the config KEY (``projects``) or its
-    singular (``project``), because the UI's ``<leader>np`` speaks singular.
+    ``para_type`` addresses a ``vault.para_folders`` KEY, so it is PLURAL —
+    but it also accepts the singular (``project``), because the UI's
+    ``<leader>np`` speaks singular. An unknown value raises ``ConfigError``
+    (it is an addressing failure); a bad ``name`` still returns ``ok=False``.
 
     Spec 05 §6 also says "refresh folder caches/index dirs". No index call is
     needed: ``VaultIndex.para_subfolders`` enumerates directories from DISK,
@@ -1922,13 +1925,14 @@ def new_folder(ctx: OperationContext, para_type: str, name: str) -> OperationRes
     )
     root = Path(ctx.config.vault.root)
     if key is None:
-        return _fail(
-            ctx,
-            "create_folder",
-            root,
-            None,
-            f"unknown PARA type {para_type!r}; known types: {sorted(folders)}",
-            now,
+        # ADDRESSING failure, not a world-state one: the caller named a PARA
+        # type that does not exist, so there is no operation to attempt and
+        # nothing to write a FAILED oplog line about. Raises rather than
+        # returning ok=false, matching `VaultIndex.para_subfolders` on the
+        # same bad input so `folder.create` and `folder.list` agree.
+        raise ConfigError(
+            f"unknown PARA type {para_type!r}",
+            hint="valid values: " + ", ".join(sorted(folders)),
         )
 
     clean = (name or "").strip()

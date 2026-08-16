@@ -31,8 +31,8 @@ from pathlib import Path
 from organize_core import frontmatter
 from organize_core.config import Config, RouteConfig
 from organize_core.fileops import OperationContext, OperationResult
-from organize_core.index import NoteRecord, VaultIndex
-from organize_core.suggest import Suggestion
+from organize_core.index import PARA_KEY_TO_TYPE, NoteRecord, VaultIndex
+from organize_core.suggest import ARCHIVE_SUGGESTION_TYPE, Suggestion
 
 #: Routes are NOT scored — spec 11 §1 ranks them above scored suggestions
 #: positionally, and :func:`merge_route_suggestions` is what enforces that.
@@ -41,13 +41,14 @@ from organize_core.suggest import Suggestion
 #: ``suggestions_shown`` (12 §2) — ``math.inf`` is not.
 ROUTE_SUGGESTION_SCORE = 1000.0
 
-#: ``Suggestion.type`` value for the synthetic archive entry that
-#: ``suggest.suggest`` appends; it survives every truncation (resolution #10).
-ARCHIVE_SUGGESTION_TYPE = "archives"
-
-#: Vault folder name → ``Suggestion.type`` vocabulary. Matt's archive folder
-#: is ``archive`` SINGULAR on disk (spec 02) but the suggestion type is plural.
-_TYPE_ALIASES = {"archive": ARCHIVE_SUGGESTION_TYPE}
+#: Vault folder name → the SINGULAR ``Suggestion.type`` vocabulary, for the
+#: no-config path where the leading path segment IS the folder name: the PARA
+#: roots are plural on disk (``areas/``) while the type value is singular, and
+#: Matt's archive root is already singular (spec 02), which maps to itself.
+_TYPE_ALIASES = {
+    **PARA_KEY_TO_TYPE,
+    "archive": ARCHIVE_SUGGESTION_TYPE,
+}
 
 #: Fallback type for a destination outside any recognizable PARA root.
 _UNKNOWN_TYPE = "other"
@@ -69,11 +70,11 @@ class RouteMatch:
     route_name: str  # display name: first tag or explicit name
     destination: Path  # resolved absolute path
     is_folder: bool
-    #: PARA type of the destination, resolved against the CONFIGURED folder
-    #: names by :func:`resolve` (which holds the ``Config``).
+    #: SINGULAR PARA type of the destination, resolved against the CONFIGURED
+    #: folder names by :func:`resolve` (which holds the ``Config``).
     #: ``as_suggestion`` takes no config, so without this a vault that renames
     #: a PARA root (``projects = "p"``) would type its route suggestions
-    #: ``"p"`` while every scored suggestion was typed ``"projects"`` — and
+    #: ``"p"`` while every scored suggestion was typed ``"project"`` — and
     #: the UI groups on this field. Empty means "derive it from the leading
     #: path segment", which is what a hand-built RouteMatch gets.
     para_type: str = ""
@@ -98,13 +99,15 @@ def _destination_type(destination: str, config: Config | None = None) -> str:
     """PARA type of a vault-relative route destination, from its leading
     segment (``areas/health/training-log.md`` → ``areas``).
 
+    The answer is the SINGULAR type VALUE (``areas/health/x.md`` → ``area``),
+    because this feeds ``Suggestion.type``.
+
     Given a ``config``, the leading segment is matched against the CONFIGURED
     ``vault.para_folders`` values, so a renamed PARA root still reports its
-    canonical type key. Without one (a hand-built ``RouteMatch``) the leading
+    canonical type. Without one (a hand-built ``RouteMatch``) the leading
     segment IS the folder name in every layout spec 02 describes, and
-    ``archive`` is aliased to the plural suggestion type. Unrecognizable
-    destinations report ``"other"`` rather than claiming a PARA type they do
-    not have.
+    ``_TYPE_ALIASES`` carries it to singular. Unrecognizable destinations
+    report ``"other"`` rather than claiming a PARA type they do not have.
     """
     segments = [part for part in destination.strip().strip("/").split("/") if part]
     if not segments:
@@ -113,7 +116,7 @@ def _destination_type(destination: str, config: Config | None = None) -> str:
     if config is not None:
         for key, folder in (config.vault.para_folders or {}).items():
             if str(folder).strip().strip("/").casefold() == head.casefold():
-                return key
+                return PARA_KEY_TO_TYPE.get(key, key)
     lowered = head.lower()
     return _TYPE_ALIASES.get(lowered, lowered or _UNKNOWN_TYPE)
 

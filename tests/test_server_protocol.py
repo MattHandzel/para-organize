@@ -42,9 +42,12 @@ from organize_core.server import (
     RpcException,
     SingleInstanceLock,
     WriterQueue,
+    _durations_from,
     _organize_error,
     _ReadWriteLock,
+    _snapshot_from,
     decode_request,
+    empty_array_as_object,
     encode_event,
     encode_response,
     handshake_line,
@@ -283,6 +286,51 @@ def test_decode_request_rejects_positional_params() -> None:
         decode_request('{"jsonrpc": "2.0", "id": 3, "method": "note.get", "params": ["a.md"]}')
     assert excinfo.value.error.code == INVALID_PARAMS
     assert excinfo.value.request_id == 3
+
+
+def test_decode_request_reads_an_empty_array_as_no_params() -> None:
+    """`vim.json.encode({})` emits `[]`, so every no-arg call from the nvim
+    client arrives as an empty array. It carries no positional argument, so
+    it means `{}` — only the EMPTY array; a populated one is still rejected."""
+    assert decode_request(
+        '{"jsonrpc": "2.0", "id": 1, "method": "index.reindex", "params": []}'
+    ) == (1, "index.reindex", {})
+    with pytest.raises(RpcException) as excinfo:
+        decode_request('{"jsonrpc": "2.0", "id": 2, "method": "index.reindex", "params": [null]}')
+    assert excinfo.value.error.code == INVALID_PARAMS
+    assert excinfo.value.request_id == 2
+
+
+def test_empty_array_as_object_coerces_only_the_empty_array() -> None:
+    """The ONE coercion every object-typed field routes through. Anything
+    that is not an empty array is handed back untouched, so each field's own
+    validator still produces its own message."""
+    assert empty_array_as_object([]) == {}
+    assert empty_array_as_object([None]) == [None]
+    assert empty_array_as_object(["a.md"]) == ["a.md"]
+    assert empty_array_as_object({"tags": ["x"]}) == {"tags": ["x"]}
+    assert empty_array_as_object("") == ""
+    assert empty_array_as_object(0) == 0
+
+
+def test_durations_ms_reads_an_empty_array_as_no_durations() -> None:
+    """`durations_ms` is object-typed, so lua sends `[]` for "none recorded"."""
+    assert _durations_from([]) == {}
+    assert _durations_from(None) == {}
+    assert _durations_from({"scan": 12}) == {"scan": 12}
+    with pytest.raises(RpcException) as excinfo:
+        _durations_from(["scan"])
+    assert excinfo.value.error.code == INVALID_PARAMS
+
+
+def test_snapshot_is_deliberately_not_empty_array_coerced() -> None:
+    """The one object-typed field left OUT of the coercion: an EMPTY snapshot
+    is never valid, so reading `[]` as `{}` would swap this precise message
+    for a vaguer missing-field one on the very same rejection."""
+    with pytest.raises(RpcException) as excinfo:
+        _snapshot_from([])
+    assert excinfo.value.error.code == INVALID_PARAMS
+    assert "op.merge_preview" in excinfo.value.error.message
 
 
 def test_decode_request_rejects_a_boolean_id() -> None:

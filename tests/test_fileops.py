@@ -25,7 +25,7 @@ from conftest import QUIRK_FILES
 from organize_core import fileops
 from organize_core.actions import ActionRecorder
 from organize_core.config import Config, FileOpsConfig, VaultConfig
-from organize_core.errors import ConcurrentModificationError, OperationError
+from organize_core.errors import ConcurrentModificationError, ConfigError, OperationError
 from organize_core.fileops import (
     LoggedOperation,
     OperationContext,
@@ -999,9 +999,13 @@ def test_new_folder_rejects_separators_and_empty_names(
 
 
 def test_new_folder_rejects_an_unknown_para_type(ctx: OperationContext, fixture_vault: Path) -> None:
-    result = new_folder(ctx, "inbox", "x")
-    assert result.ok is False
-    assert "unknown PARA type 'inbox'" in (result.error or "")
+    """An unknown PARA type is an ADDRESSING failure: it RAISES rather than
+    returning ok=False, so it reaches a client as an error with a taxonomy
+    kind. The hint names the keys that would have worked."""
+    with pytest.raises(ConfigError) as excinfo:
+        new_folder(ctx, "inbox", "x")
+    assert "unknown PARA type 'inbox'" in str(excinfo.value)
+    assert "areas" in (excinfo.value.hint or "")
 
 
 def test_new_folder_is_idempotent(ctx: OperationContext, fixture_vault: Path) -> None:

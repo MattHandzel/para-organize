@@ -401,11 +401,12 @@ def test_path_escaping_the_vault_is_refused(client: RpcClient) -> None:
 
 def test_suggest_for_note_ranks_the_matching_folder_first(client: RpcClient) -> None:
     suggestions = client.result("suggest.for_note", path=QUIRK_FILES["iso_filename"])
+    # SINGULAR type values on the wire (`Suggestion.type`).
     assert [(s["name"], s["type"], s["score"]) for s in suggestions] == [
-        ("health", "areas", 3.7),
-        ("blog", "projects", 0.3),
-        ("kms", "projects", 0.3),
-        ("Archive Now", "archives", 0.1),
+        ("health", "area", 3.7),
+        ("blog", "project", 0.3),
+        ("kms", "project", 0.3),
+        ("Archive Now", "archive", 0.1),
     ]
     assert suggestions[0]["reasons"] == [
         "Tag 'health' matches folder",
@@ -595,6 +596,37 @@ def test_meta_set_rejects_non_object_changes(client: RpcClient) -> None:
     assert error["code"] == INVALID_PARAMS
 
 
+#: Every OBJECT-TYPED request field, with the method that carries it.
+_OBJECT_TYPED_FIELDS: tuple[tuple[str, str, dict[str, Any]], ...] = (
+    ("criteria", "search.query", {}),
+    ("filters", "session.start", {}),
+    ("changes", "meta.set", {"path": QUIRK_FILES["scalar_tags"]}),
+)
+
+
+@pytest.mark.parametrize(("field", "method", "extra"), _OBJECT_TYPED_FIELDS)
+def test_an_object_typed_field_reads_an_empty_array_as_an_empty_object(
+    client: RpcClient, field: str, method: str, extra: dict[str, Any]
+) -> None:
+    """lua has one value for an empty object and an empty array, so
+    `vim.json.encode({criteria = {}})` puts `[]` on the wire. Every
+    object-typed field reads that as `{}`, the same rule `params` itself
+    follows — otherwise these calls are -32602 before they ever run."""
+    response = client.call(method, **extra, **{field: []})
+    assert "error" not in response, f"{field}=[] was rejected: {response.get('error')}"
+
+
+@pytest.mark.parametrize(("field", "method", "extra"), _OBJECT_TYPED_FIELDS)
+def test_an_object_typed_field_still_rejects_a_populated_array(
+    client: RpcClient, field: str, method: str, extra: dict[str, Any]
+) -> None:
+    """Only the EMPTY array is coerced. A populated array is a genuine type
+    error, not a lua empty-table artifact, and stays -32602."""
+    error = client.error(method, **extra, **{field: ["tags"]})
+    assert error["code"] == INVALID_PARAMS
+    assert field in error["message"]
+
+
 def test_meta_set_refuses_a_no_ai_note_for_an_ai_actor(client: RpcClient) -> None:
     error = client.error(
         "meta.set",
@@ -630,6 +662,8 @@ def test_folder_list_returns_every_para_subfolder_uncapped(
     # folder is not offerable as a destination.
     by_path = {entry["path"]: entry for entry in folders}
     assert by_path[str(vault / "projects/blog")]["name"] == "blog"
+    # SINGULAR: every type VALUE on the wire is singular (plural appears only
+    # where a `vault.para_folders` KEY is addressed — the request param).
     assert by_path[str(vault / "projects/blog")]["type"] == "project"
     assert by_path[str(vault / "areas/health")]["type"] == "area"
     assert by_path[str(vault / "archive/capture")]["type"] == "archive"
@@ -922,7 +956,7 @@ def test_full_session_lifecycle_over_the_socket(
 
     suggestions = client.result("suggest.for_note", path=capture["path"])
     top = suggestions[0]
-    assert (top["name"], top["type"], top["score"]) == ("health", "areas", 3.7)
+    assert (top["name"], top["type"], top["score"]) == ("health", "area", 3.7)
 
     result = client.result(
         "op.move",

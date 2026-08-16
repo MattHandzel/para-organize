@@ -315,7 +315,7 @@ def test_as_suggestion_renders_the_spec_example(spec_config: Config) -> None:
 
     assert suggestion.path == "/vault/areas/health/training-log.md"
     assert suggestion.name == "training-log.md"
-    assert suggestion.type == "areas"
+    assert suggestion.type == "area"
     assert suggestion.score == ROUTE_SUGGESTION_SCORE
     assert suggestion.route == "workout"
     assert suggestion.reasons == ("Route 'workout' (append)",)
@@ -334,7 +334,7 @@ def test_as_suggestion_keeps_the_full_file_path_not_the_parent_folder(
     assert file_match.as_suggestion().name == "ideas.md"
     assert folder_match.as_suggestion().path == "/vault/resources/performing"
     assert folder_match.as_suggestion().name == "performing"
-    assert folder_match.as_suggestion().type == "resources"
+    assert folder_match.as_suggestion().type == "resource"
 
 
 def test_as_suggestion_without_a_description_reports_none() -> None:
@@ -668,24 +668,25 @@ def test_route_suggestion_type_uses_the_configured_para_folder_names() -> None:
         routes=[route(["workout"], "a/health/training-log.md", mode="append")],
     )
     (match,) = resolve(["workout"], config)
-    assert match.para_type == "areas"
-    assert match.as_suggestion().type == "areas"
+    assert match.para_type == "area"
+    assert match.as_suggestion().type == "area"
 
 
 def test_route_suggestion_type_still_works_for_the_default_layout() -> None:
     config = make_config(route(["workout"], "areas/health/training-log.md"))
     (match,) = resolve(["workout"], config)
-    assert match.para_type == "areas"
-    assert match.as_suggestion().type == "areas"
+    # The ROOT is plural on disk (`areas/`); the type VALUE is singular.
+    assert match.para_type == "area"
+    assert match.as_suggestion().type == "area"
 
 
-def test_singular_archive_on_disk_is_reported_as_the_plural_type() -> None:
-    """spec 02 / 08 §C2: the folder is `archive`, the suggestion type is
-    `archives`. Both the configured and the fallback path must agree."""
+def test_singular_archive_on_disk_is_reported_as_the_singular_type() -> None:
+    """spec 02 / 08 §C2: the folder is `archive` and so is the type value.
+    Both the configured and the fallback path must agree."""
     config = make_config(route(["done"], "archive/reference/notes.md"))
     (match,) = resolve(["done"], config)
-    assert match.para_type == "archives"
-    assert match.as_suggestion().type == "archives"
+    assert match.para_type == "archive"
+    assert match.as_suggestion().type == "archive"
 
 
 def test_a_hand_built_route_match_still_derives_its_type() -> None:
@@ -699,4 +700,4 @@ def test_a_hand_built_route_match_still_derives_its_type() -> None:
         is_folder=False,
     )
     assert match.para_type == ""
-    assert match.as_suggestion().type == "resources"
+    assert match.as_suggestion().type == "resource"

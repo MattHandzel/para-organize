@@ -858,9 +858,9 @@ def test_suggestions_agree_across_the_two_doors(
     # bare areas (0.2) and resources (0.1) fall below it and are dropped, and
     # the archive entry is appended unconditionally (04 §1-2).
     assert cli_shape == [
-        ("<VAULT>/projects/blog", "projects", 0.3),
-        ("<VAULT>/projects/kms", "projects", 0.3),
-        ("<VAULT>/archive/capture/raw_capture", "archives", 0.1),
+        ("<VAULT>/projects/blog", "project", 0.3),
+        ("<VAULT>/projects/kms", "project", 0.3),
+        ("<VAULT>/archive/capture/raw_capture", "archive", 0.1),
     ]
 
 

@@ -357,21 +357,51 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
   structural decision 3). Disposition: when Phase 3 adds consumer state
   writers, lift ONE state-file atomic-write helper into a small shared
   module (not fileops) and migrate learn/index to it.
-- **VOCABULARY SPLIT (PARA plural vs singular)**: PLURAL is the
-  DESTINATION-KIND — `Suggestion.type`, `folder.list`'s emitted `type`, and
-  `folder.create`'s `para_type` all speak `projects`/`areas`/`resources`/
-  `archives`, so a client can compare a suggestion against a listed folder
-  without normalizing. SINGULAR `ParaType` is NOTE-RECORD IDENTITY —
-  `NoteRecord.para_type`, search criteria, and the `project/x` tag prefixes.
-  Request params that name a PARA folder accept either form (`folder.list`
-  normalizes via `PARA_TYPE_TO_KEY`); OUTPUT is never mixed.
-- **`op.*` / `folder.create` validation failures return a SUCCESSFUL RPC**
-  with `result.ok = false` (and `result.error` set), NOT a JSON-RPC error — an error
-  is reserved for protocol and unexpected faults. Kept deliberately: a
-  refused operation is a normal outcome the UI renders, not an exception.
-  The obligation this creates on callers is documented here because it is
-  invisible at the call site: a client MUST check `.ok` — a 200-shaped
-  response is not proof the operation happened.
+- **PARA VOCABULARY — singular is the type VALUE, plural names a config
+  KEY.** One rule, applied everywhere:
+
+  | Where | Form | Example |
+  |---|---|---|
+  | `Suggestion.type` | SINGULAR | `project`, `area`, `resource`, `archive` |
+  | `folder.list` emitted `type` | SINGULAR | `area` |
+  | `NoteRecord.para_type`, search criteria, `project/x` tag prefixes | SINGULAR | `project` (plus `capture`, `other`) |
+  | `RouteMatch.para_type` / `_destination_type()` | SINGULAR | `area` |
+  | `folder.create`'s `para_type` PARAM | PLURAL — a `vault.para_folders` key | `projects` |
+  | `folder.list`'s optional `para_type` FILTER param | PLURAL — a `vault.para_folders` key | `projects` |
+
+  Both PARAMS keep accepting what they accept today (either form; the
+  singular is normalized to the key), because the UI's `<leader>np` speaks
+  singular. They are documented as "a `para_folders` key, not a type value"
+  precisely because they are the only plural on the wire. Internally
+  `suggest.Candidate.type` is also the plural KEY — it is what
+  `VaultIndex.para_subfolders` is keyed by and what the `type_bonus` weights
+  are keyed by — and is converted to singular at `Suggestion` construction.
+
+  This RESOLVES a contradiction between two spec docs: 03 §7 defines the
+  PARA types with the plural folder-name keys, while 02's live-state
+  inventory shows SINGULAR values in the real `index.json`. We side with
+  **02 — parity with observed reality**, and read 03 §7 as describing the
+  DERIVATION SOURCE (the folder keys the values are derived from) rather
+  than the value vocabulary itself.
+- **Where the error line falls (RPC error vs `result.ok = false`)** — the
+  distinction is ADDRESSING vs WORLD STATE, and callers must handle both:
+  - **ADDRESSING / VALIDATION failures RAISE** a taxonomy error and reach
+    the wire as `-32000` with `error.data.kind` (unknown config key —
+    including `folder.create` with an unknown `para_type`, invalid folder
+    name, unknown method, no-AI refusal, concurrent modification). The
+    request never named a real operation, so there is nothing to attempt
+    and no oplog line to write.
+  - **WORLD-STATE failures during a validly-addressed op return
+    `ok = false`** plus a FAILED oplog line (source missing, unwritable
+    destination, copy failure). The operation was real and was attempted;
+    its failure is a normal outcome the UI renders, not an exception.
+  - So a client MUST check `result.ok` AND branch on `error.data.kind` — a
+    200-shaped response is not proof the operation happened.
+
+  KNOWN GAP (not fixed by this patch): `fileops.new_folder` still returns
+  `ok=false` for an INVALID FOLDER NAME (empty / contains a separator),
+  which the rule above puts in the RAISE column. Only the unknown-
+  `para_type` case was migrated.
 - **Phase gates run `make gate`** (test + perf + lint): the spec 09 §4
   full-scale perf tests are `-m slow` and excluded from the default suite,
   so a bare `make test` is NOT a complete phase gate.
@@ -389,13 +419,16 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
   rejects (-32602) before method lookup — every no-arg RPC must send
   `vim.empty_dict()`. Fixed in phc_support + pickers; any new call site
   must follow.
-- **Wire fact — RESOLVED (core patch)**: query `para_type` matches the
-  SINGULAR value while `folder.create` takes the PLURAL key; `folder.list`
-  used to emit singular `type` against `Suggestion.type`'s plural. Settled
-  by the VOCABULARY SPLIT ruling above — `folder.list` now emits the PLURAL
-  destination-kind, so core output is consistent and the client-side
-  normalization in `pickers.suggestion_entry` is now redundant and is
-  scheduled for DELETION in the Phase-2 fix stage.
+- **Wire fact — RESOLVED (core patch)**: the core used to mix vocabularies,
+  with `folder.list` emitting singular `type` while `Suggestion.type` was
+  plural. Settled by the PARA VOCABULARY ruling above: **core output is now
+  uniformly SINGULAR** — `Suggestion.type` migrated plural → singular (the
+  archive entry's type is now `archive`), and `folder.list` keeps emitting
+  singular. Plural survives only on the two params that address a
+  `para_folders` KEY, which still take either form. The client-side
+  normalization shim in `pickers.suggestion_entry` is therefore redundant
+  and is scheduled for DELETION in the Phase-2 fix stage — left in place
+  here because lua is contended by another workflow.
 - **plenary wart**: `PlenaryBustedFile` does not forward `minimal_init` to
   its child nvim (child loads the user's real config!). Run specs
   in-process via `-c "lua require('plenary.busted').run(<abs>)"` or
@@ -552,7 +585,8 @@ skeleton signature changed incompatibly.
   extra_map=None)`.
 - **index** — `NoteRecord.parse_error` and `NoteRecord.extra` (documented
   extensions of the 03 §7 shape; both trailing and defaulted).
-- **suggest** — `CaptureFeaturesView.modalities`.
+- **suggest** — `CaptureFeaturesView.modalities`; `ARCHIVE_SUGGESTION_TYPE`
+  (defined here, beside the rest of the archive entry).
 - **learn** — `CaptureLike` protocol (widened parameter annotations only).
 - **actions** — `ActionContext.dry_run`; `include_dry_run=` on `query`,
   `stats` and `export`; `ActionSchemaError`; `OPERATIONS` / `EDIT_MODES` /
@@ -560,14 +594,17 @@ skeleton signature changed incompatibly.
 - **fileops** — `OperationContext.clock`; `LoggedOperation.backup` and
   `.dry_run`; `update_frontmatter(..., replace_keys=)`.
   (`DRY_RUN_FILTER_KEY` was removed — superseded by `ActionContext.dry_run`.)
-- **routes** — `RouteMatch.para_type`, `ROUTE_SUGGESTION_SCORE`,
-  `ARCHIVE_SUGGESTION_TYPE`.
+- **routes** — `RouteMatch.para_type`, `ROUTE_SUGGESTION_SCORE`.
+  (`ARCHIVE_SUGGESTION_TYPE` moved to `suggest` — routes imports and
+  re-exports it, so `from organize_core.routes import ...` still resolves.)
 - **session** — `default_filters()`, `TERMINAL_OUTCOMES`.
 - **server** — `MUTATING_METHODS`, `INDEX_CHANGING_METHODS`,
   `EVENT_INDEX_UPDATED` / `EVENT_OP_PROGRESS` / `EVENT_TYPES` /
   `EVENT_METHOD`, `NOT_IMPLEMENTED = -32001`, `RpcException`,
   `encode_event()`, `handshake_line()`, `OrganizeServer.emit()` / `ready` /
-  `connection_count` / `stopping`.
+  `connection_count` / `stopping`, `empty_array_as_object()` (the one
+  empty-array→`{}` coercion every object-typed request field routes
+  through).
 
 ## Cross-module tests and measured performance (Phase 1 close)
 
