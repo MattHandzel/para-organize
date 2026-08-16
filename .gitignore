@@ -1,3 +1,9 @@
 
 # Ignore the test vault with real notes
 tests/test_vault/
+
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info
