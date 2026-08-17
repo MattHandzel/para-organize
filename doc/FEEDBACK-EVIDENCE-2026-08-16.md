@@ -130,6 +130,27 @@ capture:  foldenable=false foldmethod=manual foldclosed(1)=-1
   interactive sessions load it on `User VeryLazy`, so this bites only headless
   probes — but a stranger's install instructions must say so.
 
+## 4b. The 15 §3 rendering model is empirically proven (not just argued)
+
+Spec 15 draws the field card as `virt_lines` above line 1 and collapses the raw
+frontmatter with a manual fold — in a buffer the user edits and `:w`s. That is a
+strong claim about a real vault file, so it was tested headlessly before any
+builder committed to it (Neovim 0.11.6, a fixture note, no plugin loaded):
+
+| Probe | Result |
+|---|---|
+| `1,9fold` on the frontmatter block | `foldclosed(1) = 1`, `foldclosedend(1) = 9` — collapsed |
+| custom `foldtext` | renders `▸ frontmatter (7 fields) — zi cycles, zo opens` |
+| buffer line count / `modified` | 11 lines, `modified = false` — fold + extmarks dirty nothing |
+| `virt_lines` with `virt_lines_above` | card renders above line 1, is not buffer text |
+| after `:w` | fold still closed, extmark still present — **both survive a write** |
+| file bytes after `:w` | only the edited body line changed; **no card or foldtext text leaked into the file** |
+| after `:e!` reload | `foldclosed(1) = -1` — **manual folds and extmarks are destroyed by a reload** |
+
+The last row is the one implementers get wrong. Spec 15 §3 already requires the
+`BufReadPost` re-apply that covers it; this table is the proof that the
+requirement is load-bearing rather than defensive.
+
 ## 5. Keymap surface as it stands (generated from the live table)
 
 25 bindings today: `<CR>` accept, `<Esc>` cancel, `<Tab>`/`<S-Tab>` next/prev
