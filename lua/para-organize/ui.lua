@@ -346,6 +346,7 @@ function M.mount(state, opts)
   handles.organize_buf = organize_buf
   handles.owned_bufs = owned_bufs
   handles.map = {}
+  handles.bound = opts.bind ~= false
   apply_win_options(handles, cfg)
   M._ui = handles
 
@@ -608,6 +609,23 @@ function M.refresh(state)
   -- `BufWriteCmd` below, which commits through the CORE (thin-client law:
   -- the client still never writes the vault itself).
   vim.bo[ui.organize_buf].buftype = writable and "acwrite" or "nofile"
+
+  -- Entering or leaving an editable view RE-BINDS the pane: while the user is
+  -- editing, the single-letter action keymaps must not shadow their own
+  -- editing commands (`s` substitute, `a` append, `p` paste, `r` replace, `/`
+  -- search — and `<Esc>` closing the whole session mid-merge). Only on the
+  -- transition; rebinding on every refresh would churn maps under the cursor.
+  if ui._organize_editable ~= writable then
+    ui._organize_editable = writable
+    -- `mount(state, { bind = false })` means "do not touch keymaps" — the
+    -- contract the whole render suite relies on — so a view transition may
+    -- not quietly bind them either.
+    local ok_actions, actions = pcall(require, "para-organize.actions")
+    if ui.bound and ok_actions and type(actions.attach) == "function" then
+      pcall(actions.attach, M.current_bufs(), { editable = writable })
+    end
+  end
+
   apply_marks(ui.organize_buf, rendered.marks, rendered.lines)
   vim.api.nvim_buf_clear_namespace(ui.organize_buf, NS_CAPTURE, 0, -1)
   if view == "merge" then

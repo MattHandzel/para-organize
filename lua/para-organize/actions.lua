@@ -766,6 +766,21 @@ end
 
 M.move_to = M.move
 
+--- Is this suggestion row the archive destination?
+---
+--- The core reports the PARA type both singular and plural depending on the
+--- surface (`render.TYPE_ALIASES` exists for exactly that), so both spellings
+--- are accepted rather than one being guessed at.
+---@param suggestion table|nil
+---@return boolean
+function M.is_archive_suggestion(suggestion)
+  if type(suggestion) ~= "table" then
+    return false
+  end
+  local kind = tostring(suggestion.type or ""):lower()
+  return kind == "archive" or kind == "archives"
+end
+
 function M.archive()
   local record = M.current_capture()
   if not record then
@@ -876,6 +891,16 @@ function M.accept()
     local suggestion = (s.suggestions or {})[s.selected or 1]
     if not suggestion then
       warn("no suggestion selected")
+      return
+    end
+    -- `<CR>` on the archive row IS `a`. Moving a capture INTO the archive
+    -- root and archiving it are different operations — archiving files it
+    -- under `archive_capture_path` with the archive layout, records the
+    -- spec 12 §2 negative label, and is what the row means to the person
+    -- pressing it. Anything else makes the same visible choice behave two
+    -- ways depending on which key expressed it.
+    if M.is_archive_suggestion(suggestion) then
+      M.archive()
       return
     end
     M.move(suggestion.path)
@@ -1938,10 +1963,29 @@ function M.detect_collisions()
   return conflicts
 end
 
+--- The only rows that stay bound while the organize pane holds EDITABLE text
+--- (the merge editor, the review gate's edit mode).
+---
+--- Everything else shadows a normal-mode editing command in a buffer the user
+--- is being asked to edit: `s` substitute, `a` append, `p` paste, `r` replace,
+--- `S` change-line, `/` search, `?` search-backwards — and `<Esc>` closed the
+--- whole session mid-edit. Both survivors are `<leader>`-prefixed sequences,
+--- which shadow nothing, and `:w` (routed through `BufWriteCmd`) is the third
+--- way out.
+M.EDITABLE_KEEP = { merge_complete = true, merge_cancel = true }
+
 --- Bind the buffer-local keymaps for one pane.
-function M.bind(bufnr, pane)
+---@param opts table|nil { editable = boolean } — the organize pane is holding
+---       editable text, so the action keymaps step aside (see EDITABLE_KEEP).
+function M.bind(bufnr, pane, opts)
   if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
     return false
+  end
+  local editable = type(opts) == "table" and opts.editable == true
+  -- Rebinding must be able to REMOVE what a previous view bound, or entering
+  -- the merge editor would keep every shadowing map from the suggestions view.
+  for _, entry in ipairs(M.keymap_table()) do
+    pcall(vim.keymap.del, "n", entry.lhs, { buffer = bufnr })
   end
   local mode = ((cfg() or {}).ui or {}).capture_pane_keymaps or "core"
   for _, entry in ipairs(M.keymap_table()) do
@@ -1954,6 +1998,9 @@ function M.bind(bufnr, pane)
       elseif mode == "navigation" then
         wanted = entry.navigation == true
       end
+    end
+    if wanted and editable then
+      wanted = M.EDITABLE_KEEP[entry.name] == true
     end
     if wanted then
       pcall(vim.keymap.set, "n", entry.lhs, entry.fn, {
@@ -1971,10 +2018,13 @@ function M.bind(bufnr, pane)
 end
 
 --- Bind both panes (called by `ui.mount`).
-function M.attach(bufs)
+---@param bufs table|nil
+---@param opts table|nil { editable = boolean } — applies to the ORGANIZE pane
+---       only; the capture pane is always the real note and keeps its rules.
+function M.attach(bufs, opts)
   bufs = bufs or ui().current_bufs()
   M.bind(bufs.capture, "capture")
-  M.bind(bufs.organize, "organize")
+  M.bind(bufs.organize, "organize", opts)
 end
 
 --- Re-bind after the metadata field list arrives from the core.

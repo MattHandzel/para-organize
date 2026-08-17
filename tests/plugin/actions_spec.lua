@@ -382,6 +382,28 @@ describe("para-organize.actions", function()
       assert.are.same({ "/vault/capture/one.md" }, state.processed)
       assert.are.equal(2, state.current)
     end)
+
+    -- Reported from the live install: "when i press 'enter' on archive, that
+    -- should be semantically the same as pressing 'a'". Moving a capture INTO
+    -- the archive root and archiving it are different operations.
+    it("<CR> on the archive row archives — it does not move into the archive root", function()
+      state.suggestions = {
+        { path = "/vault/projects/alpha", name = "alpha", type = "projects", score = 2.4 },
+        { path = "/vault/archive", name = "archive", type = "archives", score = 0.1 },
+      }
+      state.selected = 2
+      actions.accept()
+
+      assert.are.equal("/vault/capture/one.md", client:first("op.archive").params.path)
+      assert.is_nil(client:first("op.move"))
+    end)
+
+    it("recognises both spellings the core uses for the archive type", function()
+      assert.is_true(actions.is_archive_suggestion({ type = "archive" }))
+      assert.is_true(actions.is_archive_suggestion({ type = "archives" }))
+      assert.is_false(actions.is_archive_suggestion({ type = "projects" }))
+      assert.is_false(actions.is_archive_suggestion(nil))
+    end)
   end)
 
   describe("m = merge (spec 03 §5)", function()
@@ -803,6 +825,59 @@ describe("para-organize.actions", function()
       assert.are.equal("a", conflicts[1].lhs)
       assert.are.equal("archive", conflicts[1].first)
       assert.are.equal("meta:importance", conflicts[1].second)
+    end)
+
+    -- Reported from the live install: "when editing the buffer on the right,
+    -- i should be able to go into visual mode and have all my commands that i
+    -- typically have available". They were not: `s`/`a`/`p`/`r`/`S` shadowed
+    -- normal-mode editing commands, `v` was taken by a metadata field, and
+    -- `<Esc>` closed the whole session mid-merge.
+    it("hands the organize pane back to the editor while a merge is open", function()
+      actions.setup({ ui = ui, config = ui.setup({ ui = { close_on_complete = false } }) })
+      state.meta_fields = DEFAULT_RESPONSES["meta.fields"].fields
+      ui.mount(state)
+      local bufs = ui.current_bufs()
+      local function bound_lhs(buf)
+        local out = {}
+        for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+          if map.desc and map.desc:match("^para%-organize: ") then
+            out[map.lhs] = true
+          end
+        end
+        return out
+      end
+
+      -- Before: the suggestions view owns the single letters.
+      local browsing = bound_lhs(bufs.organize)
+      assert.is_true(browsing["s"], "precondition: s is bound while browsing")
+      assert.is_true(browsing["v"], "precondition: v is a metadata field key")
+
+      state.view = "merge"
+      state.merge = { target = "/vault/projects/alpha/target.md", content = "x", previous_view = "suggestions" }
+      ui.refresh(state)
+
+      local editing = bound_lhs(bufs.organize)
+      for _, key in ipairs({ "s", "a", "p", "r", "S", "v", "i", "t", "/", "?", "<Esc>", "<CR>" }) do
+        assert.is_nil(editing[key], ("%s must reach the editor while merging"):format(key))
+      end
+      -- …and the two ways out survive. They are matched by DESCRIPTION, not
+      -- by lhs: `<leader>` is already expanded to `mapleader` in the keymap
+      -- table, so the literal string never appears there.
+      local surviving = {}
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufs.organize, "n")) do
+        if map.desc and map.desc:match("^para%-organize: ") then
+          surviving[map.desc] = true
+        end
+      end
+      assert.is_true(surviving["para-organize: Complete merge / accept proposal"], "merge_complete must stay bound")
+      assert.is_true(surviving["para-organize: Cancel merge / reject proposal"], "merge_cancel must stay bound")
+      assert.are.equal(2, vim.tbl_count(surviving), "ONLY the two exits survive while editing")
+
+      -- Leaving the merge restores the action keys.
+      state.view = "suggestions"
+      state.merge = nil
+      ui.refresh(state)
+      assert.is_true(bound_lhs(bufs.organize)["s"], "s returns when the merge closes")
     end)
 
     it("binds buffer-locally into the real UI buffers on mount", function()
