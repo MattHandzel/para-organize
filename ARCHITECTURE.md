@@ -342,14 +342,14 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
   destination) and is uncapped; capping is `suggest.for_note`'s job. The
   `EXTRA_METHODS` set in `tests/test_server_protocol.py` pins the list and
   fails on any further addition — that failure IS the approval step.
-- **`op.skip` approved — the FIRST writing addition beyond spec 10 §2.** (It
-  was the only one until `op.undo` was granted; see "Shared-file grants for
-  the docs 14-18 build" §1 at the end of this file.) Spec
-  03 §2/§6 makes skip a first-class session decision and doc 12 §2 already
-  lists `skip` in the ActionRecord operation enum, but spec 10 §2 named no
-  method for it, so the decision was unrecordable from a thin client: every
-  press of `s` silently discarded the counterfactual that `actions stats`
-  measures acceptance rate AGAINST.
+- **`op.skip` approved — the FIRST writing addition beyond spec 10 §2.** (Two
+  more followed: `op.integrate_commit` with the Phase-5 pair, and `op.undo`;
+  see "Shared-file grants for the docs 14-18 build" §1 at the end of this
+  file.) Spec 03 §2/§6 makes skip a first-class session decision and doc 12
+  §2 already lists `skip` in the ActionRecord operation enum, but spec 10 §2
+  named no method for it, so the decision was unrecordable from a thin
+  client: every press of `s` silently discarded the counterfactual that
+  `actions stats` measures acceptance rate AGAINST.
 
   Contract: `op.skip {note, session_id REQUIRED, suggestions_shown?,
   durations_ms?}` → `{ok: true, outcome: "skipped"}`. The param is `note`,
@@ -2151,13 +2151,13 @@ precisely because `undo_info` stops at "enough detail to reverse it by hand"
 (05 §8) that a client offered no method would have to do the reversing
 itself, out of the vault, which is the exact prohibition.
 
-`op.undo` is the SECOND writing addition beyond spec 10 §2 (after
-`op.skip`), granted on the same footing and for the same reason: the
-decision is recordable only through a method, and an undo the UI cannot
-reach is an undo Matt does not have at the moment he needs it. Doc 05 §8's
-"no automated undo" sentence is superseded by doc 17, which is why this is a
-grant rather than a contradiction. `dest.recent` and `history.list` are
-read-only.
+`op.undo` is the THIRD writing addition beyond spec 10 §2 (after `op.skip`
+and `op.integrate_commit`), granted on the same footing and for the same
+reason: the decision is recordable only through a method, and an undo the
+UI cannot reach is an undo Matt does not have at the moment he needs it.
+Doc 05 §8's "no automated undo" sentence is superseded by doc 17, which is
+why this is a grant rather than a contradiction. `dest.recent` and
+`history.list` are read-only.
 
 `tests/test_server_protocol.py` is edited ONCE, by **doc 17's seat**, adding
 all three names in a single patch — doc 16 does not touch the file. The set
