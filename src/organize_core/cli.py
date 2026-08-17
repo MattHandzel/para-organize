@@ -67,7 +67,7 @@ import threading
 import time
 import traceback
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +75,7 @@ from organize_core import __version__
 from organize_core import learn as learn_mod
 from organize_core import routes as routes_mod
 from organize_core.actions import (
+    VERDICTS,
     ActionRecord,
     ActionRecorder,
     ActionSchemaError,
@@ -138,6 +139,7 @@ SUBCOMMANDS: tuple[str, ...] = (
     "meta-fields",
     "session",
     "routes",
+    "integrate",
     "record",
     "actions",
     "auto-organize",
@@ -275,6 +277,62 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("path")
     rp.add_argument("text", nargs="?", help="new description (writing arrives in Phase 4)")
 
+    # `organize integrate` — doc 12 §1's Claude-edit path, exactly the shape
+    # the ARCHITECTURE Phase-5 wire contract names: PROPOSES by default
+    # (prints the diff + rationale, writes nothing), `--apply` one-shot ONLY
+    # when the review setting is "auto", scripted two-step via
+    # `--commit-from FILE --verdict … [--final-diff FILE]`.
+    p = sub.add_parser(
+        "integrate",
+        help="weave a capture into an existing note with Claude (spec 12 §1)",
+    )
+    # Both positionals are optional at the PARSER level and required by the
+    # HANDLER, because `--commit-from` carries its own capture and target
+    # inside the proposal: making them mandatory here would force a caller to
+    # repeat — and be able to CONTRADICT — what the proposal already says.
+    p.add_argument("note", nargs="?", help="the capture to integrate")
+    p.add_argument(
+        "target",
+        nargs="?",
+        help="the note to weave it into; omitted with --commit-from, which carries "
+        "its own capture and target",
+    )
+    p.add_argument(
+        "--route",
+        metavar="NAME",
+        help="attribute this integration to a configured route: its description goes "
+        "into the prompt, its `review` setting decides whether --apply is allowed, "
+        "and its name lands in the ActionRecord (spec 11 §1, 12 §2)",
+    )
+    p.add_argument(
+        "--apply",
+        action="store_true",
+        help='propose AND commit in one shot. Refused unless the review gate is '
+        '"auto" — the default gate exists so a human sees the diff first (12 §1)',
+    )
+    p.add_argument(
+        "--commit-from",
+        metavar="FILE",
+        help="commit a proposal previously written by this command's --json output "
+        "(- for stdin). The proposal is STATELESS: the core holds nothing between "
+        "propose and commit, so this is the whole object, unmodified",
+    )
+    p.add_argument(
+        "--verdict",
+        choices=sorted(VERDICTS),
+        help="required with --commit-from. 'rejected' writes no vault byte but DOES "
+        "record — a rejection is as much signal as an acceptance (12 §2)",
+    )
+    p.add_argument(
+        "--final-diff",
+        metavar="FILE",
+        help="required with --verdict edited (- for stdin): the diff actually applied "
+        "after your hand-edit. Recording proposed-vs-final is what turns a reviewed "
+        "integration into a labeled edit example (12 §2)",
+    )
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    _add_decision_context_flags(p)
+
     p = sub.add_parser("record", help="append an ActionRecord from JSON on stdin (spec 12 §2)")
     p.add_argument("--actor", default=None, help="override the record's actor field")
 
@@ -293,6 +351,39 @@ def build_parser() -> argparse.ArgumentParser:
         "excluded by default so the doc-13 precedent corpus never learns from "
         "actions that never happened",
     )
+    # spec 13 §3, named surface: "corpus queryable by tag/content similarity
+    # (`actions query --similar-to <text>`)". The retrieval half of 13 §2's
+    # precedent step — "when Matt captures something like X, he appends it to
+    # Y and rewords it like Z".
+    qp = asub.add_parser(
+        "query", help="past actions most similar to some text (spec 13 §3)"
+    )
+    qp.add_argument(
+        "--similar-to",
+        metavar="TEXT",
+        required=True,
+        help="capture text (or - to read it from stdin) to find precedents for",
+    )
+    qp.add_argument(
+        "--tags",
+        metavar="A,B",
+        help="the capture's tags. Tags are the STRONGEST similarity signal (doc 04 "
+        "§2), so supplying them changes the ranking materially; omitted means "
+        "'no tag information', which is different from an empty list",
+    )
+    qp.add_argument("--limit", type=int, default=10, metavar="N")
+    qp.add_argument("--operation")
+    qp.add_argument("--actor")
+    qp.add_argument("--since", metavar="YYYY-MM-DD")
+    qp.add_argument("--until", metavar="YYYY-MM-DD")
+    qp.add_argument(
+        "--include-dry-run",
+        action="store_true",
+        help="rank simulated (--dry-run) actions too; excluded by default because a "
+        "rehearsal is not a precedent",
+    )
+    qp.add_argument("--json", action="store_true", help="machine-readable output")
+
     sp = asub.add_parser("stats", help="accept-rates, per-route volumes (spec 12 §2)")
     sp.add_argument("--json", action="store_true", help="machine-readable output")
     sp.add_argument(
@@ -1180,27 +1271,48 @@ def cmd_routes(args: argparse.Namespace) -> int:
         matches = routes_mod.resolve(list(record.tags), config)
         if args.json:
             _json_out(
-                [
-                    {
-                        "route": match.route_name,
-                        "destination": str(match.destination),
-                        "relative_destination": _rel(match.destination, config),
-                        "mode": match.route.mode,
-                        "is_folder": match.is_folder,
-                        "auto": match.route.auto,
-                        "description": match.route.description,
-                    }
-                    for match in matches
-                ]
+                {
+                    # The doc 12 §1 mode that applies when NO route matched
+                    # ("global default `manual`"). The UI's per-invocation mode
+                    # picker pre-selects from this and from each match's
+                    # `review`; without them on the wire a thin client would
+                    # have to re-derive config policy it is not allowed to read
+                    # (spec 10 §1).
+                    "default_mode": routes_mod.effective_mode(None, config),
+                    "matches": [
+                        {
+                            "route": match.route_name,
+                            "destination": str(match.destination),
+                            "relative_destination": _rel(match.destination, config),
+                            "mode": routes_mod.effective_mode(match, config),
+                            "review": (
+                                routes_mod.effective_review(match, config)
+                                if match.route.mode == "integrate"
+                                else None
+                            ),
+                            "is_folder": match.is_folder,
+                            "auto": match.route.auto,
+                            "description": match.route.description,
+                        }
+                        for match in matches
+                    ],
+                }
             )
             return 0
         if not matches:
             _emit(f"no routes match {_rel(record.path, config)} (tags: {','.join(record.tags) or 'none'})")
+            _emit(f"default edit mode: {routes_mod.effective_mode(None, config)}")
             return 0
         for match in matches:
+            mode = routes_mod.effective_mode(match, config)
+            gate = (
+                f"\treview={routes_mod.effective_review(match, config)}"
+                if match.route.mode == "integrate"
+                else ""
+            )
             _emit(
-                f"{match.route_name}\t{_rel(match.destination, config)}\t{match.route.mode}\t"
-                f"{'folder' if match.is_folder else 'file'}"
+                f"{match.route_name}\t{_rel(match.destination, config)}\t{mode}\t"
+                f"{'folder' if match.is_folder else 'file'}{gate}"
             )
         return 0
 
@@ -1254,6 +1366,185 @@ def _ndjson(raw: str, whole_buffer_error: ValueError) -> list[Any]:
             hint="expected one ActionRecord object, a JSON array, or newline-delimited objects",
         )
     return items
+
+
+def _read_text_arg(raw: str, *, what: str) -> str:
+    """A CLI argument that is either a path or ``-`` for stdin."""
+    if raw == "-":
+        return sys.stdin.read()
+    path = expand(raw)
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise ConfigError(f"could not read {what} from {path}: {exc}") from exc
+
+
+def _emit_capture_still_there(capture: Path, config: Config) -> None:
+    """Say out loud that a committed integration did NOT archive the capture.
+
+    A standalone `integrate` deliberately leaves the capture in place, unlike
+    `move`/`merge` (05 §2/§4) and unlike a ROUTE, where `routes.apply_all`
+    archives once after every destination succeeds (11 §1). The reason is doc
+    12's own premise — "I may be adding them to multiple files" — plus the
+    STATELESS commit: this call cannot know whether another integration of the
+    same capture is coming, and archiving after the first would break the
+    second.
+
+    But silence here reads as "filed", which is the 09 §1.5 silently-wrong-
+    answer class from the other direction: the capture would sit in the
+    backlog forever with nothing saying why. So the command names the file and
+    the one command that finishes the job.
+    """
+    if not capture.is_file():
+        return
+    _emit(f"  capture left at {_rel(capture, config)} (integrate weaves one capture into")
+    _emit("    as many notes as you like; `organize archive <note>` when you are done)")
+
+
+def _integrate_proposal_json(proposal: Any, config: Config) -> dict[str, Any]:
+    payload = proposal.to_json()
+    payload["relative_target"] = _rel(proposal.target_path, config)
+    payload["relative_capture"] = _rel(proposal.capture_path, config)
+    return payload
+
+
+def cmd_integrate(args: argparse.Namespace) -> int:
+    """``organize integrate`` — doc 12 §1's Claude-edit path (ARCHITECTURE
+    "Phase-5 integrate wire contract").
+
+    THREE FORMS, and the split is the safety design rather than ergonomics:
+
+    * ``organize integrate <note> <target>`` PROPOSES. It calls the model,
+      runs every structural guard, prints the diff and the rationale, and
+      writes NOTHING. This is the default because 12 §1's default review gate
+      is ``"diff"``: a human sees the change before it lands.
+    * ``--apply`` proposes and commits in one shot, and is REFUSED unless the
+      effective review gate is ``"auto"``. Silently honoring it would delete
+      the gate for anyone who typed a convenient flag.
+    * ``--commit-from FILE --verdict …`` commits a proposal from a previous
+      run. The proposal is STATELESS — the core holds nothing between the two
+      calls, because review time is exactly when an idle core exits — so the
+      whole object comes back and NOTHING in it is trusted for safety:
+      :func:`integrate.apply` re-reads the target, re-checks the snapshot and
+      re-runs every guard.
+
+    ``--verdict rejected`` writes no vault byte but still RECORDS. That is not
+    an oversight to tidy away: "a rejection is as much signal as an
+    acceptance" (12 §2), and the rejected proposals are the labeled negative
+    examples doc 13 needs.
+    """
+    from organize_core import integrate as integrate_mod
+
+    paths, config = _load(args)
+    index = _open_index(paths, config)
+
+    if args.commit_from:
+        if not args.verdict:
+            raise ConfigError(
+                "--commit-from needs --verdict accepted|edited|rejected",
+                hint="the verdict IS the training label (spec 12 §2); there is no "
+                "default, because guessing it would forge Matt's decision",
+            )
+        raw = _read_text_arg(args.commit_from, what="the proposal")
+        try:
+            payload = json.loads(raw)
+        except ValueError as exc:
+            raise ConfigError(f"--commit-from is not valid JSON: {exc}") from exc
+        proposal = integrate_mod.IntegrationProposal.from_json(payload)
+        final_diff = (
+            _read_text_arg(args.final_diff, what="the final diff") if args.final_diff else None
+        )
+        ctx = _op_context(args, paths, config, index, actor=integrate_mod.ACTOR)
+        result = integrate_mod.apply(
+            ctx, Path(proposal.target_path), proposal, args.verdict, final_diff
+        )
+        if args.json:
+            _json_out({**asdict(result), "relative_target": _rel(result.destination, config)})
+        else:
+            _print_result(result, config)
+            _emit(f"  verdict: {result.details.get('verdict')}")
+            if not result.details.get("written"):
+                _emit("  nothing was written to the target")
+            else:
+                _emit_capture_still_there(Path(proposal.capture_path), config)
+        if result.ok and not ctx.dry_run and args.verdict != "rejected":
+            index.flush()
+        return 0
+
+    if args.note is None or args.target is None:
+        raise ConfigError(
+            "organize integrate needs a capture and a target note",
+            hint="usage: organize integrate <note> <target> [--route NAME]; both are "
+            "optional only with --commit-from, whose proposal carries them",
+        )
+
+    record = _record_for(index, config, args.note)
+    target = _vault_path(config, args.target)
+    if not target.is_file():
+        raise VaultError(
+            f"integrate target not found: {target}",
+            hint="the target must be an existing note — integrate weaves INTO a file "
+            "(spec 12 §1); use `organize move` for a folder destination",
+        )
+
+    # `--route NAME` is a claim about ATTRIBUTION, not a tag query: it says
+    # "record this as the workout route", which supplies the prompt's
+    # description, the review gate and the record's route label. The TARGET
+    # still comes from the command line, so naming a route whose destination
+    # is a different file never silently redirects the write.
+    match = routes_mod.named(config, args.route) if args.route else None
+    review = routes_mod.effective_review(match, config) if match else str(config.integrate.review)
+    description = (match.route.description or "").strip() or None if match else None
+
+    ctx = _op_context(args, paths, config, index, actor=integrate_mod.ACTOR)
+    capture_doc = integrate_mod.read_document(Path(record.path))
+    target_doc = integrate_mod.read_document(target)
+    proposal = integrate_mod.propose(
+        capture_doc,
+        target_doc,
+        config,
+        integrate_mod.integrate_client(config),
+        route=match.route_name if match else None,
+        description=description,
+        ctx=ctx,
+    )
+
+    if not args.apply:
+        if args.json:
+            _json_out(_integrate_proposal_json(proposal, config))
+        else:
+            _emit(f"proposal {proposal.proposal_id} for {_rel(target, config)}")
+            _emit(f"  backend: {proposal.backend} ({proposal.model})")
+            _emit(f"  rationale: {proposal.rationale}")
+            _emit("")
+            _emit(proposal.diff.rstrip("\n"))
+            _emit("")
+            _emit("nothing was written. To apply it:")
+            _emit(
+                "  organize integrate --json ... > proposal.json && "
+                "organize integrate --commit-from proposal.json --verdict accepted"
+            )
+        return 0
+
+    if review != "auto":
+        raise ConfigError(
+            f"--apply needs the review gate to be \"auto\", but it is {review!r}",
+            hint="the default gate means a human sees the diff before it lands (spec 12 "
+            "§1). Re-run without --apply to see the proposal, or set review = \"auto\" "
+            "on this route / in [integrate]. Nothing was written.",
+        )
+
+    result = integrate_mod.apply(ctx, target, proposal, "accepted")
+    if args.json:
+        _json_out({**asdict(result), "relative_target": _rel(result.destination, config)})
+    else:
+        _print_result(result, config)
+        _emit("  verdict: accepted (review = \"auto\")")
+        if result.ok:
+            _emit_capture_still_there(Path(record.path), config)
+    if result.ok and not ctx.dry_run:
+        index.flush()
+    return 0
 
 
 def cmd_record(args: argparse.Namespace) -> int:
@@ -1319,10 +1610,13 @@ def cmd_actions(args: argparse.Namespace) -> int:
     for debugging a rehearsal — never for learning from one.
     """
     if args.actions_command is None:
-        _warn("usage: organize actions {export|stats}")
+        _warn("usage: organize actions {export|query|stats}")
         return 2
     paths, config = _load(args)
     recorder = ActionRecorder(paths.actions_dir)
+
+    if args.actions_command == "query":
+        return _actions_query(args, config, recorder)
 
     if args.actions_command == "export":
         out = expand(args.out) if args.out else None
@@ -1344,6 +1638,86 @@ def cmd_actions(args: argparse.Namespace) -> int:
         return 0
     for key, value in stats.items():
         _emit(f"{key}: {json.dumps(value, sort_keys=True) if isinstance(value, dict) else value}")
+    return 0
+
+
+def _actions_query(
+    args: argparse.Namespace, config: Config, recorder: ActionRecorder
+) -> int:
+    """``organize actions query --similar-to <text>`` (spec 13 §3).
+
+    TWO THINGS THE COMPOSITION ROOT MUST SUPPLY, because the engine cannot:
+
+    1. ``tag_normalization``. ``actions`` takes no ``Config`` by design (it is
+       imported by ``fileops`` on every mutating operation, so a config
+       dependency would drag ``config``/``paths`` into the write path). Without
+       this, a vault mapping like ``project -> projects`` never reaches
+       retrieval and a precedent tagged ``project/x`` is invisible to a query
+       for ``projects``.
+    2. The ``--tags`` split. ``None`` (flag absent) and ``[]`` (``--tags ""``)
+       are DIFFERENT and both meaningful: absent means "I have no tag
+       information", so the tag component falls back to the query text's
+       tokens; empty means "this capture genuinely has no tags".
+    """
+    text = args.similar_to
+    if text == "-":
+        text = sys.stdin.read()
+    tags = _split_list(args.tags) if args.tags is not None else None
+
+    results = recorder.query_similar(
+        text,
+        tags=tags,
+        limit=args.limit,
+        include_dry_run=args.include_dry_run,
+        operation=args.operation,
+        actor=args.actor,
+        since=args.since,
+        until=args.until,
+        tag_normalization=config.suggestions.tag_normalization,
+    )
+
+    if args.json:
+        # Mirrors `suggest --json`'s {path, score, rank, reasons} plus the
+        # components, so an agent that already consumes suggestions can read
+        # precedents with the same code path.
+        _json_out(
+            {
+                "query": text,
+                "tags": tags,
+                "results": [
+                    {
+                        "rank": rank,
+                        "id": item.record.id,
+                        "ts": item.record.ts,
+                        "actor": item.record.actor,
+                        "operation": item.record.operation,
+                        "edit_mode": item.record.edit_mode,
+                        "capture": item.record.capture.path,
+                        "targets": [t.path for t in item.record.targets],
+                        "matched_targets": list(item.matched_targets),
+                        "score": item.score,
+                        "text_score": item.text_score,
+                        "tag_score": item.tag_score,
+                        "destination_score": item.destination_score,
+                        "reasons": list(item.reasons),
+                    }
+                    for rank, item in enumerate(results, start=1)
+                ],
+            }
+        )
+        return 0
+
+    if not results:
+        # An honest empty answer, not silence: 09 §1.5's silently-wrong-answer
+        # rule cuts both ways, and "no precedents" is a real, useful finding.
+        _emit("no similar actions in the corpus")
+        return 0
+    for rank, item in enumerate(results, start=1):
+        where = ", ".join(_rel(path, config) for path in item.matched_targets) or "-"
+        _emit(f"{rank}\t{item.score:.2f}\t{item.record.operation}\t{where}")
+        _emit(f"  {item.record.ts}  {item.record.actor}  {_rel(item.record.capture.path, config)}")
+        for reason in item.reasons:
+            _emit(f"  - {reason}")
     return 0
 
 
@@ -2042,6 +2416,7 @@ _HANDLERS = {
     "meta-fields": cmd_meta_fields,
     "session": cmd_session,
     "routes": cmd_routes,
+    "integrate": cmd_integrate,
     "record": cmd_record,
     "actions": cmd_actions,
     "auto-organize": cmd_auto_organize,

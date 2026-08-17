@@ -26,9 +26,16 @@ from pathlib import Path
 from typing import Any
 
 from organize_core import frontmatter
+from organize_core.actions import ActionRecorder
 from organize_core.config import Config, ConsumerConfig, LLMConfig, VaultConfig
 from organize_core.consumers.base import NotePayload, RunContext
+from organize_core.fileops import OperationContext, OperationLog
+from organize_core.index import VaultIndex
 from organize_core.llm import LLMClient, LLMResponse, get_client
+from organize_core.paths import CorePaths
+
+#: Sentinel distinguishing "harness default" from an explicit ``None``.
+_UNSET: Any = object()
 
 # --- payload / config builders ---------------------------------------------
 
@@ -63,8 +70,64 @@ def consumer_config(name: str, ctype: str, **options: Any) -> ConsumerConfig:
     return ConsumerConfig(name=name, type=ctype, options=dict(options))
 
 
-def run_context(vault: Path, llm: LLMClient | None = None, *, dry_run: bool = False) -> RunContext:
-    return RunContext(config=make_config(vault), dry_run=dry_run, llm=llm)
+def core_paths_for(vault: Path) -> CorePaths:
+    """Isolated ``CorePaths`` beside the fixture vault (never the real env).
+
+    ``fixture_vault`` is ``tmp_path / "vault"``, so its parent is the test's
+    own tmp dir; the names are distinct from the shared ``core_paths``
+    fixture so a suite using both gets two independent state trees.
+    """
+    root = vault.parent
+    return CorePaths(
+        config_dir=root / "learn-config",
+        state_dir=root / "learn-state",
+        runtime_dir=root / "learn-runtime",
+    )
+
+
+def op_context_for(vault: Path, *, dry_run: bool = False) -> OperationContext:
+    """The ONE recorded write path, as a composition root builds it.
+
+    Needed since the Phase-5 landing of ARCHITECTURE's "PHASE-5 CHECKLIST"
+    item (a) — "learn consumer's SOURCE-note write-back (processing_status:
+    learn-processed) is a meta_edit in the doc-12 enum and must migrate to
+    update_frontmatter + op_context". The consumer refuses to write without
+    one, so the default harness supplies it.
+
+    ``actor`` is the LITERAL the runner produces
+    (``dataclasses.replace(op_context, actor=f"consumer:{entry.type}")``),
+    spelled out rather than imported so a flipped constant cannot make the
+    suite agree with itself.
+    """
+    config = make_config(vault)
+    paths = core_paths_for(vault)
+    paths.ensure_state_dirs()
+    index = VaultIndex(config, paths.index_path)
+    index.load()
+    return OperationContext(
+        config=config,
+        index=index,
+        oplog=OperationLog(paths.operations_log),
+        recorder=ActionRecorder(paths.actions_dir),
+        backup_dir=vault / config.file_ops.backup_dir,
+        dry_run=dry_run,
+        actor="consumer:learn",
+    )
+
+
+def run_context(
+    vault: Path,
+    llm: LLMClient | None = None,
+    *,
+    dry_run: bool = False,
+    op_context: OperationContext | None = _UNSET,  # type: ignore[assignment]
+) -> RunContext:
+    """The ``RunContext`` the runner builds. Pass ``op_context=None``
+    explicitly to pin the no-recorded-write-path refusal."""
+    ctx_op = op_context_for(vault, dry_run=dry_run) if op_context is _UNSET else op_context
+    return RunContext(
+        config=make_config(vault), dry_run=dry_run, llm=llm, op_context=ctx_op
+    )
 
 
 # --- fake LLM client --------------------------------------------------------

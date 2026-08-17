@@ -167,11 +167,32 @@ class Consumer(ABC):
     #: fail-fast (08 §B2/§B14).
     implemented: ClassVar[bool] = True
 
-    def wants_llm(self) -> bool:
+    def wants_llm(self, config: Config | None = None) -> bool:
         """Does this instance need ``RunContext.llm``? Default: whatever
         ``uses_llm`` says. Override when an OPTION (not the type) decides —
         see ``TaskwarriorConsumer.wants_llm``. Must be pure and cheap: the
-        runner calls it once per consumer per run."""
+        runner calls it once per consumer per run.
+
+        ``config`` is the GLOBAL :class:`~organize_core.config.Config`, passed
+        by the runner. It is here because the runner must answer this question
+        one line BEFORE it builds the ``RunContext`` (the answer decides
+        whether that context gets a client at all) and before ``bind(ctx)``
+        runs — so at the moment of asking, neither the context nor
+        ``ConsumerConfig`` (which carries only this consumer's own options) can
+        reach settings that live elsewhere in the file.
+
+        ``tag_router`` is the case that forced it: whether an unattended route
+        will INTEGRATE (doc 12 §1, the one route mode that calls an LLM) is a
+        property of ``config.routes``, not of ``[consumers.tag_router]``.
+        Without this parameter the predicate answered ``False`` for a legal
+        config and the route ran against ``ctx.llm = None`` — the same
+        inert-in-production failure ``taskwarrior.llm_enabled`` had.
+
+        OPTIONAL and defaulted, so this is a pure WIDENING: every existing
+        zero-argument override and call site keeps working, and the runner
+        keeps its try/except fallback to the class flag for an override that
+        never grew the parameter.
+        """
         return bool(type(self).uses_llm)
 
     def bind(self, ctx: RunContext) -> None:

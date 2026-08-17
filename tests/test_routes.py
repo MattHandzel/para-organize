@@ -1,9 +1,12 @@
 """Route resolution, route/scored merging, and NL descriptions (spec 11 §1/§3).
 
-Phase-1 scope: :func:`routes.resolve`, :meth:`RouteMatch.as_suggestion`,
-:func:`routes.merge_route_suggestions`, :func:`routes.get_description`.
-``apply_route``/``apply_all``/``set_description`` are Phase 4 and are only
-asserted to fail loudly.
+Scope: :func:`routes.resolve`, :meth:`RouteMatch.as_suggestion`,
+:func:`routes.merge_route_suggestions`, :func:`routes.get_description`, and
+the two pure policy resolvers :func:`routes.effective_mode` /
+:func:`routes.effective_review`. The APPLY path (``apply_route``,
+``apply_all``, ``set_description``) lives in ``tests/test_routes_apply.py``;
+what is asserted here is only what ``apply_route`` refuses BEFORE touching a
+vault, which needs no vault to assert.
 
 Every assertion is an EXACT value — the old suite's ``> 0`` assertions are
 what let the 08-known-issues defects survive (09 §3 testing bar).
@@ -17,6 +20,8 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -28,6 +33,7 @@ from organize_core.config import (
     VaultConfig,
     validate_config,
 )
+from organize_core.errors import OperationError
 from organize_core.index import NoteRecord
 from organize_core.routes import (
     ARCHIVE_SUGGESTION_TYPE,
@@ -98,6 +104,7 @@ def route(
     mode: str = "append",
     description: str = "",
     auto: bool = False,
+    review: str = "diff",
 ) -> RouteConfig:
     return RouteConfig(
         tags=tags,
@@ -105,6 +112,7 @@ def route(
         mode=mode,  # type: ignore[arg-type]
         description=description,
         auto=auto,
+        review=review,  # type: ignore[arg-type]
     )
 
 
@@ -632,21 +640,66 @@ def test_get_description_touches_no_filesystem() -> None:
 # still deliberately unimplemented keeps its loud refusal below.
 
 
-def test_the_integrate_edit_path_still_refuses_loudly(spec_config: Config) -> None:
-    """Doc 12 §1's integrate half is Phase 5. Resolution and ranking must
-    keep working for an integrate route (it is a real destination Matt can
-    see); only APPLYING one refuses, and it names the phase rather than
-    no-opping."""
+def test_a_gated_integrate_route_still_resolves_and_ranks_but_refuses_to_apply(
+    spec_config: Config,
+) -> None:
+    """Doc 12 §1's integrate half LANDED in Phase 5, but the DEFAULT review
+    gate (``review = "diff"``) still means a one-step apply refuses: a
+    function returning one ``OperationResult`` has nowhere to put a proposal
+    awaiting a human. Resolution and ranking must keep working regardless —
+    refusing to SHOW an integrate route would hide a configured destination
+    from the UI (11 §1).
+
+    The refusal is now an ``OperationError`` naming the review gate, not the
+    old ``NotImplementedError`` naming a phase: the capability exists, this
+    door is simply not the reviewed one, and the message says which door is.
+    """
     config = make_config(route(["impro"], "resources/performing/notes.md", mode="integrate"))
     (match,) = resolve(["impro"], config)
     assert match.as_suggestion().score == ROUTE_SUGGESTION_SCORE
+    assert routes.effective_review(match, config) == "diff"
 
-    with pytest.raises(NotImplementedError) as excinfo:
-        routes.apply_route(None, None, match)  # type: ignore[arg-type]
+    with pytest.raises(OperationError) as excinfo:
+        routes.apply_route(_ctx_with(config), None, match)  # type: ignore[arg-type]
 
     message = str(excinfo.value)
-    assert "integrate" in message
-    assert "Phase 5" in message
+    assert "review" in message
+    assert "impro" in message
+    # It names the reviewed path rather than leaving the operator stuck.
+    assert "integrate_propose" in (excinfo.value.hint or "")
+
+
+def test_an_ungated_integrate_route_gets_past_the_review_check_to_the_client_check(
+    spec_config: Config,
+) -> None:
+    """FIRING CONTROL for the test above: the review gate is what refuses
+    there, not "integrate refuses, full stop". The same route with
+    ``review = "auto"`` passes the gate and stops at the NEXT guard — the
+    missing LLM client — which is a different error with a different hint.
+
+    Without this control the pin above would pass just as happily against an
+    implementation that refused every integrate route unconditionally.
+    """
+    config = make_config(
+        route(["impro"], "resources/performing/notes.md", mode="integrate", review="auto")
+    )
+    (match,) = resolve(["impro"], config)
+    assert routes.effective_review(match, config) == "auto"
+
+    with pytest.raises(OperationError) as excinfo:
+        routes.apply_route(_ctx_with(config), None, match)  # type: ignore[arg-type]
+
+    message = str(excinfo.value)
+    assert "no LLM client" in message
+    assert "review" not in message
+
+
+def _ctx_with(config: Config) -> Any:
+    """The smallest thing ``apply_route``'s integrate branch reads before it
+    refuses: ``ctx.config``. Deliberately not a real OperationContext — both
+    refusals must happen BEFORE anything touches the vault, and a stand-in
+    with nothing else on it proves it."""
+    return SimpleNamespace(config=config)
 
 
 # ---------------------------------------------------------------------------

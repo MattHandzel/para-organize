@@ -29,6 +29,7 @@ import pytest
 
 from conftest import QUIRK_FILES
 from organize_core import API_VERSION
+from organize_core import server as server_mod
 from organize_core.config import Config, RouteConfig, VaultConfig
 from organize_core.fileops import parse_log_line
 from organize_core.paths import CorePaths
@@ -446,10 +447,57 @@ def test_routes_resolve_reports_the_matching_route(
     assert matches[0]["is_folder"] is True
     assert matches[0]["mode"] == "move"
     assert matches[0]["suggestion"]["score"] == 1000.0
+    assert matches[0]["review"] is None, "the review gate steers integrate results only"
 
 
 def test_routes_resolve_returns_empty_for_an_unrouted_note(client: RpcClient) -> None:
     assert client.result("routes.resolve", path=QUIRK_FILES["current_schema"]) == []
+
+
+@pytest.mark.parametrize(
+    ("global_review", "route_review", "expected"),
+    [(None, None, "diff"), ("auto", None, "auto"), ("auto", "diff", "diff"), (None, "auto", "auto")],
+)
+def test_routes_resolve_reports_the_EFFECTIVE_review_gate(
+    fixture_vault: Path,
+    paths: CorePaths,
+    global_review: str | None,
+    route_review: str | None,
+    expected: str,
+) -> None:
+    """Spec 10 §3: CLI and UI can never disagree. `organize routes resolve
+    --json` reports the effective gate, and the nvim client reads
+    `match.review` — but the RPC never sent it, so the client could not tell
+    "Claude asks first" from "Claude writes silently" until a proposal came
+    back carrying it.
+
+    The value is the RESOLVED one, so the client sees the same answer the
+    core will act on — including the case where the route re-states the
+    default under a global `auto`.
+    """
+    from organize_core.config import IntegrateConfig
+
+    route = RouteConfig(
+        tags=["question"],
+        destination="resources/answers/notes.md",
+        mode="integrate",
+        review=route_review,  # type: ignore[arg-type]
+    )
+    config = Config(
+        vault=VaultConfig(root=fixture_vault),
+        routes=[route],
+        integrate=IntegrateConfig(review=global_review or "diff"),  # type: ignore[arg-type]
+    )
+    srv = OrganizeServer(config, paths, idle_timeout_seconds=0)
+    thread = start_server(srv)
+    try:
+        with RpcClient(srv.socket_path) as conn:
+            (match,) = conn.result("routes.resolve", tags=["question"])
+        assert match["mode"] == "integrate"
+        assert match["review"] == expected
+    finally:
+        srv.shutdown()
+        thread.join(timeout=10.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1154,7 +1202,12 @@ def test_op_skip_records_the_decision_and_marks_the_session(
     assert record["context"]["dry_run"] is False
     # The counterfactual is the whole point of recording a skip: these are
     # the suggestions the user saw and declined.
-    assert record["context"]["durations_ms"] == {"decision": 1200}
+    # `decision` is the CLIENT's (only it can time capture-shown → action);
+    # `operation` is the CORE's own write, measured here rather than echoed —
+    # spec 12 §2 names both phases, so a real record must carry both.
+    durations = record["context"]["durations_ms"]
+    assert durations["decision"] == 1200
+    assert "operation" in durations and durations["operation"] >= 0
     assert record["context"]["suggestions_shown"][0]["rank"] == 1
     assert record["context"]["vault_stats"], "core fills vault_stats"
     assert record["capture"]["content_hash"], "core fills the capture state"
@@ -1881,3 +1934,138 @@ def test_a_session_of_five_rpc_actions_yields_five_records_with_correct_ranks(
         "archive",
         "merge",
     ]
+
+
+# ---------------------------------------------------------------------------
+# op.integrate_propose calls a MODEL — it must hold no lock while it does
+# ---------------------------------------------------------------------------
+#
+# Keeping propose off the writer QUEUE was never enough on its own. The
+# dispatcher wrapped every non-mutating method in `self._rwlock.read()`, and a
+# writer waits for `_readers == 0`, so propose parked every other client write
+# for the whole model call anyway — measured at 3.5 s of write latency behind a
+# 4 s model call, and with the shipped `[llm] timeout_seconds = 60.0` a hung
+# backend froze every vault write for a minute. That is exactly the class the
+# ARCHITECTURE ruling cites as its decisive reason.
+#
+# Pinned as a HAPPENS-WHILE, not a duration: no sleeps, no timing slack.
+
+
+class _BlockingLLM:
+    """Stops inside `generate` until released — a model call in flight."""
+
+    def __init__(self, content: str) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self._payload = json.dumps({"content": content, "rationale": "Woven in."})
+
+    def generate(self, prompt: str, **kwargs: Any) -> Any:
+        from organize_core.llm import LLMResponse, extract_json
+
+        self.started.set()
+        assert self.release.wait(timeout=30.0), "the test never released the model call"
+        return LLMResponse(
+            text=self._payload,
+            model="fake-sonnet",
+            backend="claude-cli",
+            duration_ms=7,
+            json=extract_json(self._payload),
+        )
+
+    def available(self) -> bool:
+        return True
+
+
+def _propose_in_flight(
+    server: OrganizeServer, monkeypatch: pytest.MonkeyPatch
+) -> tuple[_BlockingLLM, threading.Thread, list[BaseException]]:
+    """Start `op.integrate_propose` and return once it is inside the model
+    call. The caller must release the LLM and join the thread."""
+    from organize_core import integrate as integrate_mod
+
+    vault = vault_of(server)
+    capture = vault / QUIRK_FILES["context_as_string"]
+    target = vault / QUIRK_FILES["merge_target"]
+    llm = _BlockingLLM(target.read_text(encoding="utf-8") + "\n## From capture\n\nleg day PR\n")
+    monkeypatch.setattr(integrate_mod, "integrate_client", lambda config: llm)
+
+    failures: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            server.dispatch(
+                "op.integrate_propose", {"note": str(capture), "target": str(target)}
+            )
+        except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+            failures.append(exc)
+
+    thread = threading.Thread(target=run, name="propose", daemon=True)
+    thread.start()
+    assert llm.started.wait(timeout=30.0), "the model call never began"
+    return llm, thread, failures
+
+
+def test_a_write_completes_while_a_slow_integrate_propose_is_in_flight(
+    server: OrganizeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    llm, thread, failures = _propose_in_flight(server, monkeypatch)
+    try:
+        writer_done = threading.Event()
+
+        def write() -> None:
+            server.dispatch(
+                "folder.create", {"para_type": "areas", "name": "made-during-propose"}
+            )
+            writer_done.set()
+
+        writer = threading.Thread(target=write, name="writer", daemon=True)
+        writer.start()
+        writer.join(timeout=15.0)
+
+        assert writer_done.is_set(), (
+            "a vault write waited for the model call — propose is holding a lock"
+        )
+        assert (vault_of(server) / "areas/made-during-propose").is_dir()
+        assert llm.release.is_set() is False, "and it finished BEFORE the model returned"
+    finally:
+        llm.release.set()
+        thread.join(timeout=30.0)
+    assert not failures, failures
+
+
+def test_NON_QUEUED_LLM_METHODS_is_what_makes_that_true(
+    server: OrganizeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The constant is LOAD-BEARING, not documentation (08 §A35's dead-key
+    class). Mutating it to the empty set must change behaviour — with propose
+    back on the ordinary read-locked path, the very same write blocks.
+
+    This is the in-suite mutation the literal-equality assertion in
+    tests/test_server_protocol.py cannot make: that one stayed green with the
+    dispatcher never consulting the constant at all.
+    """
+    monkeypatch.setattr(server_mod, "NON_QUEUED_LLM_METHODS", frozenset())
+    llm, thread, failures = _propose_in_flight(server, monkeypatch)
+    try:
+        writer_done = threading.Event()
+
+        def write() -> None:
+            server.dispatch(
+                "folder.create", {"para_type": "areas", "name": "blocked-by-propose"}
+            )
+            writer_done.set()
+
+        writer = threading.Thread(target=write, name="writer", daemon=True)
+        writer.start()
+        writer.join(timeout=2.0)
+
+        assert not writer_done.is_set(), (
+            "the write got through with propose un-exempted — the exemption is "
+            "not what the dispatcher branches on"
+        )
+    finally:
+        llm.release.set()
+        thread.join(timeout=30.0)
+        writer.join(timeout=30.0)
+    assert writer_done.is_set(), "and it completes once the model call returns"
+    assert not failures, failures

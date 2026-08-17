@@ -11,6 +11,15 @@ ROUND-TRIP-SAFE frontmatter writer, honor the guard, and re-runs on edit
 REPLACE the prior review file (deterministic filename from source slug)
 instead of accumulating duplicates (901 files today).
 
+That SOURCE-note write-back is a doc-12 ``meta_edit`` and goes through
+``fileops.update_frontmatter`` + ``RunContext.op_context`` — ARCHITECTURE,
+"Phase-4 rulings, auto_tagger batch" (f24ee2e), PHASE-5 CHECKLIST item (a).
+The consumer's own NEW OUTPUT files (review files, the generation log) keep
+using ``fileops.atomic_write``: the same ruling scopes the migration to the
+source note ("new-output files — flashcards/answers — stay store-audited,
+defensible as-is"), and they are this consumer's product rather than an edit
+to a note Matt wrote.
+
 Decisions this seat made where doc 06 is silent (the old code at
 ``../organize/scripts/automation/consumers/learn.py`` is the behavioral
 reference; its section-B defects are NOT ported):
@@ -74,7 +83,7 @@ from organize_core.consumers.base import (
     Status,
     register,
 )
-from organize_core.errors import ConfigError, LLMError
+from organize_core.errors import ConfigError, ConsumerError, LLMError, OrganizeError
 from organize_core.llm import extract_json
 
 LOG = logging.getLogger(__name__)
@@ -686,6 +695,21 @@ class LearnConsumer(Consumer):
                 "no LLM client available — cards cannot be generated",
             )
 
+        # Checked BEFORE the LLM call, not at the write-back: without the
+        # recorded write path the run cannot finish, and burning a generation
+        # to discover that wastes the expensive half. ERROR (never an
+        # unrecorded write) is the approved translation — ARCHITECTURE
+        # "Phase-4 rulings, auto_tagger batch" (f24ee2e): "a consumer that
+        # would write the vault with op_context=None emits Status.ERROR
+        # rather than performing an unrecorded write […] errors retry, so the
+        # run self-heals once the seam lands".
+        if ctx.op_context is None:
+            return ConsumerResult(
+                Status.ERROR,
+                "no OperationContext on the RunContext — the learn-processed "
+                "write-back would be an UNRECORDED vault write (spec 12 §2)",
+            )
+
         system_prompt, user = self.build_prompts(payload, modality, normalized, ctx)
         try:
             response = ctx.llm.generate(
@@ -732,11 +756,15 @@ class LearnConsumer(Consumer):
             return ConsumerResult(Status.ERROR, f"could not write review file: {exc}")
 
         try:
-            self._mark_processed(payload)
-        except (OSError, frontmatter.FrontmatterError) as exc:
+            self._mark_processed(payload, ctx)
+        except (OSError, OrganizeError) as exc:
             # The cards exist; only the guard write failed. ERROR ⇒ retried,
             # and the retry replaces the same deterministic file, so nothing
-            # duplicates.
+            # duplicates. `OrganizeError` covers the whole taxonomy the
+            # recorded write path raises for an ADDRESSING failure — a
+            # FrontmatterError on an unparseable note, a
+            # ConcurrentModificationError when the note changed under us, a
+            # NoAiRefusal — none of which may escape `handle` (06 §1).
             LOG.error("learn: could not mark %s as learn-processed: %s", path, exc)
             return ConsumerResult(
                 Status.ERROR,
@@ -806,18 +834,55 @@ class LearnConsumer(Consumer):
         match = _LEARNED_RULES_RE.search(text)
         return match.group(1).strip() if match else ""
 
-    def _mark_processed(self, payload: NotePayload) -> None:
-        """Write ``processing_status: learn-processed`` back to the source
-        via the ONE frontmatter module (06 §3.2 / 08 §B8). Every other
-        field — known, unknown, Obsidian-added — round-trips untouched
-        (08 §A12 is the disease this cures)."""
-        doc = frontmatter.load_file(payload.path)
-        if doc.frontmatter is None:
-            doc.frontmatter = frontmatter.Frontmatter(fields={})
-        if doc.frontmatter.fields.get("processing_status") == "learn-processed":
-            return
-        doc.frontmatter.fields["processing_status"] = "learn-processed"
-        fileops.atomic_write(payload.path, frontmatter.serialize(doc))
+    def _mark_processed(self, payload: NotePayload, ctx: RunContext) -> None:
+        """Write ``processing_status: learn-processed`` back to the source as
+        a RECORDED ``meta_edit`` (06 §3.2 / 08 §B8 + spec 12 §2).
+
+        ARCHITECTURE, "Phase-4 rulings, auto_tagger batch" (commit f24ee2e),
+        PHASE-5 CHECKLIST item (a), verbatim: "learn consumer's SOURCE-note
+        write-back (processing_status: learn-processed) is a meta_edit in the
+        doc-12 enum and must migrate to update_frontmatter + op_context
+        (new-output files — flashcards/answers — stay store-audited,
+        defensible as-is)".
+
+        So this goes through :func:`fileops.update_frontmatter` rather than
+        the bare :func:`fileops.atomic_write` it used to use. What that buys,
+        each of which the bare write silently skipped: an ActionRecord with
+        ``operation: "meta_edit"`` and ``actor: "consumer:learn"``, an
+        operations-log line, a backup, the ``check_unmodified`` snapshot guard
+        (a note edited in Obsidian between our read and our write is no longer
+        overwritten), the ``no-ai`` refusal as defence in depth, and the index
+        update. The round-trip guarantee is unchanged — ``update_frontmatter``
+        parses and serializes through the same ONE frontmatter module, so
+        every other field (known, unknown, Obsidian-added) still survives
+        byte-for-byte (08 §A12).
+
+        A merge is not wanted here and none happens: only ``tags`` merges,
+        and ``processing_status`` is a scalar that replaces (05 §5). The
+        already-correct case is handled by ``update_frontmatter`` itself,
+        which writes nothing when the rendered text is unchanged — so the
+        old early return is not lost, it moved into the primitive.
+
+        Raises rather than returning a result: the caller already translates
+        a failed write-back into ``Status.ERROR`` (the cards exist; only the
+        guard write failed, and the retry replaces the same deterministic
+        file so nothing duplicates).
+        """
+        op_context = ctx.op_context
+        if op_context is None:  # pragma: no cover - guarded in `handle`
+            raise ConsumerError(
+                "no OperationContext on the RunContext — the write-back would be "
+                "an UNRECORDED vault write (spec 12 §2)",
+                hint="run_consumers populates RunContext.op_context from the "
+                "composition root; a hand-built context must supply one",
+            )
+        result = fileops.update_frontmatter(
+            op_context, payload.path, {"processing_status": "learn-processed"}
+        )
+        if not result.ok:
+            # WORLD-STATE failure (the error-line rule): already logged and
+            # recorded by fileops; surfaced here so `handle` reports it.
+            raise ConsumerError(result.error or f"could not update {payload.path}")
 
     def _append_generation_log(
         self,

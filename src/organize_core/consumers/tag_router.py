@@ -44,24 +44,31 @@ is provenance metadata, never evidence. The consent gate for the whole
 machine chain (tagger → route) is the per-route ``auto = false`` default,
 and 12 §2's ``auto_tags_present`` records the provenance in every record.
 
-Learning is deliberately NOT wired (``on_record`` left unset — ruling
-4ffef89): a route firing is CONFIG, not a decision Matt made. Folding it
-into ``learning.json`` would make routes self-reinforcing and would pollute
-the doc-12 accept-rate signal with non-decisions. ``learn.record_action``
-does not filter by actor, so this has to be a caller-side choice — and it is
-pinned by a trap test, not left to a comment.
+Learning must not fold a route firing (ruling 4ffef89: "LEARNING FOLDS ONLY
+MATT-DECIDED ACTIONS" — a route firing is CONFIG, not a decision Matt made;
+folding it would make routes self-reinforcing and pollute the doc-12
+accept-rate signal). Until Phase 5 that had to be a CALLER-side choice, so
+this consumer built its own ``OperationContext`` with ``on_record`` unset
+(ARCHITECTURE Phase-4 landing: "Omission ACCEPTED as a Phase-5 rider:
+tag_router keeps its own OperationContext (on_record=None) until the
+learn.record_action actor filter lands"). That filter has landed
+(``learn.is_matt_decided``), so the enforcement is now CALLEE-side and this
+module consumes the shared ``RunContext.op_context`` like every other
+consumer — the conversion the rider called for. Two real bugs go with the
+duplicate context: a second ``VaultIndex`` writing the same snapshot file
+(``cmd_run_consumers``' end-of-run ``index.flush()`` never saw a routed
+move, so the on-disk index still described the pre-run vault), and a second
+``ActionRecorder``.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from pathlib import Path
 from typing import Any
 
 from organize_core import routes as routes_mod
-from organize_core.actions import ActionRecorder
-from organize_core.config import ConsumerConfig
+from organize_core.config import Config, ConsumerConfig
 from organize_core.consumers.base import (
     Consumer,
     ConsumerResult,
@@ -70,12 +77,17 @@ from organize_core.consumers.base import (
     Status,
     register,
 )
-from organize_core.errors import ConfigError, OrganizeError
-from organize_core.fileops import OperationContext, OperationLog
-from organize_core.index import NoteRecord, VaultIndex
+from organize_core.errors import ConfigError, ConsumerError, OrganizeError
+from organize_core.fileops import OperationContext
+from organize_core.index import NoteRecord
 from organize_core.routes import RouteMatch
 
 LOG = logging.getLogger(__name__)
+
+#: The one ``[[routes]]`` mode that calls an LLM (spec 12 §1). ``move`` and
+#: ``append`` are mechanical, which is why :meth:`TagRouterConsumer.wants_llm`
+#: keys on this value and nothing else.
+INTEGRATE_MODE = "integrate"
 
 #: ``OperationContext.actor`` for every operation this consumer drives — the
 #: honest identity of WHO ran it, and a member of doc 12 §2's actor enum.
@@ -138,11 +150,9 @@ class TagRouterConsumer(Consumer):
                 hint="tag_router takes no options — routing is configured "
                 "entirely by [[routes]] entries (spec 11 §1)",
             )
-        # Run-scoped services, populated by bind()/handle(). None between runs.
+        # The run, set by bind(). None between runs; never None inside one
+        # (the runner binds before any should_process — see bind()).
         self._run: RunContext | None = None
-        self._index: VaultIndex | None = None
-        self._op_context: OperationContext | None = None
-        self._warned_unbound = False
 
     # --- run-scoped binding ------------------------------------------------
 
@@ -165,38 +175,69 @@ class TagRouterConsumer(Consumer):
         no LLM. The expensive services (index, operation context) are built
         lazily on the first real apply, not here.
 
-        Failure semantics once wired (ruling 4ffef89, for the integrator): a
-        ``bind()`` that RAISES means the consumer is skipped for the run,
-        counted as an ERROR in the 06 §4 summary, and the run exits 1 — never
-        "continue unbound", because an unbound tag_router silently filters
-        every capture, which is the silent-outage class. Other consumers are
-        unaffected. This implementation cannot raise.
+        Failure semantics (ruling 4ffef89, landed): a ``bind()`` that RAISES
+        means the consumer is skipped for the run, counted as an ERROR in the
+        06 §4 summary, and the run exits 1 — never "continue unbound", because
+        an unbound tag_router silently filters every capture, which is the
+        silent-outage class. Other consumers are unaffected. This
+        implementation cannot raise.
 
-        Until the integrator lands the ``base.Consumer.bind`` +
-        ``runner.run_consumers`` wiring, this is called by :meth:`handle` and
-        by tests. An UNBOUND run is inert by design — see
-        :meth:`should_process`.
+        ``run_consumers`` calls this immediately after building the
+        ``RunContext`` and before any ``should_process``; :meth:`handle` calls
+        it too, so a direct caller gets the same guarantee.
         """
         self._run = ctx
-        # Services are ctx-derived; drop any carried over from a previous run.
-        self._index = None
-        self._op_context = None
 
-    def wants_llm(self) -> bool:
-        """False in Phase 4: move/append are mechanical and build no prompt.
+    def wants_llm(self, config: Config | None = None) -> bool:
+        """True iff some ``auto = true`` route runs in ``integrate`` mode.
 
-        The scaffold comment asked Phase 4 to return True when any configured
-        auto route is ``integrate``. That is not implementable today and the
-        reason is structural, not an oversight: the runner calls
-        ``wants_llm()`` to DECIDE what goes on the ``RunContext``, i.e. one
-        line BEFORE the context exists — so the predicate cannot see
-        ``config.routes`` even once ``bind(ctx)`` is wired, because bind runs
-        after. Phase 5 needs either a config-aware ``wants_llm(config)`` or a
-        two-step context build; recorded here so the integrate path is not
-        wired up against a permanently-``None`` ``ctx.llm`` (the same flaw
-        that made taskwarrior's ``llm_enabled`` inert in production).
+        Doc 12 §1 makes ``integrate`` the one route mode that calls an LLM;
+        ``move`` and ``append`` are mechanical and build no prompt. So this
+        instance needs ``RunContext.llm`` exactly when an unattended route
+        would integrate.
+
+        THE STRUCTURAL BLOCKER, and how it is solved. ``wants_llm()`` drives
+        CLIENT INJECTION (the record correction at 0f9e634: "``wants_llm()``
+        […] drives LLM CLIENT INJECTION only; the class-level ``uses_llm``
+        remains the runner's no-ai DENIAL flag"), and ``runner.run_consumers``
+        calls it one line BEFORE it constructs the ``RunContext`` — so neither
+        ``bind(ctx)`` (which runs after) nor ``ConsumerConfig`` (which carries
+        only this consumer's own options) can hand the predicate
+        ``Config.routes``. The Phase-4 docstring recorded the two ways out:
+        "a config-aware ``wants_llm(config)`` or a two-step context build".
+
+        This is the first: an OPTIONAL ``config`` parameter, which is a pure
+        WIDENING of ``Consumer.wants_llm(self) -> bool``. Every existing
+        zero-argument call site keeps working, and the runner can start
+        passing the global config without a flag day. The change to
+        ``base.py``/``runner.py`` that makes the runner pass it is the
+        integrator's (both are shared files) and is raised as a seam; until it
+        lands, a zero-argument call falls back to the bound run's config when
+        there is one and otherwise answers ``False``.
+
+        The unbound fallback is SAFE rather than merely convenient, and only
+        because the ``no`` answer is currently PROVABLE: ``validate_config``
+        rejects ``auto = true`` with ``mode = "integrate"`` outright
+        (ARCHITECTURE "Phase-4 rulings, tag_router close": "auto=true +
+        mode='integrate' fails AT CONFIG VALIDATION […] check lifts when
+        Phase 5 lands"), so no loadable config can make the honest answer
+        ``True`` while the check stands. It must not be left to a comment:
+        ``test_wants_llm_unbound_fallback_expires_with_the_config_gate`` is a
+        SELF-REMOVING seam probe (the pattern approved at fb62bab) that goes
+        red the moment ``validate_config`` accepts such a route while the
+        runner is still calling this with no argument — an unattended
+        integrate route against ``ctx.llm = None`` is exactly the
+        inert-in-production failure ``taskwarrior.llm_enabled`` had.
         """
-        return False
+        if config is None:
+            run = self._run
+            config = None if run is None else run.config
+        if config is None:
+            return False
+        return any(
+            bool(route.auto) and str(route.mode) == INTEGRATE_MODE
+            for route in (config.routes or ())
+        )
 
     # --- predicate ---------------------------------------------------------
 
@@ -219,21 +260,24 @@ class TagRouterConsumer(Consumer):
             # path this consumer can reach parses frontmatter — routing one
             # of those would be a guaranteed failure, not a filter miss.
             return False
-        config = None if self._run is None else self._run.config
-        if config is None:
-            # Inert rather than wrong. Approved interim (ruling 4ffef89)
-            # until base/runner call bind(): a filter miss writes nothing, so
-            # the moment the hook lands every capture is re-evaluated with no
-            # stale checkpoints to undo.
-            if not self._warned_unbound:
-                self._warned_unbound = True
-                LOG.warning(
-                    "tag_router is unbound (no RunContext) — routing is INERT this "
-                    "run. Wire Consumer.bind(ctx) in runner.run_consumers "
-                    "(ARCHITECTURE ruling 4ffef89); no note is checkpointed "
-                    "meanwhile, so routing resumes with full history once wired."
-                )
-            return False
+        run = self._run
+        if run is None:
+            # The interim "inert when unbound" branch is DELETED: the
+            # ``Consumer.bind`` + ``run_consumers`` wiring landed (ARCHITECTURE
+            # Phase-4 integration landing), and the same landing note asks for
+            # this branch's cleanup. Returning False here would silently drop
+            # every capture — the silent-outage class bind() exists to
+            # prevent — so an unbound predicate is LOUD instead. Unreachable
+            # through the runner, which binds before any should_process and
+            # skips the whole consumer if bind raises (one error, not one per
+            # note: the alert-storm rule from the tag_router-close ruling).
+            raise ConsumerError(
+                "tag_router.should_process was called before bind(): routes live "
+                "on the global Config, which only bind() supplies",
+                hint="call bind(RunContext) first; run_consumers does this "
+                "immediately after building the context",
+            )
+        config = run.config
 
         if payload.no_ai:
             # Law 2. Before the route lookup on purpose: the answer must not
@@ -309,21 +353,28 @@ class TagRouterConsumer(Consumer):
     ) -> ConsumerResult:
         metadata: dict[str, Any] = {"applied": [_match_payload(match) for match in auto]}
 
-        # Checked FIRST so the message names the real problem: without paths
-        # the index cannot be opened either, and "not indexable" would send
-        # the operator to [vault] ignore_patterns for a wiring fault (09 §1.5
-        # — an error must be actionable).
-        if ctx.paths is None:
+        # Checked FIRST so the message names the real problem: without the
+        # recorded write path there is no index to look the capture up in
+        # either, and "not indexable" would send the operator to [vault]
+        # ignore_patterns for a wiring fault (09 §1.5 — an error must be
+        # actionable). ERROR, never an unrecorded write: ARCHITECTURE
+        # "Phase-4 rulings, auto_tagger batch" (f24ee2e) — "a consumer that
+        # would write the vault with op_context=None emits Status.ERROR
+        # rather than performing an unrecorded write […] errors retry, so the
+        # run self-heals once the seam lands".
+        op_context = self._operation_context(ctx)
+        if op_context is None:
             return ConsumerResult(
                 status=Status.ERROR,
                 message=(
-                    "no CorePaths on the RunContext — the operation log, action "
-                    "corpus and backup dir have nowhere to go (spec 10 §3)"
+                    "no OperationContext on the RunContext — the operation log, "
+                    "action corpus and backup dir have nowhere to go, and an "
+                    "unrecorded vault write is never the answer (spec 12 §2)"
                 ),
                 metadata=metadata,
             )
 
-        capture = self._capture_record(ctx, payload)
+        capture = self._capture_record(op_context, payload)
         if capture is None:
             return ConsumerResult(
                 status=Status.ERROR,
@@ -334,14 +385,6 @@ class TagRouterConsumer(Consumer):
                 metadata=metadata,
             )
 
-        op_context = self._operation_context(ctx)
-        if op_context is None:  # pragma: no cover - paths were checked above
-            return ConsumerResult(
-                status=Status.ERROR,
-                message="the operation context could not be built",
-                metadata=metadata,
-            )
-
         # 12 §2 / 11 §2: record which of the capture's tags the MACHINE added,
         # at decision time. This is the training signal for tagger quality —
         # it is how "the route fired on a tag Matt never wrote" is
@@ -349,7 +392,13 @@ class TagRouterConsumer(Consumer):
         op_context = replace(op_context, auto_tags_present=self._auto_tags(payload))
 
         try:
-            results = routes_mod.apply_all(op_context, capture, auto)
+            # `llm` is consumed by `integrate`-mode matches ONLY (doc 12 §1 is
+            # the one route mode that builds a prompt); move/append ignore it.
+            # It is None unless `wants_llm(config)` said True, and routes
+            # refuses an integrate route with no client BEFORE writing
+            # anything — so a wiring fault is a loud pre-flight refusal, never
+            # a half-applied batch.
+            results = routes_mod.apply_all(op_context, capture, auto, llm=ctx.llm)
         except NotImplementedError as exc:
             # Now that apply_all has landed this branch means ONE thing: an
             # `auto` route in `integrate` mode, which routes refuses BEFORE
@@ -448,63 +497,52 @@ class TagRouterConsumer(Consumer):
         values = raw if isinstance(raw, list) else [raw]
         return tuple(str(value) for value in values if str(value).strip())
 
-    def _capture_record(self, ctx: RunContext, payload: NotePayload) -> NoteRecord | None:
+    @staticmethod
+    def _capture_record(op_context: OperationContext, payload: NotePayload) -> NoteRecord | None:
         """The ``NoteRecord`` the doc-05 API requires (08 §A14: never a bare
         string). Indexed on demand — the pipeline walks the vault itself and
-        does not require a warm index."""
-        index = self._vault_index(ctx)
-        if index is None:
-            return None
+        does not require a warm index.
+
+        Read from the COMPOSITION ROOT's index (``op_context.index``), which
+        is the same object ``routes.apply_all`` mutates and the same one
+        ``cmd_run_consumers`` flushes once at end of run. This consumer used
+        to open a second ``VaultIndex`` over the same snapshot file, so a
+        routed move updated an index nobody ever flushed and the on-disk
+        snapshot still described the pre-run vault (ARCHITECTURE, "Phase-4
+        rulings, tag_router close": "ONE end-of-run flush in
+        cmd_run_consumers via op_context's index (composition root owns the
+        index lifecycle once op_context lands)").
+        """
+        index = op_context.index
         record = index.get(payload.path)
         if record is None:
             record = index.update_file(payload.path)
         return record
 
-    def _vault_index(self, ctx: RunContext) -> VaultIndex | None:
-        if self._index is not None:
-            return self._index
-        if ctx.paths is None:
-            return None
-        index = VaultIndex(ctx.config, ctx.paths.index_path)
-        index.load()
-        self._index = index
-        return index
-
     def _operation_context(self, ctx: RunContext) -> OperationContext | None:
-        """The one mutating-path context (structural decision 1), built once
-        per run on first real work.
+        """The ONE recorded write path — supplied by the composition root.
 
-        Built HERE rather than handed down because ``RunContext`` carries no
-        operation context (Phase-3 shape) and ``cmd_run_consumers`` opens no
-        ``VaultIndex``, so there is no second writer to clobber ``index.json``.
-        The integrator has this queued as an ``op_context`` seam; when it
-        lands this method becomes a one-line delegation.
+        A one-line delegation, which is the whole point. It used to CONSTRUCT
+        an ``OperationContext`` here, with its own ``VaultIndex``, its own
+        ``OperationLog`` and its own ``ActionRecorder``, purely so it could
+        leave ``on_record`` unset and stay out of ``learning.json``
+        (ARCHITECTURE Phase-4 landing, "Omission ACCEPTED as a Phase-5
+        rider"). ``learn.is_matt_decided`` now refuses a ``route:*`` /
+        ``consumer:*`` record on the CALLEE side, so the shared context is
+        safe to consume and the duplicate services are gone with it — the
+        second index in particular, whose writes ``cmd_run_consumers``'
+        end-of-run ``index.flush()`` could never see.
 
-        ``on_record`` is deliberately left unset — see the module docstring.
+        ``run_consumers`` hands each consumer
+        ``dataclasses.replace(op_context, actor="consumer:<type>",
+        dry_run=dry_run)``, so :data:`ACTOR` is what arrives here; the
+        composition root supplies ``describe`` (12 §2 ``targets[]
+        .description``), the oplog, the recorder and the backup dir.
+
+        ``suggestions_shown`` / ``chosen_rank`` stay EMPTY: doc 12 §2 stores
+        the counterfactual the DECIDER was shown, and an unattended route
+        firing showed nobody anything. Filling them with the routes
+        themselves would report a rank-1 "accept" for every automated firing
+        and corrupt ``organize actions stats``.
         """
-        if self._op_context is not None:
-            return self._op_context
-        if ctx.paths is None:
-            return None
-        index = self._vault_index(ctx)
-        if index is None:
-            return None
-        config = ctx.config
-        self._op_context = OperationContext(
-            config=config,
-            index=index,
-            oplog=OperationLog(ctx.paths.operations_log),
-            recorder=ActionRecorder(ctx.paths.actions_dir),
-            backup_dir=Path(config.vault.root) / config.file_ops.backup_dir,
-            dry_run=bool(ctx.dry_run),
-            actor=ACTOR,
-            # 12 §2 targets[].description. fileops cannot import routes, so
-            # the composing caller supplies the lookup (11 §3).
-            describe=lambda folder: routes_mod.get_description(folder, index, config),
-            # `suggestions_shown` / `chosen_rank` stay EMPTY on purpose: doc
-            # 12 §2 stores the counterfactual the decider was shown, and an
-            # unattended route firing showed nobody anything. Filling them
-            # with the routes themselves would report a rank-1 "accept" for
-            # every automated firing and corrupt `organize actions stats`.
-        )
-        return self._op_context
+        return ctx.op_context

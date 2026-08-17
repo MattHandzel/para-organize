@@ -1,7 +1,5 @@
-"""Route resolution: tags → destinations with integration modes (spec 11).
-
-Phase-4 fills in the apply path; the resolution/data model ships now so the
-UI, suggest layer, and server can compile against it.
+"""Route resolution and application: tags → destinations with integration
+modes (spec 11, spec 12 §1).
 
 Semantics (spec 11 §1):
 - A route's ``tags`` list is any-of; an entry ``"a+b"`` requires both tags.
@@ -13,6 +11,11 @@ Semantics (spec 11 §1):
   distinctly, above scored suggestions.
 - ``auto=True`` routes are applied unattended by the ``tag_router``
   consumer; non-auto routes only surface in the UI.
+- ``integrate`` routes (doc 12 §1) apply through :func:`apply_route` only
+  when their effective review gate is ``"auto"`` (see
+  :func:`effective_review`); the default gate puts a human between the
+  proposal and the write, which is the two-step
+  ``op.integrate_propose``/``op.integrate_commit`` path instead.
 - ``description`` is Matt's natural language and is load-bearing: UI
   display, auto-tagger input, and doc-13 destination knowledge.
 
@@ -76,16 +79,11 @@ _UNKNOWN_TYPE = "other"
 #: ``"a+b"`` in a route's ``tags`` requires BOTH tags (spec 11 §1).
 _ALL_OF_SEPARATOR = "+"
 
-#: ``integrate`` is doc 12 §1's Claude-edit path (LLM proposal → deletion
-#: guard → review gate → atomic apply). Phase 4 ships tag ROUTING; the
-#: integrate EDITING half is Phase 5. Resolution and planning still show
-#: integrate routes — only :func:`apply_route` refuses, and it says so.
-_PHASE_5_HINT = (
-    "'integrate' is the doc-12 §1 Claude-edit path (LLM proposal, deletion guard, "
-    "review gate) and lands in Phase 5. Route resolution and the suggestion list "
-    "already SHOW integrate routes; 'move' and 'append' routes apply today. "
-    "Use mode = \"append\" for a mechanical append until Phase 5 ships."
-)
+#: The two spec 12 §1 review gates, as LITERALS. ``"diff"`` puts a human
+#: between the LLM's proposal and the write; ``"auto"`` is the per-route
+#: opt-in that applies without asking. See :func:`effective_review`.
+_REVIEW_DIFF = "diff"
+_REVIEW_AUTO = "auto"
 
 #: STRONGEST MUTATION WINS — the ``operation`` a single ActionRecord claims
 #: when one logical multi-route action mixed modes (Phase-4 routes-apply
@@ -195,21 +193,62 @@ def resolve(note_tags: list[str], config: Config) -> list[RouteMatch]:
     if not normalized_tags:
         return []
 
-    matches: list[RouteMatch] = []
+    return [
+        match_for(route, config)
+        for route in (config.routes or ())
+        if _route_matches(route, normalized_tags, config)
+    ]
+
+
+def match_for(route: RouteConfig, config: Config) -> RouteMatch:
+    """The :class:`RouteMatch` a configured route resolves to, WITHOUT asking
+    whether any capture's tags select it.
+
+    :func:`resolve` answers "which routes does this capture match?"; this
+    answers "what does this route point at?". They must build the same object
+    or the two would disagree about a destination or a PARA type, so
+    ``resolve`` is implemented in terms of this.
+
+    The caller with no tag query is ``organize integrate --route NAME``: naming
+    a route there is a claim about ATTRIBUTION (record this as the workout
+    route, use its description in the prompt, honor its review gate), not a tag
+    lookup — the target is on the command line either way.
+    """
+    return RouteMatch(
+        route=route,
+        route_name=_route_display_name(route),
+        destination=config.vault.root / route.destination,
+        is_folder=route.destination.endswith("/"),
+        para_type=_destination_type(route.destination, config),
+    )
+
+
+def named(config: Config, name: str) -> RouteMatch:
+    """The configured route called ``name``, as a :class:`RouteMatch`.
+
+    The ``--route NAME`` / ``{"route": NAME}`` lookup for BOTH composition
+    roots (``organize integrate`` and ``op.integrate_propose``). It lives here
+    rather than in each of them because spec 10 §3's rule is that "CLI and UI
+    can never disagree", and two copies of "which route is this?" is exactly
+    how they start to — one of them would eventually match on the destination,
+    or case-fold, or accept a prefix.
+
+    An unknown name is a ``RouteConfigError`` listing the known ones: an
+    ADDRESSING failure per the error-line rule, so it raises rather than
+    returning ``ok=false``, and it is actionable rather than a bare "not
+    found" (09 §1.5).
+    """
+    wanted = (name or "").strip()
     for route in config.routes or ():
-        if not _route_matches(route, normalized_tags, config):
-            continue
-        is_folder = route.destination.endswith("/")
-        matches.append(
-            RouteMatch(
-                route=route,
-                route_name=_route_display_name(route),
-                destination=config.vault.root / route.destination,
-                is_folder=is_folder,
-                para_type=_destination_type(route.destination, config),
-            )
-        )
-    return matches
+        match = match_for(route, config)
+        if match.route_name == wanted:
+            return match
+    known = sorted(match_for(route, config).route_name for route in (config.routes or ()))
+    raise RouteConfigError(
+        f"no route named {wanted!r}",
+        hint=f"configured routes: {', '.join(known) or '(none)'} — a route's display "
+        "name is its first tag (spec 11 §1)",
+    )
 
 
 def _path_key(path: str) -> str:
@@ -260,24 +299,151 @@ def merge_route_suggestions(
     return route_suggestions + others[:keep] + archive_entries
 
 
-def _refuse_integrate(match: RouteMatch) -> None:
-    """The doc-12 §1 handoff boundary, in ONE place so both entry points
-    refuse identically and with the same words."""
-    raise NotImplementedError(
-        f"route {match.route_name!r} has mode 'integrate' and cannot be applied yet "
-        f"(destination {match.destination}). {_PHASE_5_HINT}"
+def effective_mode(match: RouteMatch | None, config: Config) -> str:
+    """The doc-12 §1 EDIT MODE in force for one capture→destination decision.
+
+    Spec 12 §1, verbatim: "Every operation that puts capture content into an
+    existing file runs in one of three modes (per-invocation choice in the UI;
+    per-route default via ``mode`` in doc 11; global default ``manual``)."
+
+    This function is the middle and bottom of those three: a matched route's
+    ``mode`` wins, and with no route the answer is ``[integrate]
+    default_mode``. The TOP layer — Matt picking a mode for this one
+    invocation — belongs to the client and overrides whatever this returns;
+    that is why the UI needs to READ this (it is what the mode picker
+    pre-selects) rather than re-deriving it, and why ``organize routes
+    resolve`` reports it.
+
+    Without a reader, ``[integrate] default_mode`` would be a key an operator
+    can set and nothing honors — the 08 §A35 dead-key class the config gate
+    exists to catch.
+    """
+    if match is not None:
+        mode = str(match.route.mode or "").strip()
+        if mode:
+            return mode
+    return str(config.integrate.default_mode)
+
+
+def effective_review(match: RouteMatch, config: Config) -> str:
+    """The review gate in force for an ``integrate`` route (spec 12 §1).
+
+    ``"diff"`` means a human sees the unified diff and decides; ``"auto"``
+    means the proposal is applied without asking. THE ROUTE IS AUTHORITATIVE:
+
+    * ``[[routes]] review`` is spec 12 §1's named "(per-route opt-in)" and the
+      shipped example calls it "the per-route gate", so a route that states a
+      value keeps it. This is the direction that matters: the difference
+      between the two values is "Claude asks first" and "Claude writes
+      silently", and a global default that could silently un-gate a route
+      somebody deliberately spelled ``review = "diff"`` on would be the worst
+      failure this key has. (An earlier OR-of-``auto`` rule did exactly that,
+      while its recorded rationale claimed to be preventing it.)
+    * ``[integrate] review`` is the DEFAULT — what a route that says nothing
+      inherits, which is what writing a global key means.
+
+    The resolution itself happens ONCE, at config validation
+    (``config._validate_route``), so this reads back the answer the config
+    layer already committed to and the two can never disagree — which is the
+    whole reason ``config`` refuses ``auto = true`` on a route whose effective
+    gate is not ``"auto"``. ``None`` survives only on a hand-built
+    :class:`~organize_core.config.RouteConfig` that never went through
+    validation; it means "unstated" and resolves against the global here, by
+    the same rule.
+
+    Returned as the literal string rather than a bool so an error message can
+    name the value the operator actually wrote.
+    """
+    stated = match.route.review
+    if stated is not None:
+        return _REVIEW_AUTO if str(stated) == _REVIEW_AUTO else _REVIEW_DIFF
+    return _REVIEW_AUTO if str(config.integrate.review) == _REVIEW_AUTO else _REVIEW_DIFF
+
+
+def _integrate_route(
+    ctx: OperationContext,
+    capture: NoteRecord,
+    match: RouteMatch,
+    llm: Any | None,
+) -> OperationResult:
+    """Apply ONE ``integrate`` route end to end: propose → guards → commit.
+
+    This is the ``review = "auto"`` half of spec 12 §1 only, and it says so
+    when it refuses. The default gate (``review = "diff"``) puts a HUMAN
+    between the proposal and the write — "the nvim client shows the unified
+    diff in the right pane" — and a function that returns one
+    ``OperationResult`` has nowhere to put a proposal awaiting review. The
+    reviewed path is ``op.integrate_propose`` / ``op.integrate_commit`` (and
+    ``organize integrate``), which exist precisely because the proposal has
+    to cross a process boundary and come back.
+
+    Both refusals RAISE rather than returning ``ok=False``, per the
+    ARCHITECTURE error-line rule: neither names an operation that could be
+    attempted. A gated route asked for something this door cannot do, and a
+    missing client is a composition-root wiring fault — in both cases there is
+    nothing to attempt and no oplog line to write.
+    """
+    # Function-local, the same shape (and for the same reason) as config.py's
+    # frontmatter import: the edge is real and acyclic — `integrate` imports
+    # fileops/actions/config/errors/frontmatter/llm and never `routes` — but it
+    # is needed by exactly ONE branch, and a module-level import would make
+    # every `import routes` (cli, server, suggest callers) drag the LLM layer
+    # in for vaults that have no integrate route at all.
+    from organize_core import integrate as integrate_mod
+
+    review = effective_review(match, ctx.config)
+    if review != _REVIEW_AUTO:
+        raise OperationError(
+            f"route {match.route_name!r} integrates into {match.destination} behind a "
+            f"review gate (review = {review!r}), so it cannot be applied in one step",
+            hint="a reviewed integration goes through op.integrate_propose → review → "
+            "op.integrate_commit (or `organize integrate <note> <target> --route "
+            f"{match.route_name}`). Set review = \"auto\" on this route to let it apply "
+            "without asking (spec 12 §1). Nothing was written.",
+        )
+    if llm is None:
+        raise OperationError(
+            f"route {match.route_name!r} has mode 'integrate' but no LLM client was "
+            "supplied",
+            hint="integrate builds a prompt (spec 12 §1), so the composition root must "
+            "pass `llm=` to routes.apply_route/apply_all — for the pipeline that is "
+            "`Consumer.wants_llm(config)` answering True and the runner injecting "
+            "RunContext.llm. Nothing was written.",
+        )
+
+    capture_doc = integrate_mod.read_document(Path(capture.path))
+    target_doc = integrate_mod.read_document(match.destination)
+    proposal = integrate_mod.propose(
+        capture_doc,
+        target_doc,
+        ctx.config,
+        llm,
+        route=match.route_name,
+        description=(match.route.description or "").strip() or None,
+        ctx=ctx,
     )
+    # verdict="accepted": review = "auto" IS the acceptance (12 §1 "applies
+    # without asking"). The commit re-runs every guard against the bytes that
+    # will actually be written, so an ungated route is not an unguarded one.
+    return integrate_mod.apply(ctx, match.destination, proposal, "accepted")
 
 
 def apply_route(
-    ctx: OperationContext, capture: NoteRecord, match: RouteMatch
+    ctx: OperationContext,
+    capture: NoteRecord,
+    match: RouteMatch,
+    *,
+    llm: Any | None = None,
 ) -> OperationResult:
     """Execute ONE route destination via the ordinary doc-05 paths:
     ``move`` → :func:`fileops.move_to_destination`; ``append`` →
     :func:`fileops.append_to_note` (mechanical, doc 12 §1's ``append`` edit
     mode — the capture body under the route's ``template``, target
     frontmatter otherwise untouched except ``last_edited_date``);
-    ``integrate`` → refused, Phase 5 (:data:`_PHASE_5_HINT`).
+    ``integrate`` → :func:`_integrate_route` (doc 12 §1's Claude-edit path:
+    LLM proposal → structural guards → atomic apply), which requires
+    ``review = "auto"`` and an ``llm`` client and refuses loudly without
+    either.
 
     ARCHIVING IS NOT THIS FUNCTION'S JOB. Spec 11 §1 archives the capture
     ONCE, after every destination succeeds, and only :func:`apply_all` can
@@ -309,7 +475,7 @@ def apply_route(
             route=match.route_name,
         )
     if mode == "integrate":
-        _refuse_integrate(match)
+        return _integrate_route(ctx, capture, match, llm)
     raise RouteConfigError(
         f"route {match.route_name!r} has unknown mode {match.route.mode!r}",
         hint="mode is one of 'move' (folder destination), 'append' or 'integrate' (file "
@@ -426,8 +592,17 @@ def _merged_record(
         (record for record in records if record.capture.frontmatter_after is not None),
         records[0],
     )
+    # THE LLM TRACES SURVIVE THE MERGE (12 §2). `base` is chosen for the
+    # CAPTURE's post-state, which is the `move` record — whose `llm` is None —
+    # so a plain `replace(base, ...)` dropped the integrate trace of every
+    # batch that mixed an integrate with anything else, and kept only the first
+    # of two integrate traces. Both losses are silent, both are corpus
+    # fidelity, and the first one also inverts `learn.is_matt_decided` (no
+    # verdict ⇒ an automated actor never folds).
+    traced = [record for record in records if record.llm is not None]
+    per_target_traces = len(traced) > 1
     targets = tuple(
-        target
+        target if not per_target_traces or record.llm is None else replace(target, llm=record.llm)
         for match, record in collected
         for target in _described_targets(record, match)
     )
@@ -440,7 +615,17 @@ def _merged_record(
     operation = next(
         (name for name in _OPERATION_PRECEDENCE if name in performed), base.operation
     )
-    edit_mode = next((record.edit_mode for record in records if record.edit_mode), None)
+    # `edit_mode` and `llm` come from the record that WON the precedence
+    # contest above, not from the first non-null / from `base`. Reading them
+    # independently produced impossible records — `operation: integrate` with
+    # `edit_mode: append` and `llm: null` — which is worse than either half
+    # alone, because `organize actions stats` slices integrate accept/edit/
+    # reject rates off exactly those two fields.
+    winner = next((record for record in records if record.operation == operation), base)
+    edit_mode = winner.edit_mode or next(
+        (record.edit_mode for record in records if record.edit_mode), None
+    )
+    llm = winner.llm if winner.llm is not None else (traced[0].llm if traced else None)
     route_label = ", ".join(match.route_name for match in matches) or None
     actor = f"route:{matches[0].route_name}" if len(matches) == 1 else base.actor
     return replace(
@@ -449,6 +634,7 @@ def _merged_record(
         operation=operation,  # type: ignore[arg-type]
         targets=targets,
         edit_mode=edit_mode,
+        llm=llm,
         context=replace(
             base.context,
             route=route_label,
@@ -458,7 +644,11 @@ def _merged_record(
 
 
 def apply_all(
-    ctx: OperationContext, capture: NoteRecord, matches: list[RouteMatch]
+    ctx: OperationContext,
+    capture: NoteRecord,
+    matches: list[RouteMatch],
+    *,
+    llm: Any | None = None,
 ) -> list[OperationResult]:
     """Every matched destination, then the capture archived exactly ONCE —
     and only after all of them succeeded (spec 11 §1, acceptance test 2;
@@ -488,16 +678,30 @@ def apply_all(
     ``archive_capture`` — i.e. after the final archive, never before it (05
     §2 step 8, deferred per the Phase-4 ruling).
 
-    An ``integrate`` route raises BEFORE anything is written — a batch that
-    cannot be carried out as asked must not be half-carried-out.
+    An ``integrate`` route that cannot be carried out AS ASKED — behind a
+    review gate this door cannot open, or with no LLM client wired — raises
+    BEFORE anything is written, in a PRE-FLIGHT pass over every match. A batch
+    that cannot be carried out must not be half-carried-out, and both of those
+    conditions are knowable without calling a model, so discovering one on
+    destination 3 of 4 after two files were already rewritten would be a
+    self-inflicted partial failure.
+
+    ``llm`` is the shared client for any ``integrate`` match, supplied by the
+    composition root (``RunContext.llm`` for the pipeline). ``move`` and
+    ``append`` routes ignore it entirely, so a vault with no integrate route
+    never needs one.
     """
     ordered = list(matches or ())
     if not ordered:
         return []
 
+    # PRE-FLIGHT: everything about an integrate route that can be refused
+    # without a model call is refused here, before the first byte is written.
     for match in ordered:
-        if match.route.mode == "integrate":
-            _refuse_integrate(match)
+        if str(match.route.mode) == "integrate":
+            review = effective_review(match, ctx.config)
+            if review != _REVIEW_AUTO or llm is None:
+                _integrate_route(ctx, capture, match, llm)  # raises; never returns
 
     recorder = _RouteRecorder(ctx.recorder)
     child = replace(ctx, recorder=recorder, on_record=None)
@@ -508,7 +712,7 @@ def apply_all(
     for position in range(len(ordered)):
         match = ordered[position]
         mark = len(recorder.records)
-        result = apply_route(child, capture, match)
+        result = apply_route(child, capture, match, llm=llm)
         results[position] = result
         # Which route produced which record, so `_described_targets` can fall
         # back to THIS route's description for THIS destination.

@@ -365,6 +365,51 @@ def test_torn_write_never_leaves_a_partial_jsonl_line(
     assert [r.id for r in recorder.query()] == ["act_GOOD", "act_AFTER"]
 
 
+def test_a_torn_tail_from_a_PREVIOUS_process_does_not_swallow_the_next_record(
+    actions_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Spec 12 §3's torn-write gate, from the direction the rollback cannot
+    reach: the rollback above only undoes a partial write in THIS process. A
+    SIGKILL or a power loss leaves a line with no terminator, and the next
+    append then concatenated a brand-new, otherwise-valid record onto it — the
+    reader skipped ONE physical line and the new record was gone, silently.
+    """
+    actions_dir.mkdir(parents=True, exist_ok=True)
+    month_file = actions_dir / "2026-08.jsonl"
+    crashed = b'{"schema_version":1,"id":"act_TORN","operation":"mo'
+    month_file.write_bytes(crashed)  # NO trailing newline — that is the shape
+
+    recorder = ActionRecorder(actions_dir)
+    with caplog.at_level(logging.WARNING, logger="organize_core.actions"):
+        assert recorder.record(make_record(id="act_AFTER_CRASH")) is True
+
+    lines = read_lines(month_file)
+    assert len(lines) == 2, "the new record is its OWN physical line"
+    assert lines[0].encode("utf-8") == crashed, "the torn line is preserved, not rewritten"
+    assert json.loads(lines[1])["id"] == "act_AFTER_CRASH"
+    # And the reader keeps the new record while skipping only the torn one.
+    assert [r.id for r in recorder.query()] == ["act_AFTER_CRASH"]
+    assert any("no terminator" in r.getMessage() for r in caplog.records), "loudly (12 §2)"
+
+
+def test_firing_control_a_terminated_tail_is_appended_to_normally(
+    actions_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The healing byte is added ONLY when the tail is torn — an ordinary log
+    must not grow a blank line before every record."""
+    actions_dir.mkdir(parents=True, exist_ok=True)
+    month_file = actions_dir / "2026-08.jsonl"
+    recorder = ActionRecorder(actions_dir)
+    assert recorder.record(make_record(id="act_ONE")) is True
+
+    with caplog.at_level(logging.WARNING, logger="organize_core.actions"):
+        assert recorder.record(make_record(id="act_TWO")) is True
+
+    assert b"\n\n" not in month_file.read_bytes()
+    assert [r.id for r in recorder.query()] == ["act_ONE", "act_TWO"]
+    assert not any("no terminator" in r.getMessage() for r in caplog.records)
+
+
 def test_record_returns_false_on_an_unusable_timestamp(
     actions_dir: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

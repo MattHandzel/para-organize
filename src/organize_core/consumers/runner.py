@@ -891,8 +891,19 @@ def run_consumers(
         # notes still become tasks. Keying injection on the class flag made
         # `llm_enabled = true` inert in production — `ctx.llm` was always
         # None and the 06 §3.1 enrichment path could never run.
+        #
+        # The GLOBAL config is passed because this question is asked one line
+        # before the RunContext exists and before bind(ctx) runs, so a
+        # predicate whose honest answer lives elsewhere in config.toml — is
+        # any `auto` route in `integrate` mode? (doc 12 §1) — has no other way
+        # to see it. `Consumer.wants_llm(config=None)` is a widening; the
+        # TypeError fallback covers a third-party override that never grew the
+        # parameter, and the broad fallback covers a predicate that raises.
         try:
-            wants_llm = bool(consumer.wants_llm())
+            try:
+                wants_llm = bool(consumer.wants_llm(config))
+            except TypeError:
+                wants_llm = bool(consumer.wants_llm())
         except Exception:  # noqa: BLE001 - a bad predicate must not kill the run
             logger.exception(
                 "consumer %s: wants_llm() raised — falling back to the class flag",

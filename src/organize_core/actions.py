@@ -44,6 +44,28 @@ sensitivity (spec 12 §2 privacy note) and stays local.
 *Timestamps.* The month file is chosen from ``record.ts``'s ``YYYY-MM``
 prefix (never from a wall clock inside this module) so a record always
 lands in its own month and this module stays clock-free and injectable.
+
+*The one import edge* (spec 13 §3 similarity retrieval, Phase 5). The
+ARCHITECTURE.md module-ownership table lists this module's dependencies as
+"— (pure + file append)". Retrieval added ``frontmatter`` — and ONLY
+``frontmatter``, which is itself dependency-free, so the edge is acyclic,
+exactly as ARCHITECTURE.md §"Module ownership" (@35cf7c0) already records
+for two other modules:
+
+    "``frontmatter ◀── suggest, routes`` was added at Phase-1 close: both
+    compare tags and must go through the ONE shared ``normalize_tag``
+    (09 §2). ``frontmatter`` is dependency-free, so the edge is acyclic."
+
+:meth:`ActionRecorder.query_similar` compares tags, so the same law binds
+it, and its tag coercion obeys the Phase-3 ruling (ARCHITECTURE.md
+§"Phase-3 rulings", @35cf7c0): "``tags()`` coerces via the shared
+frontmatter list-coercion (scalar → [scalar], list → list, missing/None →
+[]), values stringified — never a hand-rolled re-parse (08 §B9 class)".
+``suggest`` is deliberately NOT imported: it would drag ``index`` +
+``config`` + ``learn`` into a module ``fileops`` imports on every mutating
+operation, and its ``string_similarity`` is a character-level Levenshtein
+(O(n·m) per pair) that cannot meet the doc-13 retrieval budget over full
+capture bodies. See :data:`SIMILARITY_WEIGHTS`.
 """
 
 from __future__ import annotations
@@ -58,12 +80,13 @@ import secrets
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, get_args
 
 from organize_core.errors import OrganizeError
+from organize_core.frontmatter import Frontmatter, normalize_tag
 
 try:  # POSIX only; the core is a Linux/unix-socket service (spec 10 §1)
     import fcntl
@@ -171,9 +194,23 @@ class TargetState:
     #: — where `before_hash` is `None` too — and for anything >= 64 KB, which
     #: stays hash+diff to bound corpus growth.
     before_text: str | None = None
+    #: The ``llm`` trace belonging to THIS file, populated only when one
+    #: logical action produced MORE THAN ONE trace — a multi-destination route
+    #: batch with two ``integrate`` destinations. Doc 12 §2's schema has a
+    #: single record-level ``llm`` block, which is right for the ordinary case
+    #: and has nowhere to put the second proposal; without this the second
+    #: destination's ``prompt_hash``/``proposed_diff``/``final_diff`` were
+    #: silently dropped, against 12 §2's explicit "ONE ENTRY PER FILE TOUCHED"
+    #: and "diffs of every touched file, per file".
+    #:
+    #: Left ``None`` — and omitted by :meth:`to_json` — whenever the
+    #: record-level block already tells the whole story, so no record that
+    #: exists today changes shape and the big diff strings are never stored
+    #: twice.
+    llm: LLMTrace | None = None
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "path": self.path,
             "role": self.role,
             "before_hash": self.before_hash,
@@ -182,6 +219,9 @@ class TargetState:
             "before_text": self.before_text,
             "description": self.description,
         }
+        if self.llm is not None:
+            out["llm"] = self.llm.to_json()
+        return out
 
     @classmethod
     def from_json(cls, raw: Any, *, strict: bool = True) -> TargetState:
@@ -200,6 +240,9 @@ class TargetState:
             diff=_opt_str(data, "diff", "targets[]") or "",
             before_text=_opt_str(data, "before_text", "targets[]"),
             description=_opt_str(data, "description", "targets[]"),
+            llm=LLMTrace.from_json(data["llm"], strict=strict)
+            if data.get("llm") is not None
+            else None,
         )
 
 
@@ -342,9 +385,40 @@ class LLMTrace:
     proposed_diff: str
     final_diff: str  # ≠ proposed when Matt hand-edited
     verdict: Verdict
+    #: The ``prop_<ulid>`` of the proposal this record came from — the
+    #: ARCHITECTURE Phase-5 wire contract's "CORRELATION id echoed into the
+    #: ActionRecord, never a server-side lookup key". Doc 12 §2's schema names
+    #: no slot for it, and the alternative — smuggling it into
+    #: ``context.filters`` — is exactly what ``dry_run`` and
+    #: ``partial_failure`` were promoted OUT of, for the recorded reason that
+    #: ``filters`` is the SESSION's search filters and no reader could branch
+    #: on it.
+    #:
+    #: TRAILING and DEFAULTED, so this is not a schema break: every record
+    #: already on disk in Matt's corpus reads back with ``""``, and
+    #: :meth:`to_json` OMITS the key when it is empty, so a non-integrate
+    #: ``llm`` block serializes byte-identically to what it did before.
+    proposal_id: str = ""
+    #: The target changed on disk BETWEEN propose and this record, so
+    #: ``proposed_diff`` was rendered against text that is no longer the
+    #: ``targets[].before_text`` stored beside it — replaying the diff against
+    #: that before-state FAILS. Only a ``rejected`` verdict can carry this:
+    #: ``accepted``/``edited`` refuse the commit outright on a concurrent
+    #: modification, while a rejection deliberately records anyway (throwing
+    #: away the negative signal because the file moved would defeat the point
+    #: of doc 12).
+    #:
+    #: It exists so the corpus reader doc 12 §2 is FOR ("proposed_diff vs
+    #: final_diff turns every reviewed integration into a labeled edit
+    #: example") can skip an example it cannot replay, instead of learning
+    #: from a diff/before-state pair that never went together. TRAILING,
+    #: DEFAULTED and omitted by :meth:`to_json` when false, so every record
+    #: already on disk reads back unchanged and an ordinary trace serializes
+    #: byte-identically.
+    stale_target: bool = False
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "backend": self.backend,
             "model": self.model,
             "prompt_hash": self.prompt_hash,
@@ -352,6 +426,11 @@ class LLMTrace:
             "final_diff": self.final_diff,
             "verdict": self.verdict,
         }
+        if self.proposal_id:
+            out["proposal_id"] = self.proposal_id
+        if self.stale_target:
+            out["stale_target"] = True
+        return out
 
     @classmethod
     def from_json(cls, raw: Any, *, strict: bool = True) -> LLMTrace:
@@ -369,6 +448,8 @@ class LLMTrace:
             proposed_diff=_opt_str(data, "proposed_diff", "llm") or "",
             final_diff=_opt_str(data, "final_diff", "llm") or "",
             verdict=verdict,  # type: ignore[arg-type]
+            proposal_id=_opt_str(data, "proposal_id", "llm") or "",
+            stale_target=bool(data.get("stale_target", False)),
         )
 
 
@@ -673,12 +754,31 @@ def _lock(fd: int, path: Path) -> bool:
 
 
 def _append_line(path: Path, line: str) -> None:
-    """Append ``line`` + newline as one write; leave no partial line behind."""
+    """Append ``line`` + newline as one write; leave no partial line behind.
+
+    Also HEALS a torn tail left by a PREVIOUS process. The rollback below only
+    covers a partial write in *this* process; it cannot see a line a SIGKILL or
+    a power loss left without its terminator. Appending onto such a tail
+    concatenates a brand-new, otherwise-valid record onto a broken one — the
+    reader then skips ONE physical line and the new record is gone, silently,
+    which is precisely the failure spec 12 §3's torn-write acceptance item
+    ("no partial/corrupt JSONL line ever written") exists to prevent. Starting
+    a fresh line costs one byte and turns "one record lost per crash" into "one
+    pre-existing corrupt line, skipped".
+    """
     data = line.encode("utf-8", errors="replace") + b"\n"
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         _lock(fd, path)
         start = os.fstat(fd).st_size
+        if start > 0 and os.pread(fd, 1, start - 1) != b"\n":
+            logger.warning(
+                "action log %s: the last line has no terminator — a torn write from an "
+                "earlier process. Starting a new line so this record is not glued onto "
+                "it (the torn line stays, and the reader will skip it)",
+                path,
+            )
+            data = b"\n" + data
         written = 0
         try:
             while written < len(data):
@@ -728,6 +828,229 @@ def _within(ts: str, since: str | None, until: str | None) -> bool:
     if since is not None and ts[: len(since)] < since:
         return False
     return not (until is not None and ts[: len(until)] > until)
+
+
+# --- similarity retrieval (spec 13 §3) -------------------------------------
+#
+# Spec 13 §3's cross-check list, verbatim: "12: corpus queryable by
+# tag/content similarity (``actions query --similar-to <text>``);
+# ``chosen_rank``/``verdict`` fields populated." Spec 13 §2 names the reader:
+# "**precedent retrieval from the action corpus** (12): nearest past actions
+# by tag/content similarity, 'when Matt captured things like this he appended
+# them to X'".
+#
+# Deliberately LEXICAL and pragmatic — no embeddings, no new dependency (the
+# dep budget is stdlib + PyYAML, ARCHITECTURE.md §"Ground rules"). Three
+# component scores, one uniform metric.
+#
+# *The metric* is the overlap coefficient ``|A ∩ B| / min(|A|, |B|)`` over
+# TOKEN SETS. Token granularity — never substring, never prefix — is required
+# law, not taste. ARCHITECTURE.md §"Real-data findings — fix stage" ruling 2
+# (@35cf7c0):
+#
+#     "Signal 6 matches at TOKEN granularity — a sanctioned deviation from 04
+#     §2 #6's literal 'case-insensitive substring, either way'. … The raw
+#     substring test made short folder names match inside unrelated words:
+#     ``resources/ui`` was the rank-1 suggestion for a capture whose entire
+#     context was 'quitting toastmasters' (the ``ui`` inside q-UI-tting)."
+#
+# The same class is why ``cap-1`` must not retrieve ``cap-10``: tokenizing
+# both yields ``{cap, 1}`` vs ``{cap, 10}``, and ``1 != 10``.
+#
+# *Known property, stated rather than hidden*: the overlap coefficient
+# normalizes by the SMALLER set, so a very short record scores high on the few
+# tokens it does contain. That is honest for a corpus of small captures (spec
+# 12 §2: "Capture body stored in full (captures are small)") and it keeps
+# goldens hand-computable; a length-penalizing variant (Dice/Jaccard) is the
+# upgrade path if the real corpus shows it matters.
+
+#: Component weights. Mirrors the doc 04 §2 signal ordering — tags are the
+#: strongest evidence there (#1 ``exact_tag_match`` = 2.0) and free prose the
+#: weakest (#6 ``context_match`` = 0.8) — so a tag hit outranks a prose hit
+#: here too. Destination is a corroborating signal, not a driver: the query is
+#: a CAPTURE, and a capture rarely spells its own destination.
+#: Max attainable score is 3.5.
+SIMILARITY_WEIGHTS: dict[str, float] = {"text": 1.0, "tags": 2.0, "destination": 0.5}
+
+#: Word characters EXCLUDING ``_`` — underscore is a separator, matching
+#: :func:`frontmatter.normalize_tag`'s "spaces and underscores → hyphens".
+#: Unicode-aware, so a non-ASCII capture still tokenizes.
+_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+#: How many shared tokens a reason string names before it summarizes.
+_REASON_TOKENS = 5
+
+
+def tokenize(text: str) -> frozenset[str]:
+    """Casefolded alphanumeric token SET (see the section note above).
+
+    ``"cap-1"`` ⇒ ``{"cap", "1"}`` and ``"cap-10"`` ⇒ ``{"cap", "10"}``:
+    tokens compare by equality, so no prefix or substring ever counts as a
+    match. Set semantics mean repetition does not inflate a score.
+    """
+    if not text:
+        return frozenset()
+    return frozenset(_TOKEN_RE.findall(text.casefold()))
+
+
+def _overlap(a: frozenset[str], b: frozenset[str]) -> float:
+    """Overlap coefficient ``|a ∩ b| / min(|a|, |b|)`` ∈ [0, 1]; 0.0 when
+    either side is empty (an empty side shares nothing, and ``min`` would be
+    a zero divisor)."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def _tag_tokens(values: Iterable[Any], extra_map: dict[str, str] | None) -> frozenset[str]:
+    """Tags → comparable token set: THE shared ``normalize_tag`` (09 §2, so a
+    configured ``suggestions.tag_normalization`` entry such as ``project`` →
+    ``projects`` reaches the corpus), then :func:`tokenize`.
+
+    Tokenizing after normalizing is what lets a free-text query find a
+    hyphenated tag: ``"deep work"`` ⇒ ``{deep, work}`` and the tag
+    ``deep-work`` ⇒ ``{deep, work}``. It does NOT mutate the normalizer —
+    ARCHITECTURE.md §"Real-data findings" ruling 3 (@35cf7c0) makes that a
+    HARD CONSTRAINT: normalize_tag "also builds learning association keys,
+    the ``<type>/<folder>`` tag a move writes and the frontmatter that lands
+    on disk, so morphing it would corrupt learning keys and vault data."
+    """
+    out: set[str] = set()
+    for value in values:
+        out |= tokenize(normalize_tag(str(value), extra_map))
+    return frozenset(out)
+
+
+def _record_tag_tokens(rec: ActionRecord, extra_map: dict[str, str] | None) -> frozenset[str]:
+    """Every tag the record knows about: frontmatter BEFORE and AFTER (a
+    ``tag_edit``'s "after" is the decision Matt made) plus
+    ``context.auto_tags_present`` (spec 12 §2 records machine-tag provenance
+    on every action; spec 11 §2 writes those tags to ``tags`` too, so this is
+    usually a no-op union — it earns its keep on records whose
+    ``frontmatter_before`` predates the tagger).
+
+    Coercion goes through ``Frontmatter.get_list`` — the shared scalar ⇒
+    one-element-list rule — never a hand-rolled re-parse (Phase-3 ruling,
+    08 §B9 class). Matt's vault really does contain scalar ``tags:`` values.
+    """
+    raw: list[Any] = []
+    for fields in (rec.capture.frontmatter_before, rec.capture.frontmatter_after):
+        if fields:
+            raw.extend(Frontmatter(fields=dict(fields)).get_list("tags"))
+    raw.extend(rec.context.auto_tags_present)
+    return _tag_tokens(raw, extra_map)
+
+
+def _target_tokens(target: TargetState) -> frozenset[str]:
+    """Destination vocabulary: the path with its file extension dropped (every
+    target ends in ``.md``, so keeping it would add one token that matches
+    nothing and dilute every denominator) plus the doc 11 §3 natural-language
+    description, which is the whole reason 12 §2 stores it per target."""
+    stem, _ext = os.path.splitext(target.path)
+    return tokenize(stem) | tokenize(target.description or "")
+
+
+def _reason(label: str, shared: frozenset[str]) -> str:
+    names = sorted(shared)
+    shown = ", ".join(names[:_REASON_TOKENS])
+    extra = len(names) - _REASON_TOKENS
+    return f"{label}: {shown}" + (f" (+{extra} more)" if extra > 0 else "")
+
+
+@dataclass(frozen=True)
+class SimilarAction:
+    """One ranked precedent from :meth:`ActionRecorder.query_similar`.
+
+    The SCORE is part of the result, not an implementation detail: spec 13 §2
+    requires "Confidence must be honest: calibrate against the corpus
+    (fraction of past accepted proposals at similar similarity scores)", which
+    is unbuildable from bare records. Components are exposed individually so a
+    caller can see WHY (and so goldens can pin each one).
+
+    ``matched_targets`` names the destination(s) that produced
+    ``destination_score`` — spec 13 §2's precedent sentence is "he appended
+    them to X", and X is exactly this field.
+    """
+
+    record: ActionRecord
+    score: float
+    text_score: float
+    tag_score: float
+    destination_score: float
+    matched_targets: tuple[str, ...] = ()
+    reasons: tuple[str, ...] = ()
+
+
+def _score_record(
+    rec: ActionRecord,
+    *,
+    q_text: frozenset[str],
+    q_tags: frozenset[str],
+    q_all: frozenset[str],
+    extra_map: dict[str, str] | None,
+) -> SimilarAction | None:
+    """Score one record; ``None`` when nothing matched at all.
+
+    Dropping zero-score records is deliberate: with a 10k-record corpus and a
+    ``limit``, keeping them would let an arbitrary tail of unrelated actions
+    fill the result and read as "these are your nearest precedents" — spec 09
+    §1.5's silently-wrong-answer class.
+    """
+    reasons: list[str] = []
+
+    body_tokens = tokenize(rec.capture.body_before)
+    text_shared = q_text & body_tokens
+    text_score = _overlap(q_text, body_tokens)
+    if text_shared:
+        reasons.append(_reason("text", text_shared))
+
+    record_tags = _record_tag_tokens(rec, extra_map)
+    tag_shared = q_tags & record_tags
+    tag_score = _overlap(q_tags, record_tags)
+    if tag_shared:
+        reasons.append(_reason("tags", tag_shared))
+
+    # "Multi-target records rank by ANY target": the destination component is
+    # the MAX over targets, never a sum or a mean. Spec 12 §2 makes
+    # multi-destination first-class ("ONE ENTRY PER FILE TOUCHED"), and a mean
+    # would punish exactly the multi-file habit doc 12 exists to capture.
+    # `skip` records carry no targets at all and score 0 here — they stay in
+    # the results on their capture text/tags, because a skip is negative
+    # precedent (12 §2: "a rejection is as much signal as an acceptance").
+    destination_score = 0.0
+    matched_targets: list[str] = []
+    dest_shared: frozenset[str] = frozenset()
+    for target in rec.targets:
+        target_tokens = _target_tokens(target)
+        shared = q_all & target_tokens
+        if not shared:
+            continue
+        value = _overlap(q_all, target_tokens)
+        if value > destination_score:
+            destination_score = value
+            matched_targets = [target.path]
+            dest_shared = shared
+        elif value == destination_score:
+            matched_targets.append(target.path)
+    if matched_targets:
+        reasons.append(_reason(f"destination '{matched_targets[0]}'", dest_shared))
+
+    score = (
+        SIMILARITY_WEIGHTS["text"] * text_score
+        + SIMILARITY_WEIGHTS["tags"] * tag_score
+        + SIMILARITY_WEIGHTS["destination"] * destination_score
+    )
+    if score <= 0.0:
+        return None
+    return SimilarAction(
+        record=rec,
+        score=score,
+        text_score=text_score,
+        tag_score=tag_score,
+        destination_score=destination_score,
+        matched_targets=tuple(matched_targets),
+        reasons=tuple(reasons),
+    )
 
 
 class ActionRecorder:
@@ -853,6 +1176,98 @@ class ActionRecorder:
                 if not _within(rec.ts, since, until):
                     continue
                 yield rec
+
+    def query_similar(
+        self,
+        text: str,
+        *,
+        tags: Iterable[Any] | None = None,
+        limit: int | None = 10,
+        include_dry_run: bool = False,
+        operation: Operation | None = None,
+        actor: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        tag_normalization: dict[str, str] | None = None,
+    ) -> list[SimilarAction]:
+        """Rank the corpus by lexical similarity to ``text`` (+ ``tags``).
+
+        This is spec 13 §3's obligation on doc 12 — "corpus queryable by
+        tag/content similarity (``actions query --similar-to <text>``)" — and
+        the retrieval half of spec 13 §2's precedent step. The CLI surface is
+        the integrator's; this is the engine.
+
+        Scoring is ``1.0·text + 2.0·tags + 0.5·destination`` (see
+        :data:`SIMILARITY_WEIGHTS`), each component an overlap coefficient
+        over token sets, each component readable on the returned
+        :class:`SimilarAction`. Records that match NOTHING are omitted rather
+        than returned with score 0.
+
+        ``tags=None`` vs ``tags=[]`` are DIFFERENT and both meaningful:
+
+        - ``None`` = "I have no tag information" ⇒ the tag component falls
+          back to the query TEXT's tokens, so the single-argument CLI form
+          (``--similar-to "bench press"``) still reaches records tagged
+          ``bench-press``. Without the fallback the strongest signal in the
+          corpus would be dead on the only surface spec 13 §3 names.
+        - ``[]`` = "this capture genuinely has no tags" ⇒ the tag component
+          contributes 0 and ranking runs on text + destination alone.
+
+        Ordering is total and deterministic: DESCENDING ``(score, ts, id)`` —
+        best score first, ties to the most recent precedent, remaining ties to
+        the higher ULID (which is also the later-written record). No sort ever
+        depends on filesystem or dict iteration order.
+
+        Dry-run records are excluded by default, inherited from :meth:`query`
+        (a rehearsal is not a precedent). ``skip`` records are INCLUDED: spec
+        12 §2 — "a rejection is as much signal as an acceptance" — so doc 13's
+        acceptance test "Rejected proposal → recorded; identical text
+        re-proposed later must rank that destination lower" needs them
+        retrievable. They score on capture text/tags only, having no targets.
+
+        ``limit`` caps the returned list; ``None`` means unlimited. A ``limit``
+        below 1 raises rather than silently returning nothing (09 §1.5).
+        """
+        if limit is not None and limit < 1:
+            raise ActionSchemaError(
+                f"limit={limit!r} must be >= 1, or None for unlimited",
+                hint="query_similar returns the top `limit` precedents; "
+                "a limit below 1 can only ever return an empty list",
+            )
+        q_text = tokenize(text)
+        q_tags = q_text if tags is None else _tag_tokens(tags, tag_normalization)
+        q_all = q_text | q_tags
+        if not q_all:
+            # A FAST PATH, not the correctness guard. Nothing can match a query
+            # with no tokens, and `_score_record` already drops every
+            # zero-score record — so the empty result is enforced there, and
+            # this only avoids streaming (and JSON-parsing) the whole corpus to
+            # reach it. Deleting it must stay behaviour-neutral; the test that
+            # pins it asserts the corpus is never read, not the return value.
+            return []
+
+        scored = [
+            hit
+            for rec in self.query(
+                operation=operation,
+                actor=actor,
+                since=since,
+                until=until,
+                include_dry_run=include_dry_run,
+            )
+            if (
+                hit := _score_record(
+                    rec,
+                    q_text=q_text,
+                    q_tags=q_tags,
+                    q_all=q_all,
+                    extra_map=tag_normalization,
+                )
+            )
+            is not None
+        ]
+        scored.sort(key=lambda hit: (hit.score, hit.record.ts, hit.record.id), reverse=True)
+        return scored if limit is None else scored[:limit]
 
     def export(self, out: Path | None = None, **filters: Any) -> int:
         """``organize actions export`` — concatenate/filter to ``out`` or

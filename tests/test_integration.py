@@ -1268,3 +1268,859 @@ values = ["high", "medium", "low"]
     assert bad.returncode != 0
     assert "ConfigError:" in bad.stderr
     assert rejected["error"]["data"]["kind"] == "ConfigError"
+
+
+# ===========================================================================
+# 5. `integrate` end to end — doc 12 §1's Claude-edit path (Phase 5)
+# ===========================================================================
+#
+# The only suite that drives integrate through a REAL LLM client. The others
+# inject a `FakeLLM` object; here the backend is `claude-cli` pointed at a
+# fake `claude` SCRIPT, so `ClaudeCLIClient` (argv, stdin, timeout, utf-8
+# decoding) is under test too — and, decisively, the CLI door can be driven
+# as a SUBPROCESS, where no monkeypatch reaches. A wiring fault between
+# config → get_client → propose is exactly the seam class this file exists
+# for, and it is invisible to a suite that hands `propose` a client directly.
+
+#: The capture integrated below is CAPTURE (tags [impro, creativity]); the
+#: target is the fixture vault's one `resources/performing` note.
+INTEGRATE_TARGET = "resources/performing/impro.md"
+
+
+def install_fake_claude(root: Path, content: str, *, rationale: str = "Added under Ideas.") -> Path:
+    """A `claude -p` stand-in that ignores its prompt and prints one fixed
+    JSON object. The prompt CONTRACT is asserted by the integrate seat's own
+    suite; what this fake is for is the plumbing around it."""
+    script = root / "fake-claude"
+    payload = json.dumps({"content": content, "rationale": rationale})
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.stdin.read()\n"
+        f"sys.stdout.write({payload!r})\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
+def integrate_config_toml(script: Path, *, review: str = "diff", tag: str = "impro") -> str:
+    """An integrate route on `tag`, pointed at INTEGRATE_TARGET.
+
+    `tag` is a parameter because of a fixture fact worth stating: the target
+    note `resources/performing/impro.md` is ITSELF tagged `impro`, and this
+    suite's config scans `resources/`. A route on `impro` therefore matches
+    the target as well as the capture, so any test that lets the ROUTER pick
+    what to process (rather than naming a note itself) must route on a tag
+    only the capture carries — `creativity`. That is fixture geometry, not a
+    product defect: a route whose tag appears on its own destination is a
+    legal, if odd, config.
+    """
+    return f"""
+[llm]
+backend = "claude-cli"
+integrate_backend = "claude-cli"
+claude_command = ["{sys.executable}", "{script}"]
+
+[integrate]
+review = "{review}"
+
+[[routes]]
+tags = ["{tag}"]
+destination = "{INTEGRATE_TARGET}"
+mode = "integrate"
+review = "{review}"
+description = "Improv practice notes."
+"""
+
+
+def woven(vault: Path, body: str | None = None) -> str:
+    """The target with the capture's body woven in VERBATIM — what a
+    well-behaved model returns. Derived from the real file so the golden
+    cannot drift from the fixture."""
+    text = body if body is not None else capture_body(vault)
+    return (vault / INTEGRATE_TARGET).read_text(encoding="utf-8") + f"\n## Ideas\n\n{text}\n"
+
+
+def capture_body(vault: Path) -> str:
+    return load_file(vault / CAPTURE).body.strip()
+
+
+def test_the_interactive_integrate_flow_lands_the_reviewed_bytes(
+    two_frontends: tuple[Frontend, Frontend], served: Any
+) -> None:
+    """THE PHASE-5 ACCEPTANCE FLOW, through the real RPC server: propose →
+    (a human accepts) → commit.
+
+    This is the shape spec 12 §1 describes ("the nvim client shows the
+    unified diff in the right pane; `<CR>` applies") and the shape the
+    ARCHITECTURE wire contract makes STATELESS: the proposal returned by
+    `op.integrate_propose` is handed straight back to `op.integrate_commit`,
+    because review time is exactly when an idle core exits.
+
+    Asserted end to end: the target holds the reviewed bytes EXACTLY, the
+    capture's words survive verbatim, and ONE ActionRecord carries the full
+    doc-12 §2 trace with proposed + final + verdict.
+    """
+    _cli_side, rpc_side = two_frontends
+    script = install_fake_claude(rpc_side.root, "PLACEHOLDER")
+    rpc_side.write_config(extra=integrate_config_toml(script))
+    expected = woven(rpc_side.vault)
+    install_fake_claude(rpc_side.root, expected)  # now that the target is known
+    body = capture_body(rpc_side.vault)
+    assert body and body in expected  # the fixture really carries the words
+
+    server = served(rpc_side)
+    server.index.full_reindex()
+    client = RpcClient(server.socket_path)
+    try:
+        proposal = client.result(
+            "op.integrate_propose", note=CAPTURE, target=INTEGRATE_TARGET, route="impro"
+        )
+        # PROPOSE WRITES NOTHING. This is the half a client is most likely to
+        # get wrong, so it is asserted before the commit rather than inferred.
+        assert (rpc_side.vault / INTEGRATE_TARGET).read_text(encoding="utf-8") != expected
+        assert proposal["proposal_id"].startswith("prop_")
+        assert proposal["review"] == "diff"  # the gate that made this two steps
+        assert proposal["rationale"]
+        assert proposal["diff"].startswith("--- ")
+        assert proposal["target_snapshot"]["sha256"]
+        # The route's description reached the proposal (12 §2 / 11 §1).
+        assert proposal["description"] == "Improv practice notes."
+
+        result = client.result("op.integrate_commit", proposal=proposal, verdict="accepted")
+    finally:
+        client.close()
+
+    assert result["ok"] is True
+    assert result["operation"] == "integrate"
+    assert result["details"]["verdict"] == "accepted"
+    assert result["details"]["proposal_id"] == proposal["proposal_id"]
+    # EXACT bytes: what was reviewed is what landed. `integrate` deliberately
+    # does NOT stamp last_edited_date of its own (unlike append_to_note), and
+    # this equality is what pins that decision.
+    assert (rpc_side.vault / INTEGRATE_TARGET).read_text(encoding="utf-8") == expected
+    # 12 §1's VERBATIM directive, on the bytes actually on disk.
+    assert body in (rpc_side.vault / INTEGRATE_TARGET).read_text(encoding="utf-8")
+
+    (record,) = [r for r in read_actions(rpc_side.paths) if r["operation"] == "integrate"]
+    assert record["actor"] == "claude-integrate"
+    assert record["edit_mode"] == "integrate"
+    assert record["capture"]["path"] == str(rpc_side.vault / CAPTURE)
+    assert record["llm"]["verdict"] == "accepted"
+    assert record["llm"]["backend"] == "claude-cli"
+    assert record["llm"]["proposal_id"] == proposal["proposal_id"]
+    # proposed == final for an accepted verdict, and BOTH are the real diff.
+    assert record["llm"]["proposed_diff"] == record["llm"]["final_diff"]
+    assert record["llm"]["proposed_diff"] == proposal["diff"]
+    (target_state,) = record["targets"]
+    assert target_state["role"] == "merge_target"
+    assert target_state["description"] == "Improv practice notes."
+    assert target_state["before_hash"] != target_state["after_hash"]
+
+
+def test_a_rejected_integrate_records_the_verdict_and_leaves_the_vault_alone(
+    two_frontends: tuple[Frontend, Frontend], served: Any
+) -> None:
+    """Spec 12 §3 acceptance + the wire contract's "Rejected verdicts COMMIT
+    (record written, no vault write — the negative signal is the point)".
+
+    The record is the WHOLE deliverable here: a rejection that wrote nothing
+    and recorded nothing is indistinguishable from a proposal that was never
+    made, and doc 12's premise is that "a rejection is as much signal as an
+    acceptance".
+    """
+    _cli_side, rpc_side = two_frontends
+    script = install_fake_claude(rpc_side.root, "PLACEHOLDER")
+    rpc_side.write_config(extra=integrate_config_toml(script))
+    install_fake_claude(rpc_side.root, woven(rpc_side.vault))
+    before = tree(rpc_side.vault)
+
+    server = served(rpc_side)
+    server.index.full_reindex()
+    client = RpcClient(server.socket_path)
+    try:
+        proposal = client.result(
+            "op.integrate_propose", note=CAPTURE, target=INTEGRATE_TARGET, route="impro"
+        )
+        result = client.result("op.integrate_commit", proposal=proposal, verdict="rejected")
+    finally:
+        client.close()
+
+    assert result["ok"] is True
+    assert result["details"]["verdict"] == "rejected"
+    assert result["details"]["written"] is False
+    # NOT ONE VAULT BYTE — every file, including the capture and the target.
+    assert tree(rpc_side.vault) == before
+
+    (record,) = [r for r in read_actions(rpc_side.paths) if r["operation"] == "integrate"]
+    assert record["llm"]["verdict"] == "rejected"
+    assert record["llm"]["proposed_diff"] == proposal["diff"]
+    assert record["llm"]["final_diff"] == ""  # nothing was applied
+    (target_state,) = record["targets"]
+    assert target_state["before_hash"] == target_state["after_hash"]
+
+    # And the negative signal must NOT become a positive one: learning.json
+    # is untouched, because `learn.is_matt_decided` refuses any record whose
+    # verdict is not accepted|edited. Byte-identical, with the ACCEPT case as
+    # the firing control in the test above's sibling assertions.
+    assert not rpc_side.paths.learning_path.exists() or (
+        json.loads(rpc_side.paths.learning_path.read_text(encoding="utf-8"))["associations"] == {}
+    )
+
+
+def test_the_cli_two_step_integrate_proposes_then_commits_the_edited_diff(
+    two_frontends: tuple[Frontend, Frontend]
+) -> None:
+    """The scripted door, as a SUBPROCESS: `organize integrate` proposes,
+    `--commit-from … --verdict edited --final-diff …` commits Matt's own
+    version. The `edited` verdict is what turns a reviewed integration into a
+    LABELED EDIT EXAMPLE (12 §2: "`proposed_diff` vs `final_diff` … a
+    rejection is as much signal as an acceptance"), so the two diffs must
+    DIFFER in the record.
+    """
+    cli_side, _rpc_side = two_frontends
+    script = install_fake_claude(cli_side.root, "PLACEHOLDER")
+    cli_side.write_config(extra=integrate_config_toml(script))
+    proposed_text = woven(cli_side.vault)
+    install_fake_claude(cli_side.root, proposed_text)
+    assert cli_side.cli("index", "--full").returncode == 0
+
+    # 1. PROPOSE. Writes nothing; prints the proposal as JSON.
+    before = tree(cli_side.vault)
+    proc = cli_side.cli("integrate", CAPTURE, INTEGRATE_TARGET, "--route", "impro", "--json")
+    assert proc.returncode == 0, proc.stderr
+    proposal = json.loads(proc.stdout)
+    assert tree(cli_side.vault) == before, "propose must not touch the vault"
+
+    # 2. Matt edits the proposal: same capture body, his own heading.
+    edited_text = proposed_text.replace("## Ideas", "## Improv ideas")
+    assert edited_text != proposed_text
+    from organize_core.fileops import _unified_diff
+
+    final_diff = _unified_diff(
+        (cli_side.vault / INTEGRATE_TARGET).read_text(encoding="utf-8"),
+        edited_text,
+        cli_side.vault / INTEGRATE_TARGET,
+    )
+
+    proposal_file = cli_side.root / "proposal.json"
+    proposal_file.write_text(json.dumps(proposal), encoding="utf-8")
+    diff_file = cli_side.root / "final.diff"
+    diff_file.write_text(final_diff, encoding="utf-8")
+
+    # 3. COMMIT the edit.
+    proc = cli_side.cli(
+        "integrate",
+        "--commit-from", str(proposal_file),
+        "--verdict", "edited",
+        "--final-diff", str(diff_file),
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    # HIS version landed, not the model's.
+    assert (cli_side.vault / INTEGRATE_TARGET).read_text(encoding="utf-8") == edited_text
+    assert capture_body(cli_side.vault) in edited_text  # still verbatim
+
+    (record,) = [r for r in read_actions(cli_side.paths) if r["operation"] == "integrate"]
+    assert record["llm"]["verdict"] == "edited"
+    assert record["llm"]["proposed_diff"] == proposal["diff"]
+    assert record["llm"]["final_diff"] != record["llm"]["proposed_diff"], (
+        "an `edited` verdict whose two diffs are equal is not an edit example"
+    )
+    assert "## Improv ideas" in record["llm"]["final_diff"]
+    assert "## Improv ideas" not in record["llm"]["proposed_diff"]
+
+
+def test_apply_is_refused_behind_the_review_gate_and_allowed_without_it(
+    two_frontends: tuple[Frontend, Frontend]
+) -> None:
+    """`--apply` is the one-shot form, and the wire contract permits it "ONLY
+    when review setting is auto". Both branches are exercised against the
+    SAME command and the same fake model, so the refusal cannot be passing
+    because integrate is broken.
+    """
+    cli_side, _rpc_side = two_frontends
+    script = install_fake_claude(cli_side.root, "PLACEHOLDER")
+    cli_side.write_config(extra=integrate_config_toml(script, review="diff"))
+    expected = woven(cli_side.vault)
+    install_fake_claude(cli_side.root, expected)
+    assert cli_side.cli("index", "--full").returncode == 0
+    before = tree(cli_side.vault)
+
+    refused = cli_side.cli(
+        "integrate", CAPTURE, INTEGRATE_TARGET, "--route", "impro", "--apply"
+    )
+    assert refused.returncode == 1
+    assert "ConfigError:" in refused.stderr
+    assert "review" in refused.stderr
+    assert tree(cli_side.vault) == before
+    assert read_actions(cli_side.paths) == []
+
+    # FIRING CONTROL: ungate the route and the identical command applies.
+    cli_side.write_config(extra=integrate_config_toml(script, review="auto"))
+    applied = cli_side.cli(
+        "integrate", CAPTURE, INTEGRATE_TARGET, "--route", "impro", "--apply"
+    )
+    assert applied.returncode == 0, applied.stderr
+    assert (cli_side.vault / INTEGRATE_TARGET).read_text(encoding="utf-8") == expected
+    (record,) = [r for r in read_actions(cli_side.paths) if r["operation"] == "integrate"]
+    assert record["llm"]["verdict"] == "accepted"
+
+
+def test_a_gutting_proposal_is_refused_and_recorded_through_the_real_stack(
+    two_frontends: tuple[Frontend, Frontend], served: Any
+) -> None:
+    """Spec 12 §3, verbatim: "Deletion guard: an LLM proposal that removes
+    existing lines is rejected and recorded with `verdict: "rejected"`,
+    target untouched."
+
+    Driven through the RPC door with a real client so the guard is proven to
+    run where it matters — before any human sees a diff — rather than only in
+    the engine's own unit tests.
+    """
+    _cli_side, rpc_side = two_frontends
+    # A model that returns a GUTTED target: the capture's line only.
+    script = install_fake_claude(
+        rpc_side.root, "---\ntags:\n- impro\n---\n" + capture_body(rpc_side.vault) + "\n"
+    )
+    rpc_side.write_config(extra=integrate_config_toml(script))
+    before = tree(rpc_side.vault)
+
+    server = served(rpc_side)
+    server.index.full_reindex()
+    client = RpcClient(server.socket_path)
+    try:
+        response = client.call(
+            "op.integrate_propose", note=CAPTURE, target=INTEGRATE_TARGET, route="impro"
+        )
+    finally:
+        client.close()
+
+    assert "error" in response
+    assert response["error"]["data"]["kind"] == "IntegrationRejected"
+    assert "delete" in response["error"]["message"]
+    assert tree(rpc_side.vault) == before
+
+    # The refusal is RECORDED — that is the training signal doc 12 wants, and
+    # the half a naive implementation drops on the floor.
+    (record,) = [r for r in read_actions(rpc_side.paths) if r["operation"] == "integrate"]
+    assert record["llm"]["verdict"] == "rejected"
+    assert record["llm"]["final_diff"] == ""
+
+
+def test_no_ai_refuses_integrate_through_both_doors_for_every_actor(
+    two_frontends: tuple[Frontend, Frontend], served: Any
+) -> None:
+    """Spec 12 §1: "`no-ai: true` targets refuse `integrate` outright", and
+    the Phase-4 routes ruling: "Integrate refuses for EVERY actor (12 §1)" —
+    unlike move/append, where actor "matt" may proceed.
+
+    Both doors, one law. The assertion that the model is never even asked is
+    the load-bearing one: a refusal that happens AFTER the prompt was sent has
+    already shipped a protected note to an AI backend.
+    """
+    cli_side, rpc_side = two_frontends
+    for frontend in (cli_side, rpc_side):
+        marker = frontend.root / "was-called"
+        script = frontend.root / "fake-claude"
+        script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys, pathlib\n"
+            f"pathlib.Path({str(marker)!r}).write_text('called')\n"
+            "sys.stdin.read()\n"
+            'sys.stdout.write("{}")\n',
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        frontend.write_config(extra=integrate_config_toml(script))
+
+    assert cli_side.cli("index", "--full").returncode == 0
+    cli_refusal = cli_side.cli("integrate", CAPTURE, NO_AI)
+    assert cli_refusal.returncode == 1
+    assert "NoAiRefusal:" in cli_refusal.stderr
+
+    server = served(rpc_side)
+    server.index.full_reindex()
+    client = RpcClient(server.socket_path)
+    try:
+        response = client.call("op.integrate_propose", note=CAPTURE, target=NO_AI)
+    finally:
+        client.close()
+    assert response["error"]["data"]["kind"] == "NoAiRefusal"
+
+    for frontend in (cli_side, rpc_side):
+        assert not (frontend.root / "was-called").exists(), (
+            "a no-ai note reached the LLM backend before being refused"
+        )
+
+    # FIRING CONTROL: the same command against a normal target DOES reach the
+    # model — so the refusals above are the no-ai law, not a broken fake.
+    install_fake_claude(cli_side.root, woven(cli_side.vault))
+    ok = cli_side.cli("integrate", CAPTURE, INTEGRATE_TARGET)
+    assert ok.returncode == 0, ok.stderr
+
+
+def test_actions_query_finds_the_precedent_the_corpus_actually_holds(
+    two_frontends: tuple[Frontend, Frontend]
+) -> None:
+    """spec 13 §3's named surface, through the shipped binary: "corpus
+    queryable by tag/content similarity (`actions query --similar-to
+    <text>`)".
+
+    The composition root has ONE job the engine cannot do — pass
+    `config.suggestions.tag_normalization` through — and it is invisible
+    without a vault that HAS a mapping. So this drives a vault whose config
+    maps `impro -> improv`, files a real capture to build a precedent, and
+    asserts the query reaches it through the mapping. Dropping the
+    `tag_normalization=` argument in `cli._actions_query` makes the tag
+    component score 0 and the precedent disappears.
+    """
+    cli_side, _rpc_side = two_frontends
+    cli_side.write_config(
+        extra="""
+[suggestions.tag_normalization]
+impro = "improv"
+"""
+    )
+    assert cli_side.cli("index", "--full").returncode == 0
+    # A real precedent: this capture (tags impro, creativity) filed to areas/health.
+    assert cli_side.cli("move", CAPTURE, DESTINATION).returncode == 0
+
+    proc = cli_side.cli(
+        "actions", "query", "--similar-to", "improv warmups", "--tags", "improv", "--json"
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["tags"] == ["improv"]
+    (hit,) = payload["results"]
+    assert hit["rank"] == 1
+    assert hit["operation"] == "move"
+    assert hit["capture"].endswith(Path(CAPTURE).name)
+    # The tag component is what the normalization map unlocks: the corpus
+    # holds `impro`, the query asked for `improv`.
+    assert hit["tag_score"] > 0.0
+    assert hit["score"] > hit["text_score"], (
+        "the tag signal did not contribute — tag_normalization never reached "
+        "the engine (the one thing the composition root must supply)"
+    )
+
+    # An honest empty answer for a query with nothing in common, so the hit
+    # above cannot be "everything matches everything".
+    proc = cli_side.cli("actions", "query", "--similar-to", "carburetor rebuild", "--json")
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout)["results"] == []
+
+    # Human output says so out loud rather than printing nothing (09 §1.5).
+    proc = cli_side.cli("actions", "query", "--similar-to", "carburetor rebuild")
+    assert proc.stdout.strip() == "no similar actions in the corpus"
+
+
+# ---------------------------------------------------------------------------
+# 5b. Holes found by the Phase-5 mutation audit, closed
+# ---------------------------------------------------------------------------
+#
+# Each test below exists because a specific mutation of the Phase-5 wiring
+# left the suite GREEN. They are grouped here rather than scattered because
+# the config gate, the `wants_llm` seam and the routes dispatch are ONE
+# landing: the config gate is only safe BECAUSE the seam lands with it, so
+# pinning them apart would let a future change satisfy each half separately.
+
+
+def test_an_unattended_integrate_route_needs_review_auto_to_load_at_all() -> None:
+    """The Phase-5 NARROWING of the Phase-4 blanket refusal, both directions.
+
+    `auto = true` + `mode = "integrate"` + the default `review = "diff"` is a
+    standing instruction to integrate unattended that contradicts its own
+    "ask a human first" gate. It can only ever produce a per-note ERROR, exit
+    1, and an OnFailure alert every ten minutes — which is what trains an
+    operator to ignore the channel. So it fails ONCE, at the door (03 §1).
+
+    MUTATION THIS CATCHES: deleting the check entirely. Nothing else in the
+    suite noticed, because the resulting config loads fine and only misbehaves
+    ten minutes later on a real vault.
+    """
+    from organize_core.config import validate_config
+    from organize_core.errors import RouteConfigError
+
+    def raw(**route: Any) -> dict[str, Any]:
+        return {
+            "vault": {"root": "/tmp/does-not-need-to-exist"},
+            "routes": [
+                {
+                    "tags": ["x"],
+                    "destination": "areas/health/log.md",
+                    "mode": "integrate",
+                    **route,
+                }
+            ],
+        }
+
+    with pytest.raises(RouteConfigError) as excinfo:
+        validate_config(raw(auto=True), source="<test>")
+    assert "auto" in str(excinfo.value)
+    assert 'review = "auto"' in (excinfo.value.hint or "")
+
+    # Explicit `review = "diff"` is refused for the same reason as the default.
+    with pytest.raises(RouteConfigError):
+        validate_config(raw(auto=True, review="diff"), source="<test>")
+
+    # FIRING CONTROLS — the gate must not be "integrate routes cannot be auto".
+    opted_in = validate_config(raw(auto=True, review="auto"), source="<test>")
+    assert opted_in.routes[0].auto is True
+    assert opted_in.routes[0].review == "auto"
+    interactive = validate_config(raw(auto=False), source="<test>")
+    assert interactive.routes[0].auto is False
+
+
+def test_effective_mode_prefers_the_route_over_the_global_default() -> None:
+    """Spec 12 §1's mode precedence: "per-route default via `mode` in doc 11;
+    global default `manual`". Asserted at a parameter where the two DISAGREE,
+    so a resolver that ignores either side is red.
+
+    MUTATION THIS CATCHES: dropping the route branch, which is invisible when
+    the route's mode happens to equal the global default.
+    """
+    from organize_core import routes as routes_mod
+    from organize_core.config import IntegrateConfig, RouteConfig
+
+    config = Config(
+        vault=VaultConfig(root=Path("/vault")),
+        integrate=IntegrateConfig(default_mode="append"),
+        routes=[RouteConfig(tags=["x"], destination="a/b.md", mode="integrate")],
+    )
+    (match,) = routes_mod.resolve(["x"], config)
+    assert routes_mod.effective_mode(match, config) == "integrate"  # route wins
+    assert routes_mod.effective_mode(None, config) == "append"  # global answers
+
+
+def test_routes_named_resolves_the_named_route_and_refuses_an_unknown_one() -> None:
+    """`--route NAME` / `{"route": NAME}` for both composition roots. With
+    TWO routes configured, so "returns the first one" is not a passing answer.
+
+    MUTATION THIS CATCHES: a lookup that ignores the name — which silently
+    attributes an integration to the wrong route, uses the wrong description
+    in the prompt, and honors the wrong review gate.
+    """
+    from organize_core import routes as routes_mod
+    from organize_core.config import RouteConfig
+    from organize_core.errors import RouteConfigError
+
+    config = Config(
+        vault=VaultConfig(root=Path("/vault")),
+        routes=[
+            RouteConfig(tags=["alpha"], destination="a/one.md", mode="append", description="first"),
+            RouteConfig(tags=["beta"], destination="b/two.md", mode="append", description="second"),
+        ],
+    )
+    assert routes_mod.named(config, "beta").route.description == "second"
+    assert routes_mod.named(config, "alpha").route.description == "first"
+
+    with pytest.raises(RouteConfigError) as excinfo:
+        routes_mod.named(config, "gamma")
+    assert "gamma" in str(excinfo.value)
+    assert "alpha" in (excinfo.value.hint or "")  # names the ones that exist
+
+
+def test_routes_resolve_reports_the_route_mode_not_a_hardcoded_default(
+    two_frontends: tuple[Frontend, Frontend]
+) -> None:
+    """`organize routes resolve --json` must report the EFFECTIVE mode, from
+    a vault whose route mode and global default DIFFER — otherwise the field
+    can be a constant and nobody notices.
+
+    MUTATION THIS CATCHES: `default_mode` hardcoded to "manual", which is
+    indistinguishable from the truth in a default config.
+    """
+    cli_side, _rpc_side = two_frontends
+    script = install_fake_claude(cli_side.root, "unused")
+    cli_side.write_config(
+        extra=integrate_config_toml(script).replace(
+            '[integrate]\nreview = "diff"', '[integrate]\nreview = "diff"\ndefault_mode = "append"'
+        )
+    )
+    assert cli_side.cli("index", "--full").returncode == 0
+
+    proc = cli_side.cli("routes", "resolve", CAPTURE, "--json")
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["default_mode"] == "append"  # the GLOBAL, honored
+    (match,) = payload["matches"]
+    assert match["mode"] == "integrate"  # the ROUTE, which overrides it
+    assert match["review"] == "diff"
+
+
+def test_the_pipeline_runs_an_unattended_integrate_route_end_to_end(
+    two_frontends: tuple[Frontend, Frontend]
+) -> None:
+    """THE WHOLE PHASE-5 SAFETY CHAIN, through `organize run-consumers` as a
+    subprocess: config validation accepts `auto = true` + `review = "auto"` →
+    `wants_llm(config)` sees the integrate route → the runner injects
+    `RunContext.llm` → `tag_router` hands it to `routes.apply_all` →
+    `apply_route` proposes and commits → the capture is archived once.
+
+    Every link is load-bearing and each one was mutable without a red suite
+    before this test existed. The `taskwarrior.llm_enabled` failure — a
+    feature that is correct in-module and inert in production — is exactly
+    what this shape of test is for.
+    """
+    cli_side, _rpc_side = two_frontends
+    script = install_fake_claude(cli_side.root, "PLACEHOLDER")
+    expected = woven(cli_side.vault)
+    install_fake_claude(cli_side.root, expected)
+    cli_side.write_config(
+        extra=integrate_config_toml(script, review="auto", tag="creativity").replace(
+            'mode = "integrate"', 'mode = "integrate"\nauto = true'
+        )
+        + """
+[consumers.router]
+type = "tag_router"
+"""
+    )
+    assert cli_side.cli("index", "--full").returncode == 0
+
+    proc = cli_side.cli("run-consumers")
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+
+    assert (cli_side.vault / INTEGRATE_TARGET).read_text(encoding="utf-8") == expected
+    assert not (cli_side.vault / CAPTURE).is_file(), "the capture was not archived"
+    (record,) = [r for r in read_actions(cli_side.paths) if r["operation"] == "integrate"]
+    assert record["llm"]["verdict"] == "accepted"
+    # One route fired, so the AGGREGATE record is actored to it (12 §2's enum
+    # member for an unattended route firing) — not to claude-integrate.
+    assert record["actor"] == "route:creativity"
+
+    # AND THE LEARNING RULE HOLDS: a route firing is CONFIG, not a decision,
+    # so it must not fold into learning.json even with an accepted verdict
+    # (ARCHITECTURE: "LEARNING FOLDS ONLY MATT-DECIDED ACTIONS").
+    learning = cli_side.paths.learning_path
+    assert not learning.exists() or (
+        json.loads(learning.read_text(encoding="utf-8"))["associations"] == {}
+    )
+
+
+def test_the_rpc_door_forces_the_llm_actor_and_ignores_a_client_claim(
+    two_frontends: tuple[Frontend, Frontend], served: Any
+) -> None:
+    """An LLM authored the edit whoever asked for it, and
+    `learn.LLM_EDIT_ACTORS` keys the learning fold off exactly the string
+    `claude-integrate`. A client that could claim `actor: "matt"` would make
+    an unreviewed machine edit look like a human decision in the corpus — and
+    a human actor folds into learning.json unconditionally.
+
+    MUTATION THIS CATCHES: `self._context(params)` instead of
+    `self._context({**params, "actor": integrate.ACTOR})`, on either handler.
+    """
+    _cli_side, rpc_side = two_frontends
+    script = install_fake_claude(rpc_side.root, "PLACEHOLDER")
+    rpc_side.write_config(extra=integrate_config_toml(script))
+    install_fake_claude(rpc_side.root, woven(rpc_side.vault))
+
+    server = served(rpc_side)
+    server.index.full_reindex()
+    client = RpcClient(server.socket_path)
+    try:
+        # The client LIES about who is acting, on BOTH calls.
+        proposal = client.result(
+            "op.integrate_propose", note=CAPTURE, target=INTEGRATE_TARGET, actor="matt"
+        )
+        client.result(
+            "op.integrate_commit", proposal=proposal, verdict="accepted", actor="matt"
+        )
+    finally:
+        client.close()
+
+    (record,) = [r for r in read_actions(rpc_side.paths) if r["operation"] == "integrate"]
+    assert record["actor"] == "claude-integrate", (
+        "the client's actor claim reached the corpus — an LLM edit is recorded "
+        "as a human decision and folds into learning.json"
+    )
+
+
+def test_the_rpc_door_applies_the_final_diff_for_an_edited_verdict(
+    two_frontends: tuple[Frontend, Frontend], served: Any
+) -> None:
+    """`verdict: "edited"` means MATT's version lands, not the model's. A
+    handler that drops `final_diff` writes the proposal instead — silently
+    discarding the human's edit while recording that an edit happened.
+
+    MUTATION THIS CATCHES: `final_diff = None` in `_op_integrate_commit`.
+    (The engine then refuses an empty final diff, but a handler could just as
+    easily have fallen back to the proposal, which is the dangerous shape.)
+    """
+    from organize_core.fileops import _unified_diff
+
+    _cli_side, rpc_side = two_frontends
+    script = install_fake_claude(rpc_side.root, "PLACEHOLDER")
+    rpc_side.write_config(extra=integrate_config_toml(script))
+    proposed_text = woven(rpc_side.vault)
+    install_fake_claude(rpc_side.root, proposed_text)
+    edited_text = proposed_text.replace("## Ideas", "## Improv ideas")
+    assert edited_text != proposed_text
+
+    server = served(rpc_side)
+    server.index.full_reindex()
+    final_diff = _unified_diff(
+        (rpc_side.vault / INTEGRATE_TARGET).read_text(encoding="utf-8"),
+        edited_text,
+        rpc_side.vault / INTEGRATE_TARGET,
+    )
+    client = RpcClient(server.socket_path)
+    try:
+        proposal = client.result(
+            "op.integrate_propose", note=CAPTURE, target=INTEGRATE_TARGET
+        )
+        result = client.result(
+            "op.integrate_commit",
+            proposal=proposal,
+            verdict="edited",
+            final_diff=final_diff,
+        )
+    finally:
+        client.close()
+
+    assert result["ok"] is True
+    assert (rpc_side.vault / INTEGRATE_TARGET).read_text(encoding="utf-8") == edited_text
+    (record,) = [r for r in read_actions(rpc_side.paths) if r["operation"] == "integrate"]
+    assert record["llm"]["verdict"] == "edited"
+    assert record["llm"]["final_diff"] != record["llm"]["proposed_diff"]
+    assert "## Improv ideas" in record["llm"]["final_diff"]
+
+
+def test_the_cli_door_records_the_llm_actor_too(
+    two_frontends: tuple[Frontend, Frontend]
+) -> None:
+    """The same actor law on the OTHER door. Spec 10 §3: "CLI and UI can never
+    disagree" — and `organize integrate` is the door a Claude agent uses, so
+    an actor drift here is the one most likely to go unnoticed.
+
+    MUTATION THIS CATCHES: `actor="matt"` in `cmd_integrate`.
+    """
+    cli_side, _rpc_side = two_frontends
+    script = install_fake_claude(cli_side.root, "PLACEHOLDER")
+    cli_side.write_config(extra=integrate_config_toml(script, review="auto"))
+    install_fake_claude(cli_side.root, woven(cli_side.vault))
+    assert cli_side.cli("index", "--full").returncode == 0
+
+    assert cli_side.cli(
+        "integrate", CAPTURE, INTEGRATE_TARGET, "--route", "impro", "--apply"
+    ).returncode == 0
+
+    (record,) = [r for r in read_actions(cli_side.paths) if r["operation"] == "integrate"]
+    assert record["actor"] == "claude-integrate"
+    # ...and therefore it DOES fold into learning (verdict accepted +
+    # claude-integrate = Matt-decided), which is the other half of the rule.
+    learning = json.loads(cli_side.paths.learning_path.read_text(encoding="utf-8"))
+    assert learning["associations"], (
+        "an accepted integration by claude-integrate must fold into learning.json "
+        "(learn.MATT_DECIDED_VERDICTS) — the actor or the trace is not arriving"
+    )
+
+
+def test_commit_from_without_a_verdict_refuses_rather_than_guessing(
+    two_frontends: tuple[Frontend, Frontend]
+) -> None:
+    """The verdict IS the training label (12 §2). There is no default,
+    because guessing it would forge Matt's decision into the corpus that doc
+    13 learns from.
+
+    MUTATION THIS CATCHES: dropping the required-verdict check — argparse has
+    no `required` on the flag, so the command would proceed with `None`.
+    """
+    cli_side, _rpc_side = two_frontends
+    script = install_fake_claude(cli_side.root, "PLACEHOLDER")
+    cli_side.write_config(extra=integrate_config_toml(script))
+    install_fake_claude(cli_side.root, woven(cli_side.vault))
+    assert cli_side.cli("index", "--full").returncode == 0
+
+    proc = cli_side.cli("integrate", CAPTURE, INTEGRATE_TARGET, "--json")
+    assert proc.returncode == 0, proc.stderr
+    proposal_file = cli_side.root / "p.json"
+    proposal_file.write_text(proc.stdout, encoding="utf-8")
+    before = tree(cli_side.vault)
+
+    refused = cli_side.cli("integrate", "--commit-from", str(proposal_file))
+    assert refused.returncode == 1
+    assert "verdict" in refused.stderr
+    assert tree(cli_side.vault) == before
+
+    # FIRING CONTROL: the identical command WITH a verdict commits.
+    ok = cli_side.cli(
+        "integrate", "--commit-from", str(proposal_file), "--verdict", "accepted"
+    )
+    assert ok.returncode == 0, ok.stderr
+    assert tree(cli_side.vault) != before
+
+
+def test_actions_query_keeps_absent_tags_and_empty_tags_apart(
+    two_frontends: tuple[Frontend, Frontend]
+) -> None:
+    """`--tags` absent means "I have no tag information" (the tag component
+    falls back to the query text's tokens); `--tags ""` means "this capture
+    genuinely has no tags". Collapsing them makes the single-argument form
+    silently lose the strongest signal in doc 04 §2.
+
+    MUTATION THIS CATCHES: `tags = _split_list(args.tags)` unconditionally,
+    which turns an absent flag into an empty list.
+    """
+    cli_side, _rpc_side = two_frontends
+    assert cli_side.cli("index", "--full").returncode == 0
+    assert cli_side.cli("move", CAPTURE, DESTINATION).returncode == 0
+
+    absent = json.loads(
+        cli_side.cli("actions", "query", "--similar-to", "impro", "--json").stdout
+    )
+    empty = json.loads(
+        cli_side.cli(
+            "actions", "query", "--similar-to", "impro", "--tags", "", "--json"
+        ).stdout
+    )
+    assert absent["tags"] is None
+    assert empty["tags"] == []
+    # The corpus record is tagged `impro`, so the absent form reaches it
+    # through the text→tags fallback and the empty form cannot.
+    assert absent["results"], "the absent-tags fallback did not reach a tagged record"
+    assert absent["results"][0]["tag_score"] > 0.0
+    assert all(hit["tag_score"] == 0.0 for hit in empty["results"])
+
+
+def test_a_standalone_integrate_leaves_the_capture_and_says_so(
+    two_frontends: tuple[Frontend, Frontend]
+) -> None:
+    """A standalone `integrate` does NOT archive the capture — unlike
+    `move`/`merge` (05 §2/§4) and unlike a ROUTE, where `apply_all` archives
+    once after every destination succeeds (11 §1).
+
+    The reason is doc 12's own premise, quoted from the directive that opens
+    the spec: "I may be adding them to multiple files". The commit is
+    STATELESS, so it cannot know whether another integration of this capture
+    is coming, and archiving after the first would break the second.
+
+    What must NOT happen is silence. A capture that is neither archived nor
+    reported sits in the backlog forever with nothing saying why, which is the
+    09 §1.5 silently-wrong-answer class from the other direction. So the
+    asymmetry is asserted in BOTH halves: the file is still there, AND the
+    command said so.
+    """
+    cli_side, _rpc_side = two_frontends
+    script = install_fake_claude(cli_side.root, "PLACEHOLDER")
+    cli_side.write_config(extra=integrate_config_toml(script, review="auto"))
+    install_fake_claude(cli_side.root, woven(cli_side.vault))
+    assert cli_side.cli("index", "--full").returncode == 0
+
+    proc = cli_side.cli(
+        "integrate", CAPTURE, INTEGRATE_TARGET, "--route", "impro", "--apply"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert (cli_side.vault / CAPTURE).is_file(), "integrate archived the capture"
+    assert "capture left at" in proc.stdout
+    assert "organize archive" in proc.stdout
+
+    # The named follow-up actually works — a hint pointing at a command that
+    # does not do the job is worse than no hint (09 §1.5).
+    assert cli_side.cli("archive", CAPTURE).returncode == 0
+    assert not (cli_side.vault / CAPTURE).is_file()
+
+    # CONTRAST, so the asymmetry is a decision and not an accident: the ROUTE
+    # path through the same engine DOES archive (11 §1). Pinned in
+    # `test_the_pipeline_runs_an_unattended_integrate_route_end_to_end`.

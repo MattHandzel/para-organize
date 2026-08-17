@@ -263,11 +263,22 @@ class RouteConfig:
     ``auto=True`` opts the route into unattended handling (11 §1).
 
     ``review`` is the doc-12 §1 review gate for this route's ``integrate``
-    results: ``"diff"`` (the default) shows Matt the unified diff and waits;
-    ``"auto"`` applies without asking. Spec 12 §1 makes ``"auto"`` an explicit
-    PER-ROUTE opt-in, so it lives here rather than only in ``[integrate]``. It
-    is meaningful only for ``mode = "integrate"``; validation says so rather
-    than silently ignoring it (03 §1 every-key-honored)."""
+    results: ``"diff"`` shows Matt the unified diff and waits; ``"auto"``
+    applies without asking. Spec 12 §1 makes ``"auto"`` an explicit PER-ROUTE
+    opt-in, so it lives here rather than only in ``[integrate]``. It is
+    meaningful only for ``mode = "integrate"``; validation says so rather than
+    silently ignoring it (03 §1 every-key-honored).
+
+    ``review`` is RESOLVED AT LOAD: what a loaded config holds here is the
+    gate actually in force — the route's own value when it stated one, else
+    ``[integrate] review``. That is deliberate and it is the whole fix for the
+    two gates disagreeing: the config-time refusal of ``auto = true`` without
+    ``review = "auto"`` and the runtime :func:`routes.effective_review` must
+    ask ONE question, and they do, because there is only one place the answer
+    is computed. ``None`` therefore means "nobody stated one" and can only
+    survive on a hand-built :class:`RouteConfig`; ``routes.effective_review``
+    resolves that case against ``[integrate] review`` the same way.
+    """
 
     tags: list[str]
     destination: str  # relative to vault root; trailing "/" ⇒ folder
@@ -275,7 +286,7 @@ class RouteConfig:
     description: str = ""
     template: str | None = None  # append-heading template override (11 §1)
     auto: bool = False
-    review: ReviewGate = "diff"
+    review: ReviewGate | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +355,15 @@ class IntegrateConfig:
       deletions allowed outside the edited region)". Exceeding it is an
       :class:`~organize_core.errors.IntegrationRejected`. Zero means an
       integrate result may only add and weave — never destroy.
+    - ``max_added_lines`` is the deletion threshold's missing counterpart: how
+      many non-blank lines an integration may add BEYOND the capture's own
+      non-blank line count. Spec 12 §1 bounds destruction and says nothing
+      about growth, which left a hallucinating model free to inject unbounded
+      fabricated content into a target — accepted and written with no review
+      on the ``review = "auto"`` route path the pipeline runs unattended. The
+      default leaves generous room for the structure a real integration adds
+      (a heading, a bullet, a blank line, a re-wrapped long line) and still
+      refuses a model that starts writing a note of its own.
 
     Phase 5 implements the enforcement; the settings are contract and are
     validated from day one so a spec-conformant config never fails the
@@ -353,6 +373,7 @@ class IntegrateConfig:
     default_mode: EditMode = "manual"
     review: ReviewGate = "diff"
     max_deleted_lines: int = 0
+    max_added_lines: int = 10
 
 
 # ---------------------------------------------------------------------------
@@ -1046,14 +1067,20 @@ _REVIEW_GATES = frozenset({"diff", "auto"})
 _EDIT_MODES = frozenset({"manual", "append", "integrate"})
 
 
-def _validate_routes(v: _Validator, raw: dict[str, Any]) -> list[RouteConfig]:
+def _validate_routes(
+    v: _Validator, raw: dict[str, Any], integrate: IntegrateConfig
+) -> list[RouteConfig]:
+    """Every ``[[routes]]`` entry. ``integrate`` is threaded in because the
+    review gate a route ends up under is the route's own value OR
+    ``[integrate] review`` — and the ``auto = true`` refusal below must judge
+    the gate that will ACTUALLY be in force, not the route half of it."""
     entries = v.array_of_tables(raw, "routes", "", cls=RouteConfigError)
     if entries is None:
         return []
     routes: list[RouteConfig] = []
     for i, entry in enumerate(entries):
         try:
-            routes.append(_validate_route(v, entry, i))
+            routes.append(_validate_route(v, entry, i, integrate))
         except RouteConfigError:
             raise
         except ConfigError as exc:  # every route problem is a RouteConfigError
@@ -1061,7 +1088,9 @@ def _validate_routes(v: _Validator, raw: dict[str, Any]) -> list[RouteConfig]:
     return routes
 
 
-def _validate_route(v: _Validator, entry: dict[str, Any], i: int) -> RouteConfig:
+def _validate_route(
+    v: _Validator, entry: dict[str, Any], i: int, integrate: IntegrateConfig
+) -> RouteConfig:
     prefix = f"routes[{i}]"
     v.check_unknown(entry, _ROUTE_KEYS, prefix, cls=RouteConfigError)
     tags = v.string_list(entry, "tags", prefix, required=True, non_empty=True, cls=RouteConfigError)
@@ -1106,33 +1135,67 @@ def _validate_route(v: _Validator, entry: dict[str, Any], i: int) -> RouteConfig
             hint='add a trailing "/" to move into a folder (spec 11 §1)',
             cls=RouteConfigError,
         )
-    review = v.string(
-        entry, "review", prefix, "diff", choices=_REVIEW_GATES, cls=RouteConfigError
+    stated_review = v.string(
+        entry, "review", prefix, None, choices=_REVIEW_GATES, cls=RouteConfigError
     )
     # Every key is honored or it is an error (03 §1). `review` only has meaning
     # for an integrate route; accepting it silently on a move/append route would
-    # be a dead key of exactly the 08 §A35 kind.
-    if review != "diff" and mode != "integrate":
+    # be a dead key of exactly the 08 §A35 kind. Judged on the STATED value:
+    # a global `[integrate] review = "auto"` must not turn every append route
+    # into a config error.
+    if stated_review is not None and stated_review != "diff" and mode != "integrate":
         v.fail(
             f"{prefix}.review",
-            f"is {review!r} but mode is {mode!r} — the review gate applies to "
+            f"is {stated_review!r} but mode is {mode!r} — the review gate applies to "
             f'integrate results only (spec 12 §1)',
             hint='set mode = "integrate" for this destination, or drop `review`',
             cls=RouteConfigError,
         )
+    # THE ONE RESOLUTION (spec 12 §1's gate, config side and runtime side).
+    # A route that spelled `review` out is AUTHORITATIVE — 12 §1 calls
+    # `review = "auto"` a "(per-route opt-in)" and the shipped example calls
+    # `review` "the per-route gate", so a global default must not silently
+    # un-gate a route that wrote `review = "diff"` on purpose. `[integrate]
+    # review` is what a route that says nothing inherits, which is what a
+    # GLOBAL DEFAULT means. `routes.effective_review` reads this value back.
+    review = stated_review if stated_review is not None else str(integrate.review)
     auto = v.boolean(entry, "auto", prefix, False)
-    # Fail ONCE, at the door (03 §1 voice). The per-note ERROR branch in the
-    # router stays as unreachable defence-in-depth, but it cannot be the
-    # primary surface: an unattended integrate route would raise one error
-    # per matching note, exit 1, and fire the OnFailure alert every ten
-    # minutes for a config that is merely early — which trains the operator
-    # to ignore the channel. Lift this check when Phase 5 lands integrate.
-    if auto and mode == "integrate":
+    # PHASE-5 NARROWING of the Phase-4 blanket refusal (ARCHITECTURE "Phase-4
+    # rulings, tag_router close": 'auto=true + mode="integrate" fails AT CONFIG
+    # VALIDATION […] check lifts when Phase 5 lands'). Integrate has landed, so
+    # an unattended integrate route is now buildable — but ONLY behind
+    # `review = "auto"`, which is spec 12 §1's opt-in for applying "without
+    # asking".
+    #
+    # The Phase-4 RATIONALE is what survives, unchanged and now sharper: fail
+    # ONCE, at the door (03 §1 voice), for the config that could only ever
+    # produce a per-note error. `auto = true` with the default `review =
+    # "diff"` is exactly that config — the router would raise one error per
+    # matching note, exit 1, and fire the OnFailure alert every ten minutes,
+    # for a standing instruction (integrate this unattended) that contradicts
+    # its own review gate (ask a human first). The per-note ERROR branch in the
+    # router stays as unreachable defence-in-depth.
+    #
+    # A route that says BOTH `auto = true` and `review = "auto"` has opted in
+    # twice, deliberately, and is the one shape doc 11 §1 + doc 12 §1 jointly
+    # describe: an unattended Claude edit. It still passes every structural
+    # guard at commit, and no-ai still refuses for every actor.
+    #
+    # Judged on the RESOLVED gate (`review` above), never on the route half of
+    # it: `[integrate] review = "auto"` plus a route with `auto = true` and no
+    # `review` of its own is a config that WORKS at runtime, and refusing it
+    # here — with a message claiming review = 'diff' — made the shipped global
+    # key uncombinable with the one shape it exists for.
+    if auto and mode == "integrate" and review != "auto":
+        where = "" if stated_review is not None else " (inherited from [integrate] review)"
         v.fail(
             f"{prefix}.auto",
-            'is true with mode = "integrate", which cannot run unattended yet',
-            hint="integrate ships in Phase 5; set auto = false to keep this "
-            "route interactive-only until then",
+            f'is true with mode = "integrate" and review = {review!r}{where}, so every '
+            "matching capture would raise instead of being routed",
+            hint='an unattended integrate route must also set review = "auto" '
+            "(spec 12 §1: applies without asking) — on the route or in "
+            "[integrate]; otherwise set auto = false and "
+            "review the proposal in the UI or with `organize integrate`",
             cls=RouteConfigError,
         )
     template = v.string(entry, "template", prefix, None, allow_empty=True)
@@ -1280,7 +1343,11 @@ _TRUST_LEVELS = frozenset({"propose", "auto_below"})
 
 def _validate_integrate(v: _Validator, raw: dict[str, Any]) -> IntegrateConfig:
     table = v.table(raw, "integrate", "")
-    v.check_unknown(table, {"default_mode", "review", "max_deleted_lines"}, "integrate")
+    v.check_unknown(
+        table,
+        {"default_mode", "review", "max_deleted_lines", "max_added_lines"},
+        "integrate",
+    )
     d = IntegrateConfig()
     return IntegrateConfig(
         default_mode=v.string(  # type: ignore[arg-type]
@@ -1291,6 +1358,9 @@ def _validate_integrate(v: _Validator, raw: dict[str, Any]) -> IntegrateConfig:
         ),
         max_deleted_lines=v.integer(
             table, "max_deleted_lines", "integrate", d.max_deleted_lines, minimum=0
+        ),
+        max_added_lines=v.integer(
+            table, "max_added_lines", "integrate", d.max_added_lines, minimum=0
         ),
     )
 
@@ -1445,15 +1515,23 @@ def validate_config(raw: dict[str, Any], *, source: str = "<config>") -> Config:
         )
     v = _Validator(source)
     v.check_unknown(raw, _TOP_LEVEL_KEYS, "")
+    vault = _validate_vault(v, raw)
+    suggestions = _validate_suggestions(v, raw)
+    file_ops = _validate_file_ops(v, raw)
+    metadata_fields = _validate_metadata_fields(v, raw)
+    # `[integrate]` is validated BEFORE `[[routes]]` because a route resolves
+    # its review gate against it (see `_validate_route`), and the `auto = true`
+    # refusal must judge the gate that will actually be in force.
+    integrate = _validate_integrate(v, raw)
     return Config(
-        vault=_validate_vault(v, raw),
-        suggestions=_validate_suggestions(v, raw),
-        file_ops=_validate_file_ops(v, raw),
-        metadata_fields=_validate_metadata_fields(v, raw),
-        routes=_validate_routes(v, raw),
+        vault=vault,
+        suggestions=suggestions,
+        file_ops=file_ops,
+        metadata_fields=metadata_fields,
+        routes=_validate_routes(v, raw, integrate),
         consumers=_validate_consumers(v, raw),
         llm=_validate_llm(v, raw),
-        integrate=_validate_integrate(v, raw),
+        integrate=integrate,
         auto_organize=_validate_auto_organize(v, raw),
         server=_validate_server(v, raw),
         logging=_validate_logging(v, raw),
@@ -1861,7 +1939,9 @@ description = "Notes about improvisation, theatre, and performance practice."
 # (spec 12 §1). `review` is the per-route gate — "diff" shows you the change
 # before it lands, "auto" applies it silently. Prefer "diff" until you trust a
 # given destination; either way the target is backed up and the write is atomic,
-# and a `no-ai: true` target refuses integrate outright.
+# and a `no-ai: true` target refuses integrate outright. Spelling `review` out
+# here WINS over `[integrate] review`, which only supplies the default for routes
+# that stay silent — a global key can never un-gate a route you gated on purpose.
 [[routes]]
 tags = ["kms", "second-brain"]
 destination = "projects/kms/design-notes.md"
@@ -1971,14 +2051,22 @@ timeout_seconds = 60.0
 retries = 2
 
 # Edit modes and integrate safety (spec 12 §1). `default_mode` is the global
-# default; a route's `mode` overrides it. `max_deleted_lines` is the integrate
-# hard-reject threshold: an LLM result that deletes more than this many existing
-# non-whitespace lines is refused outright (default zero — integration adds and
-# weaves, it never destroys).
+# default; a route's `mode` overrides it. `review` here is the DEFAULT gate,
+# inherited only by integrate routes that do not state a `review` of their own —
+# a route that spelled `review = "diff"` keeps its gate whatever you write here
+# (12 §1 makes "auto" a per-route opt-in). `max_deleted_lines` and
+# `max_added_lines` are the two integrate hard-reject thresholds: a result that
+# deletes more than this many existing non-whitespace lines is refused outright
+# (default zero — integration adds and weaves, it never destroys), and one that
+# adds more than `max_added_lines` non-blank lines BEYOND the capture's own line
+# count is refused as a hallucination. Integrate also refuses a result that
+# re-orders or duplicates existing lines, and one that does not carry the
+# capture's words verbatim.
 [integrate]
 default_mode = "manual"      # manual | append | integrate
 review = "diff"              # diff (show me the change) | auto (apply silently)
 max_deleted_lines = 0
+max_added_lines = 10
 
 # Automatic organize trust ladder (spec 13 §2).
 [auto_organize]

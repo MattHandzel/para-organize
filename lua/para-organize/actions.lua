@@ -246,6 +246,27 @@ end
 
 M._rpc = rpc
 
+--- The documented spelling of the same seam. `para-organize.integrate` fires
+--- its two RPCs through here rather than holding a client of its own, so it
+--- inherits the lazy reconnect of `resolve_client()`, the abandoned-session
+--- guard and the single-notification error rendering — three behaviours a
+--- second call site would otherwise have to re-implement and could get
+--- subtly wrong.
+M.request = rpc
+
+--- Lazily required: `integrate` requires THIS module back (for `request`,
+--- `decision_context` and the keymap table), so a top-level require either
+--- way would be a load-order cycle.
+local function integrate()
+  local ok, mod = pcall(require, "para-organize.integrate")
+  if ok and type(mod) == "table" then
+    return mod
+  end
+  return nil
+end
+
+M._integrate = integrate
+
 -- --- setup / context -------------------------------------------------------
 
 ---@param opts table { client, state, config, ui, callback_style }
@@ -316,6 +337,15 @@ function M.load_current()
   s.browse = nil
   s.search = nil
   s.merge = nil
+  -- A review gate belongs to ONE capture: carrying it across a load would
+  -- offer Matt a diff proposed from a note he is no longer looking at.
+  if s.integrate then
+    s.integrate = nil
+    local gate = integrate()
+    if gate then
+      gate.unbind_gate()
+    end
+  end
   refresh()
 
   rpc("note.get", { path = record.path }, function(result, err)
@@ -343,6 +373,13 @@ function M.load_current()
   end)
   M.load_meta_fields()
   M.load_roots()
+  -- Spec 12 §1's per-route edit mode. Resolved once per capture (the routes
+  -- match on ITS tags) so `<CR>` on a destination is instant and never has to
+  -- ask mid-keystroke which of the three modes it is in.
+  local mod = integrate()
+  if mod then
+    mod.load_routes()
+  end
 end
 
 --- The PARA roots rendered as the browse tree of state 1 (see `M.accept`).
@@ -689,6 +726,11 @@ local function rank_of(s, destination)
   return nil
 end
 
+--- Public because `integrate` records the same counterfactual for the same
+--- reason merge does (spec 03 §6: an integration into a note THERE is a
+--- decision for that folder).
+M.rank_of = rank_of
+
 --- Move the current capture to `destination` (spec 05 §2 via `op.move`).
 function M.move(destination)
   local s = state()
@@ -803,6 +845,16 @@ function M.accept()
   end
   M.sync_selection_from_cursor()
   local view = s.view or "suggestions"
+  if view == "integrate" then
+    -- The review gate's accept half (spec 12 §1: "`<CR>`/`<leader>mc`
+    -- applies"). Dispatched on the VIEW, never on the rendered text — the
+    -- same 08 §A19 discipline `<CR>`'s line-kind dispatch already follows.
+    local gate = integrate()
+    if gate then
+      gate.accept()
+    end
+    return
+  end
   if view == "merge" then
     local keys = (cfg().keymaps or {}).buffer or {}
     notify(("press %s to complete the merge, %s to cancel"):format(keys.merge_complete or "<leader>mc", keys.merge_cancel or "<leader>mx"))
@@ -816,7 +868,7 @@ function M.accept()
     return
   end
   if kind == "file" then
-    M.merge_with(item.path)
+    M.integrate_or_merge(item.path)
     return
   end
 
@@ -837,8 +889,29 @@ function M.accept()
   if entry.kind == "dir" then
     M.open_item(entry)
   else
-    M.merge_with(entry.path)
+    M.integrate_or_merge(entry.path)
   end
+end
+
+--- Put the capture into an EXISTING file, in whichever of spec 12 §1's three
+--- edit modes governs that destination.
+---
+--- `merge_with` stays the `manual` mode's own entry point and is never
+--- rerouted: `m` / `:ParaOrganize merge` mean "I will edit this myself", and
+--- a key that sometimes summoned an LLM instead would be the 08 §A19 class of
+--- surprise. Only the generic "open this note" gesture (`<CR>` on an `[F]`
+--- line) consults the mode.
+---
+--- Degrades to `manual` whenever the mode is unknown — no `integrate` module,
+--- no route table, an older core with no `routes.resolve`: the merge editor
+--- is what this key did before spec 12 existed, and doing that silently is
+--- the `op.skip` precedent for a passive surface.
+function M.integrate_or_merge(target)
+  local gate = integrate()
+  if not gate then
+    return M.merge_with(target)
+  end
+  return gate.dispatch(target)
 end
 
 -- --- merge (spec 03 §5) ----------------------------------------------------
@@ -941,6 +1014,16 @@ end
 
 function M.merge_complete()
   local s = state()
+  -- Spec 12 §1 gives the review gate the SAME completion/cancel keys as the
+  -- merge editor ("`<CR>`/`<leader>mc` applies … `<leader>mx` rejects"), so
+  -- the two share one pair of bindings and split on the view.
+  if s and s.view == "integrate" then
+    local gate = integrate()
+    if gate then
+      gate.accept()
+    end
+    return
+  end
   local record = M.current_capture()
   if not (s and record and s.merge) then
     warn("not in a merge")
@@ -978,6 +1061,17 @@ end
 --- Cancel: right pane returns to the previous state, nothing written.
 function M.merge_cancel()
   local s = state()
+  -- In the review gate this key is REJECT, not cancel: spec 12 §1 names three
+  -- verdicts and all three are recorded, because "a rejection is as much
+  -- signal as an acceptance" (12 §2). There is deliberately no fourth,
+  -- record-nothing exit.
+  if s and s.view == "integrate" then
+    local gate = integrate()
+    if gate then
+      gate.reject()
+    end
+    return
+  end
   if not (s and s.merge) then
     warn("not in a merge")
     return
@@ -1665,6 +1759,12 @@ end
 --- no-op when the integrator's state module holds no session, which is
 --- exactly the case in the unit specs' injected-state world.
 function M.quit()
+  -- The review gate's `e` is a buffer-local keymap this module's sibling
+  -- installed; teardown on EVERY exit path (spec 09 §2) includes it.
+  local gate = integrate()
+  if gate then
+    pcall(gate.reset)
+  end
   ui().unmount()
   pcall(function()
     require("para-organize").teardown()
@@ -1751,8 +1851,29 @@ M.CORE_KEYS = {
   { name = "new_project", default = "<leader>np", desc = "New project folder", panes = { "capture", "organize" }, fn = function() M.new_project() end },
   { name = "new_area", default = "<leader>na", desc = "New area folder", panes = { "capture", "organize" }, fn = function() M.new_area() end },
   { name = "new_resource", default = "<leader>nr", desc = "New resource folder", panes = { "capture", "organize" }, fn = function() M.new_resource() end },
-  { name = "merge_complete", default = "<leader>mc", desc = "Complete merge", panes = { "organize" }, fn = function() M.merge_complete() end },
-  { name = "merge_cancel", default = "<leader>mx", desc = "Cancel merge", panes = { "organize" }, fn = function() M.merge_cancel() end },
+  { name = "merge_complete", default = "<leader>mc", desc = "Complete merge / accept proposal", panes = { "organize" }, fn = function() M.merge_complete() end },
+  { name = "merge_cancel", default = "<leader>mx", desc = "Cancel merge / reject proposal", panes = { "organize" }, fn = function() M.merge_cancel() end },
+  -- Spec 12 §1's edit modes. Both are organize-pane only: they act on the
+  -- DESTINATION under the cursor, which only exists in that pane.
+  { name = "integrate", default = "<leader>mi", desc = "Integrate capture into this note", panes = { "organize" }, fn = function()
+    local gate = integrate()
+    if gate then gate.integrate_selected() end
+  end },
+  { name = "integrate_mode", default = "<leader>mm", desc = "Choose edit mode for this note", panes = { "organize" }, fn = function()
+    local gate = integrate()
+    if gate then gate.choose_mode_selected() end
+  end },
+  -- VIEW-SCOPED: bound by `integrate.bind_gate()` only while a proposal is on
+  -- screen, and unbound when the gate closes. `e` in the organize pane is
+  -- otherwise plain cursor motion, and shadowing it permanently would be a
+  -- keymap change spec 03 never asked for. It stays in this table so the `?`
+  -- overlay lists it — spec 03 §2 requires the help to be generated from the
+  -- real table, and a key Matt can press that help never mentions is exactly
+  -- the hand-maintained-docs failure that rule exists to prevent.
+  { name = "integrate_edit", default = "e", desc = "Edit the proposed diff (review gate)", panes = { "organize" }, view = "integrate", fn = function()
+    local gate = integrate()
+    if gate then gate.edit() end
+  end },
 }
 
 --- The resolved keymap table: core rows + one row per configured
@@ -1773,7 +1894,8 @@ function M.keymap_table()
         desc = row.desc,
         panes = row.panes,
         navigation = row.navigation,
-        group = "Organize",
+        view = row.view,
+        group = row.view and "Review gate" or "Organize",
         fn = row.fn,
       })
     end
@@ -1823,7 +1945,9 @@ function M.bind(bufnr, pane)
   end
   local mode = ((cfg() or {}).ui or {}).capture_pane_keymaps or "core"
   for _, entry in ipairs(M.keymap_table()) do
-    local wanted = vim.tbl_contains(entry.panes, pane)
+    -- View-scoped rows (the spec 12 §1 review gate) are bound and unbound by
+    -- the module that owns the view, not by the pane-wide binder.
+    local wanted = entry.view == nil and vim.tbl_contains(entry.panes, pane)
     if wanted and pane == "capture" then
       if mode == "none" then
         wanted = false

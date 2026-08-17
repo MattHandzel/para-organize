@@ -29,6 +29,7 @@ empty, against a control where they are not).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,8 @@ from typing import Any
 import pytest
 
 from conftest import QUIRK_FILES  # noqa: E402  (tests/ is on sys.path)
+from organize_core import routes as routes_mod
+from organize_core.actions import ActionRecorder
 from organize_core.config import (
     Config,
     ConsumerConfig,
@@ -46,7 +49,12 @@ from organize_core.consumers.base import NotePayload, RunContext, Status
 from organize_core.consumers.runner import run_consumers, scan_notes
 from organize_core.consumers.store import AutomationStore
 from organize_core.consumers.tag_router import ACTOR, TagRouterConsumer
+from organize_core.fileops import OperationContext, OperationLog
+from organize_core.index import VaultIndex
 from organize_core.paths import CorePaths
+
+#: Sentinel distinguishing "harness default" from an explicit ``None``.
+_UNSET: Any = object()
 
 CAPTURE_DIR = "capture/raw_capture"
 TRAINING_LOG = "areas/health/training-log.md"
@@ -152,8 +160,82 @@ def consumer(config: Config | None = None, *, name: str = "router") -> TagRouter
     return instance
 
 
-def run_context(config: Config, paths: CorePaths, *, dry_run: bool = False) -> RunContext:
-    return RunContext(config=config, dry_run=dry_run, paths=paths)
+def root_op_context(
+    config: Config,
+    paths: CorePaths,
+    *,
+    dry_run: bool = False,
+    index: VaultIndex | None = None,
+) -> OperationContext:
+    """What the COMPOSITION ROOT builds — ``cli._op_context``, field for field.
+
+    Including ``on_record``, wired to the REAL production callback
+    (``cli._learn_from_action``). That is deliberate and load-bearing: since
+    the Phase-5 filter moved into ``learn.record_action``, "learning folds
+    nothing from a route firing" is a property of the CALLEE, and a harness
+    that quietly left ``on_record`` unset would prove nothing about it. Every
+    test in this file therefore drives a context whose learning callback is
+    live.
+    """
+    from organize_core.cli import _learn_from_action
+
+    idx = index if index is not None else VaultIndex(config, paths.index_path)
+    if index is None:
+        idx.load()
+    return OperationContext(
+        config=config,
+        index=idx,
+        oplog=OperationLog(paths.operations_log),
+        recorder=ActionRecorder(paths.actions_dir),
+        backup_dir=Path(config.vault.root) / config.file_ops.backup_dir,
+        dry_run=dry_run,
+        actor="matt",  # the root's default; the runner re-actors per consumer
+        describe=lambda folder: routes_mod.get_description(folder, idx, config),
+        on_record=lambda record: _learn_from_action(paths, config, record),
+    )
+
+
+def consumer_op_context(
+    config: Config,
+    paths: CorePaths,
+    *,
+    dry_run: bool = False,
+    index: VaultIndex | None = None,
+) -> OperationContext:
+    """The per-consumer view the RUNNER hands ``tag_router``.
+
+    ``runner.run_consumers`` does exactly this:
+    ``dataclasses.replace(op_context, actor=f"consumer:{entry.type}",
+    dry_run=dry_run)`` — the actor is the consumer TYPE, never the config
+    section name (ARCHITECTURE Phase-4 integration landing: "section-name
+    would misattribute every doc-12 record"). Spelled with a LITERAL here so
+    a flipped ``ACTOR`` constant cannot make the suite agree with itself.
+    """
+    return dataclasses.replace(
+        root_op_context(config, paths, dry_run=dry_run, index=index),
+        actor="consumer:tag_router",
+        dry_run=dry_run,
+    )
+
+
+def run_context(
+    config: Config,
+    paths: CorePaths,
+    *,
+    dry_run: bool = False,
+    op_context: OperationContext | None = _UNSET,  # type: ignore[assignment]
+) -> RunContext:
+    """The ``RunContext`` the runner builds, op_context included.
+
+    Pass ``op_context=None`` explicitly for the one test that pins the
+    no-recorded-write-path refusal; everything else gets the real wiring.
+    """
+    ctx_op = (
+        consumer_op_context(config, paths, dry_run=dry_run)
+        if op_context is _UNSET
+        else op_context
+    )
+    return RunContext(config=config, dry_run=dry_run, paths=paths, op_context=ctx_op)
 
 
 def archived_copies(vault: Path, stem: str) -> list[Path]:
@@ -201,6 +283,176 @@ def test_uses_llm_is_false_so_a_no_ai_note_is_not_denied_by_the_runner() -> None
 
 
 # ---------------------------------------------------------------------------
+# wants_llm — CLIENT INJECTION, keyed on integrate routes (12 §1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("mode", "auto", "expected"),
+    [
+        ("integrate", True, True),
+        ("integrate", False, False),  # non-auto never runs unattended (11 §1)
+        ("append", True, False),  # mechanical: no prompt is ever built
+        ("move", True, False),
+    ],
+)
+def test_wants_llm_is_true_only_for_an_auto_integrate_route(
+    fixture_vault: Path, mode: str, auto: bool, expected: bool
+) -> None:
+    """Doc 12 §1: ``integrate`` is the one route mode that calls an LLM.
+
+    LITERAL expectations, and all four cells asserted rather than only the
+    True one — a predicate that returns ``True`` unconditionally would inject
+    a client for a purely mechanical run, and a predicate that returns
+    ``False`` unconditionally is the ``taskwarrior.llm_enabled`` failure
+    (``ctx.llm`` permanently ``None``, the 06 §3.1 path unreachable in
+    production) reproduced for doc 12 §1.
+    """
+    config = make_config(fixture_vault, route(["rt-x"], TRAINING_LOG, mode=mode, auto=auto))
+    assert TagRouterConsumer(
+        ConsumerConfig(name="router", type="tag_router")
+    ).wants_llm(config) is expected
+
+
+def test_wants_llm_reads_the_bound_run_when_called_with_no_argument(
+    fixture_vault: Path,
+) -> None:
+    """The zero-argument call the runner makes today still answers honestly
+    ONCE the consumer is bound — the two-step half of the structural fix.
+
+    Both cells, so a constant-``False`` implementation fails.
+    """
+    integrate = make_config(
+        fixture_vault, route(["rt-x"], TRAINING_LOG, mode="integrate", auto=True)
+    )
+    mechanical = make_config(fixture_vault, route(["rt-x"], TRAINING_LOG, auto=True))
+    assert consumer(integrate).wants_llm() is True
+    assert consumer(mechanical).wants_llm() is False
+
+
+def test_wants_llm_is_a_widening_so_a_zero_arg_call_still_works() -> None:
+    """``wants_llm`` grew a ``config`` parameter at the Phase-5 landing (the
+    runner now passes the global Config). It must stay a pure WIDENING: every
+    parameter beyond ``self`` DEFAULTS, on the base class and on every
+    override, or a zero-argument caller raises ``TypeError`` and silently
+    falls back to the class flag — which is how ``taskwarrior.llm_enabled``
+    became inert in production.
+
+    Asserted against the LIVE classes, and then exercised for real: a
+    signature check alone would pass against a default of the wrong kind.
+    """
+    import inspect
+
+    from organize_core.consumers.base import Consumer
+
+    for owner in (Consumer, TagRouterConsumer):
+        signature = inspect.signature(owner.wants_llm)
+        extra = [p for name, p in signature.parameters.items() if name != "self"]
+        assert extra, (
+            f"{owner.__name__}.wants_llm lost its config parameter — the runner "
+            "passes one, and without it tag_router cannot see config.routes"
+        )
+        assert all(p.default is not inspect.Parameter.empty for p in extra), (
+            f"{owner.__name__}.wants_llm has a non-defaulted parameter, so a "
+            "zero-argument call raises TypeError and the run falls back to the "
+            "class flag"
+        )
+
+    # The behaviour, not just the shape: both call forms answer, and both
+    # answer the SAME thing for the same consumer.
+    unbound = TagRouterConsumer(ConsumerConfig(name="router", type="tag_router"))
+    assert unbound.wants_llm() is False
+    assert unbound.wants_llm(None) is False
+
+
+def test_wants_llm_sees_an_unattended_integrate_route_through_the_config(
+    fixture_vault: Path,
+) -> None:
+    """THE EXPIRED SEAM PROBE, REPLACED BY THE LANDED PIN.
+
+    ``test_wants_llm_unbound_fallback_expires_with_the_config_gate`` was a
+    self-removing probe (pattern approved at fb62bab): while
+    ``validate_config`` refused ``auto = true`` + ``mode = "integrate"``
+    outright, an unbound ``wants_llm()`` answering ``False`` was PROVABLY
+    safe, because no loadable config could make the honest answer ``True``.
+    Phase 5 narrowed that refusal (an unattended integrate route is legal
+    WITH ``review = "auto"``), so the probe expired exactly as designed and
+    is replaced here by the pin for the seam it was guarding.
+
+    The load-bearing claim: the config that is now loadable is also the one
+    ``wants_llm`` must answer ``True`` for. If the runner ever stops passing
+    the Config — or this predicate stops reading ``config.routes`` — the
+    route runs against ``ctx.llm = None``, which is the inert-in-production
+    failure ``taskwarrior.llm_enabled`` had.
+    """
+    from organize_core.config import validate_config
+
+    raw = {
+        "vault": {"root": str(fixture_vault)},
+        "routes": [
+            {
+                "tags": ["rt-x"],
+                "destination": TRAINING_LOG,
+                "mode": "integrate",
+                "auto": True,
+                "review": "auto",
+            }
+        ],
+    }
+    config = validate_config(raw, source="<probe>")
+
+    consumer_instance = TagRouterConsumer(ConsumerConfig(name="router", type="tag_router"))
+    assert consumer_instance.wants_llm(config) is True
+
+    # FIRING CONTROLS, so the True above cannot pass for the wrong reason.
+    # (a) The same route interactive-only: no unattended integrate, no client.
+    interactive = validate_config(
+        {**raw, "routes": [{**raw["routes"][0], "auto": False}]}, source="<probe>"
+    )
+    assert consumer_instance.wants_llm(interactive) is False
+    # (b) The same unattended route in a MECHANICAL mode: no prompt is built.
+    mechanical = validate_config(
+        {
+            **raw,
+            "routes": [
+                {
+                    "tags": ["rt-x"],
+                    "destination": TRAINING_LOG,
+                    "mode": "append",
+                    "auto": True,
+                    "template": "## {date}\n{body}",
+                }
+            ],
+        },
+        source="<probe>",
+    )
+    assert consumer_instance.wants_llm(mechanical) is False
+    # (c) And without the Config the predicate cannot know — which is the
+    #     whole reason the runner passes it.
+    assert consumer_instance.wants_llm(None) is False
+
+
+def test_the_runner_passes_the_global_config_to_wants_llm() -> None:
+    """The CONNECTION, not just today's consequence (anti-vacuity standard 3).
+
+    ``wants_llm(config)`` reading ``config.routes`` is useless if the runner
+    calls it with nothing, and a consequence check would be blind: an
+    unattended integrate route left un-integrated looks exactly like a route
+    that did not match. So pin the call itself.
+    """
+    import inspect
+
+    from organize_core.consumers import runner as runner_mod
+
+    source = inspect.getsource(runner_mod.run_consumers)
+    assert "consumer.wants_llm(config)" in source, (
+        "runner.run_consumers must pass the global Config to wants_llm(); "
+        "without it tag_router cannot see config.routes and an unattended "
+        "integrate route runs against ctx.llm = None"
+    )
+
+
+# ---------------------------------------------------------------------------
 # should_process — the consent gate and the filter law (11 §1, 06 §1)
 # ---------------------------------------------------------------------------
 
@@ -210,6 +462,36 @@ def test_an_auto_route_match_is_processed(fixture_vault: Path) -> None:
     path = write_capture(fixture_vault, "auto-hit", tags=["rt-workout"])
 
     assert consumer(config).should_process(payload_for(config, path)) is True
+
+
+def test_an_unbound_predicate_is_LOUD_not_silently_false(fixture_vault: Path) -> None:
+    """The interim "inert when unbound" branch is gone, and must not return.
+
+    ARCHITECTURE Phase-4 landing, on the accepted omission: "Its dead
+    unbound-inert branch + stale comment clean up in the same change" — and
+    the bind ruling (4ffef89) names why it may not simply answer ``False``:
+    "never 'continue unbound', because an unbound tag_router silently filters
+    everything: the silent-outage class".
+
+    Anti-vacuity: the capture used here MATCHES an ``auto = true`` route, so
+    a bound consumer answers ``True`` (the firing control) — the raise cannot
+    be mistaken for an ordinary filter miss.
+    """
+    from organize_core.errors import ConsumerError
+
+    config = make_config(fixture_vault, route(["rt-workout"], TRAINING_LOG, auto=True))
+    path = write_capture(fixture_vault, "unbound", tags=["rt-workout"])
+    payload = payload_for(config, path)
+
+    with pytest.raises(ConsumerError) as excinfo:
+        TagRouterConsumer(ConsumerConfig(name="router", type="tag_router")).should_process(
+            payload
+        )
+    assert "bind" in str(excinfo.value)
+
+    assert consumer(config).should_process(payload) is True, (
+        "the control did not fire — the raise above proves nothing"
+    )
 
 
 def test_a_non_auto_route_match_is_FILTERED_not_processed(fixture_vault: Path) -> None:
@@ -596,19 +878,67 @@ def test_an_integrate_route_is_refused_and_writes_nothing(
     assert path.exists()
 
 
-def test_missing_core_paths_is_an_error_not_a_crash(fixture_vault: Path) -> None:
-    """``RunContext.paths`` is None only in a hand-built context, but the
-    operation log, action corpus and backup dir have nowhere to go without
-    it — and structural decision 1 forbids mutating anyway."""
-    config = make_config(fixture_vault, route(["rt-workout"], TRAINING_LOG, auto=True))
-    write_target(fixture_vault, TRAINING_LOG)
-    path = write_capture(fixture_vault, "no-paths", tags=["rt-workout"])
+def test_a_missing_op_context_is_an_error_and_never_an_unrecorded_write(
+    fixture_vault: Path, paths: CorePaths
+) -> None:
+    """No recorded write path ⇒ ``Status.ERROR``, and the vault untouched.
 
-    result = consumer().handle(payload_for(config, path), RunContext(config=config))
+    ARCHITECTURE, "Phase-4 rulings, auto_tagger batch" (f24ee2e), verbatim:
+    "a consumer that would write the vault with op_context=None emits
+    Status.ERROR rather than performing an unrecorded write (refusing to
+    become a second unrecorded write path is the doc-12 discipline; errors
+    retry, so the run self-heals once the seam lands)".
+
+    Anti-vacuity: the ERROR must come from the MISSING CONTEXT, not from a
+    route miss or a missing target — so the target exists, the route is
+    ``auto = true``, and the FIRING CONTROL at the end runs the identical
+    capture through a context that DOES carry one and gets ``SUCCESS``.
+    """
+    config = make_config(fixture_vault, route(["rt-workout"], TRAINING_LOG, auto=True))
+    target = write_target(fixture_vault, TRAINING_LOG)
+    before = target.read_text(encoding="utf-8")
+    path = write_capture(fixture_vault, "no-op-ctx", tags=["rt-workout"], body="Held back.")
+
+    result = consumer().handle(
+        payload_for(config, path), run_context(config, paths, op_context=None)
+    )
 
     assert result.status is Status.ERROR
-    assert "CorePaths" in result.message or "paths" in result.message
-    assert path.exists()
+    assert "OperationContext" in result.message
+    assert path.exists(), "the capture is left in place so the retry can file it"
+    assert target.read_text(encoding="utf-8") == before
+    assert not archived_copies(fixture_vault, "no-op-ctx")
+    assert not Path(paths.operations_log).exists() or not Path(
+        paths.operations_log
+    ).read_text(encoding="utf-8").strip()
+
+    # firing control: the ONLY difference is the op_context
+    control = consumer().handle(payload_for(config, path), run_context(config, paths))
+    assert control.status is Status.SUCCESS, "the control did not fire — pin is vacuous"
+    assert "Held back." in target.read_text(encoding="utf-8")
+
+
+def test_missing_core_paths_no_longer_decides_anything_on_its_own(
+    fixture_vault: Path, paths: CorePaths
+) -> None:
+    """``RunContext.paths`` is no longer this consumer's dependency.
+
+    It used to open its own ``VaultIndex``/``OperationLog``/``ActionRecorder``
+    from ``ctx.paths``; those all come from ``ctx.op_context`` now, so a
+    context carrying the recorded write path but no ``CorePaths`` is
+    perfectly workable — and pinning that is how a reintroduced
+    ``ctx.paths``-derived service gets caught."""
+    config = make_config(fixture_vault, route(["rt-workout"], TRAINING_LOG, auto=True))
+    target = write_target(fixture_vault, TRAINING_LOG)
+    path = write_capture(fixture_vault, "no-paths", tags=["rt-workout"], body="Still filed.")
+
+    ctx = RunContext(
+        config=config, paths=None, op_context=consumer_op_context(config, paths)
+    )
+    result = consumer().handle(payload_for(config, path), ctx)
+
+    assert result.status is Status.SUCCESS, result.message
+    assert "Still filed." in target.read_text(encoding="utf-8")
 
 
 def test_handle_never_raises_when_apply_all_explodes(
@@ -683,35 +1013,48 @@ def test_the_action_record_carries_no_phantom_suggestions(
         assert context["chosen_rank"] is None, record
 
 
-def test_the_operation_context_is_actor_tagged_with_a_literal_and_unwired_from_learning(
+def test_the_operation_context_is_actor_tagged_with_a_literal_and_is_the_roots_own(
     fixture_vault: Path, paths: CorePaths
 ) -> None:
     """Structural pin on the context the consumer hands ``routes.apply_all``.
 
-    Both halves were added because a mutation sweep proved the suite blind to
-    them:
+    THE TRIPWIRE SWAP. ARCHITECTURE, "Test anti-vacuity standards", verbatim:
 
-    * The actor is compared against a LITERAL, not against ``ACTOR``.
-      ``test_the_action_record_actor_names_the_route`` asserts
-      ``actor == ACTOR``, which is self-referential — flipping the constant to
-      ``"matt"`` kept the whole suite green while every unattended firing
-      would have been attributed to Matt, corrupting ``actions stats`` and
-      doc-12's actor enum.
-    * ``on_record is None`` catches the WIRING, not just its effect. The trap
-      below asserts ``learning.json`` bytes, which a wired-but-harmless
-      callable survives; this fails the moment anything is attached.
+        DESIGNED TRIPWIRE (Phase-5 implementer, do not misread as
+        regression): tag_router's ``op_ctx.on_record is None`` pin is correct
+        TODAY because learn.record_action does not filter by actor. The
+        standing Phase-5 ruling moves enforcement INTO learn.record_action
+        (folds only Matt-decided actions); when that lands, on_record becomes
+        safely wireable globally and this connection-pin WILL fail BY DESIGN
+        — swap it for the callee-side pin (wired on_record + route-actor
+        record ⇒ learning.json unchanged) in the same change that lands the
+        filter.
+
+    The filter landed (``learn.is_matt_decided``), so the connection
+    assertion is REPLACED by its callee-side counterpart in
+    ``test_a_routed_run_teaches_the_learner_NOTHING`` below — which now
+    asserts the opposite connection (``on_record`` IS wired) before asserting
+    the bytes, so it cannot pass by the callback being absent.
+
+    The actor half is unchanged and still compares against a LITERAL, not
+    against ``ACTOR``: a mutation sweep found that flipping the constant to
+    ``"matt"`` kept the whole suite green while every unattended firing was
+    attributed to Matt, corrupting ``actions stats`` and doc-12's actor enum.
     """
     config = make_config(fixture_vault, route(["rt-workout"], TRAINING_LOG, auto=True))
-    op_ctx = consumer(config)._operation_context(run_context(config, paths))
+    ctx = run_context(config, paths)
+    op_ctx = consumer(config)._operation_context(ctx)
 
     assert op_ctx is not None
     assert op_ctx.actor == "consumer:tag_router", (
         "an unattended route firing is never attributed to Matt (12 §2 actor enum)"
     )
     assert ACTOR == "consumer:tag_router", "the exported constant must agree"
-    assert op_ctx.on_record is None, (
-        "learning folds only Matt-decided actions (ruling 4ffef89) — nothing "
-        "may be attached to on_record here"
+    assert op_ctx is ctx.op_context, (
+        "the consumer must CONSUME the composition root's context, not build a "
+        "second one (ARCHITECTURE Phase-4 landing: the omission accepted as a "
+        "Phase-5 rider) — a private context means a private index and a private "
+        "recorder that `cmd_run_consumers` never flushes"
     )
 
     # The rest of the doc-05 invariants the context is REQUIRED to carry.
@@ -726,19 +1069,95 @@ def test_the_operation_context_is_actor_tagged_with_a_literal_and_unwired_from_l
     assert op_ctx.chosen_rank is None
 
 
+def test_the_capture_record_is_read_through_the_composition_roots_own_index(
+    fixture_vault: Path, paths: CorePaths
+) -> None:
+    """The doc-05 ``NoteRecord`` must be indexed on the ROOT's index.
+
+    ARCHITECTURE, "Phase-4 rulings, tag_router close", verbatim: "**Index
+    staleness after applies**: ONE end-of-run flush in cmd_run_consumers via
+    op_context's index (composition root owns the index lifecycle once
+    op_context lands). Per-note flush rejected (full-snapshot rewrite per
+    note)."
+
+    One flush can only be accurate if there is one index. This consumer used
+    to open its own ``VaultIndex`` over the same snapshot path, so every
+    routed change landed in an object nobody flushed. Pinning the OBJECT (a
+    second index that reads the same file answers identically, so a
+    consequence check alone is blind — the mutation audit proved it) is what
+    catches a reintroduced second reader.
+    """
+    config = make_config(fixture_vault, route(["rt-workout"], TRAINING_LOG, auto=True))
+    path = write_capture(fixture_vault, "root-index", tags=["rt-workout"])
+    op_ctx = consumer_op_context(config, paths)
+    assert op_ctx.index.get(path) is None, "cold index — the assertion below is real"
+
+    record = TagRouterConsumer._capture_record(op_ctx, payload_for(config, path))
+
+    assert record is not None
+    indexed = op_ctx.index.get(path)
+    assert indexed is not None, (
+        "the capture was indexed somewhere the composition root cannot flush — "
+        "a second VaultIndex is exactly the staleness this ruling removed"
+    )
+    assert indexed is record, "and it is the SAME record, from the same store"
+
+
+def test_a_routed_apply_leaves_the_roots_index_accurate_for_its_one_flush(
+    fixture_vault: Path, paths: CorePaths
+) -> None:
+    """End-to-end consequence of the same rule: after a routed run, the
+    root's index no longer holds the capture, and its ONE flush persists
+    that. With a private index inside the consumer the snapshot on disk
+    still described the pre-run vault."""
+    config = make_config(fixture_vault, route(["rt-workout"], TRAINING_LOG, auto=True))
+    write_target(fixture_vault, TRAINING_LOG)
+    path = write_capture(fixture_vault, "flushed", tags=["rt-workout"], body="Filed.")
+    ctx = run_context(config, paths)
+    assert ctx.op_context is not None
+    ctx.op_context.index.full_reindex()
+    assert ctx.op_context.index.get(path) is not None, "control: the capture starts indexed"
+
+    assert consumer().handle(payload_for(config, path), ctx).status is Status.SUCCESS
+
+    assert ctx.op_context.index.get(path) is None, (
+        "apply_all removed the capture entry from the root's index (05 §2 step 8)"
+    )
+    ctx.op_context.index.flush()
+    reopened = VaultIndex(config, paths.index_path)
+    reopened.load()
+    assert reopened.get(path) is None, "the flushed snapshot still described the old vault"
+
+
 def test_a_routed_run_teaches_the_learner_NOTHING(
     fixture_vault: Path, paths: CorePaths
 ) -> None:
-    """TRAP TEST. ``learn.record_action`` does not filter by actor, so wiring
-    ``OperationContext.on_record`` would fold every unattended route firing
-    into ``learning.json``: routes would become self-reinforcing and doc 12's
-    accept-rate corpus would count a config entry as a decision Matt made.
-    A route firing is CONFIG, not a choice.
+    """TRAP TEST, in its CALLEE-SIDE form (the designed tripwire swap).
 
-    The FIRING CONTROL is the second half: the same helper, driven from a
-    context that DOES wire ``on_record``, changes the file — so this cannot
-    pass because learning was never reachable from here.
+    ARCHITECTURE ruling 4ffef89, verbatim: "**LEARNING FOLDS ONLY
+    MATT-DECIDED ACTIONS** […] a route firing is config, not a decision —
+    folding it would make routes self-reinforcing and corrupt the accept-rate
+    corpus. The routed-run learning-byte-identical trap test (with firing
+    control) is permanent."
+
+    Until Phase 5 that was enforced by tag_router leaving ``on_record``
+    UNSET, and the sibling test pinned exactly that connection. The
+    enforcement is now inside ``learn.record_action``, so the shape of the
+    pin inverts: ``on_record`` must be WIRED (asserted first, so the byte
+    assertion cannot pass because the callback was absent) and the bytes must
+    still not move.
+
+    TWO FIRING CONTROLS, because there are two ways this could go vacuous:
+
+    1. *The callback is reachable and does write* — the SAME wired callback,
+       fed the same route action re-actored to ``"matt"``, changes the file.
+       This is the mutate-the-guard-away check: the actor filter is the only
+       thing standing between this run and a learning write.
+    2. *The learner is writable at all* — a plain ``record_move`` +
+       ``save_learning`` against the same path changes the bytes.
     """
+    import dataclasses as _dc
+
     from organize_core.learn import LearningData, record_move, save_learning
 
     config = make_config(fixture_vault, route(["rt-workout"], TRAINING_LOG, auto=True))
@@ -747,16 +1166,40 @@ def test_a_routed_run_teaches_the_learner_NOTHING(
     save_learning(learning, LearningData())
     before = learning.read_bytes()
 
+    ctx = run_context(config, paths)
+    assert ctx.op_context is not None and ctx.op_context.on_record is not None, (
+        "the pin is vacuous unless the learning callback is actually wired — "
+        "that is the whole point of the Phase-5 tripwire swap"
+    )
+
     path = write_capture(fixture_vault, "no-teach", tags=["rt-workout"])
-    assert consumer().handle(
-        payload_for(config, path), run_context(config, paths)
-    ).status is Status.SUCCESS
+    assert consumer().handle(payload_for(config, path), ctx).status is Status.SUCCESS
 
     assert learning.read_bytes() == before, (
         "an unattended route firing must not become a learning precedent"
     )
 
-    # firing control: the learner IS writable here, and a real move teaches it
+    # --- firing control 1: the guard, mutated away ------------------------
+    # The record the run just wrote, re-actored to Matt and fed to the SAME
+    # wired callback. If this does not move the bytes, the trap above proves
+    # nothing about the actor filter.
+    from organize_core.actions import ActionRecord
+
+    written = [ActionRecord.from_json(raw) for raw in read_action_records(paths)]
+    routed = [rec for rec in written if rec.operation in {"append", "move", "merge"}]
+    assert routed, "the run recorded no filing operation — nothing to control against"
+    assert all(
+        rec.actor.startswith("route:") or rec.actor == "consumer:tag_router"
+        for rec in routed
+    ), [rec.actor for rec in routed]
+
+    ctx.op_context.on_record(_dc.replace(routed[0], actor="matt"))
+    assert learning.read_bytes() != before, (
+        "the wired callback never wrote — the byte assertion above was vacuous"
+    )
+
+    # --- firing control 2: the learner is writable at all ------------------
+    save_learning(learning, LearningData())
     from organize_core.index import VaultIndex
 
     index = VaultIndex(config, paths.index_path)
@@ -766,6 +1209,47 @@ def test_a_routed_run_teaches_the_learner_NOTHING(
     assert record is not None
     data = record_move(LearningData(), record, "areas/health", now=0.0)
     save_learning(learning, data)
+    assert learning.read_bytes() != before, "the control did not fire — trap is vacuous"
+
+
+def test_a_routed_run_through_the_runner_teaches_the_learner_NOTHING(
+    fixture_vault: Path, paths: CorePaths, store: AutomationStore
+) -> None:
+    """The same trap, through the REAL chain — composition root → runner →
+    consumer → ``routes.apply_all`` → recorder → ``on_record``.
+
+    The handle-level trap above proves the consumer's own wiring; this proves
+    that the wiring the RUNNER actually produces
+    (``dataclasses.replace(op_context, actor="consumer:tag_router")``, which
+    carries ``on_record`` straight through) still folds nothing. Firing
+    control: the identical vault and callback, driven by an actor-``matt``
+    record, does move the bytes.
+    """
+    from organize_core.learn import LearningData, save_learning
+
+    config = router_config(fixture_vault, route(["rt-workout"], TRAINING_LOG, auto=True))
+    write_target(fixture_vault, TRAINING_LOG)
+    learning = Path(paths.learning_path)
+    save_learning(learning, LearningData())
+    before = learning.read_bytes()
+
+    write_capture(fixture_vault, "runner-no-teach", tags=["rt-workout"], body="Not a decision.")
+    summary = drive(config, store, paths)
+
+    assert next(c for c in summary.consumers if c.name == "router").success == 1
+    assert learning.read_bytes() == before, (
+        "the runner's per-consumer context carries on_record through, so this "
+        "is the wiring production uses — it must still fold nothing"
+    )
+
+    # firing control: same callback, Matt-actored record
+    from organize_core.actions import ActionRecord
+
+    written = [ActionRecord.from_json(raw) for raw in read_action_records(paths)]
+    assert written, "the run recorded nothing — the assertion above was vacuous"
+    root = root_op_context(config, paths)
+    assert root.on_record is not None
+    root.on_record(dataclasses.replace(written[0], actor="matt"))
     assert learning.read_bytes() != before, "the control did not fire — trap is vacuous"
 
 
@@ -809,6 +1293,27 @@ def store(tmp_path: Path):  # noqa: ANN201 - same shape as the runner suites
         yield opened
 
 
+def drive(
+    config: Config, store: AutomationStore, paths: CorePaths, *, dry_run: bool = False
+) -> Any:
+    """``cli.cmd_run_consumers``' composition-root wiring, minus the CLI shell.
+
+    ONE ``OperationContext``, ONE ``VaultIndex``, ONE end-of-run flush — the
+    real chain, because ``tag_router`` now consumes ``RunContext.op_context``
+    instead of building its own. Calling ``run_consumers`` without an
+    ``op_context`` is a legitimate composition (other consumers do not need
+    one), so it is not an error the runner raises; it makes THIS consumer
+    return ``Status.ERROR``, which is pinned separately.
+    """
+    op_context = root_op_context(config, paths, dry_run=dry_run)
+    summary = run_consumers(
+        config, store, dry_run=dry_run, paths=paths, op_context=op_context
+    )
+    if not dry_run:
+        op_context.index.flush()
+    return summary
+
+
 def router_config(vault: Path, *routes: RouteConfig) -> Config:
     return make_config(
         vault,
@@ -837,7 +1342,7 @@ def test_golden_run_applies_the_auto_route_and_leaves_everything_else_alone(
     proposal = write_capture(fixture_vault, "run-proposal", tags=["rt-idea"])
     miss = write_capture(fixture_vault, "run-miss", tags=["rt-nothing"])
 
-    summary = run_consumers(config, store, paths=paths)
+    summary = drive(config, store, paths)
 
     consumer_summary = next(c for c in summary.consumers if c.name == "router")
     assert consumer_summary.success == 1, summary.consumers
@@ -880,7 +1385,7 @@ def test_a_custom_append_template_still_carries_the_capture_body(
         fixture_vault, "tpl-body", tags=["rt-workout"], body="Squatted 140kg."
     )
 
-    summary = run_consumers(config, store, paths=paths)
+    summary = drive(config, store, paths)
 
     assert next(c for c in summary.consumers if c.name == "router").success == 1
     text = target.read_text(encoding="utf-8")
@@ -900,11 +1405,11 @@ def test_a_second_run_changes_nothing(
     target = write_target(fixture_vault, TRAINING_LOG)
     write_capture(fixture_vault, "once", tags=["rt-workout"], body="Only once.")
 
-    run_consumers(config, store, paths=paths)
+    drive(config, store, paths)
     after_first = target.read_text(encoding="utf-8")
     assert after_first.count("Only once.") == 1
 
-    second = run_consumers(config, store, paths=paths)
+    second = drive(config, store, paths)
 
     assert target.read_text(encoding="utf-8") == after_first
     assert next(c for c in second.consumers if c.name == "router").success == 0
@@ -927,7 +1432,7 @@ def test_flipping_auto_true_fires_at_an_unchanged_note_hash(
     before_bytes = path.read_bytes()
 
     manual = router_config(fixture_vault, route(["rt-workout"], TRAINING_LOG, auto=False))
-    run_consumers(manual, store, paths=paths)
+    drive(manual, store, paths)
     assert path.read_bytes() == before_bytes, "a non-auto route must not touch the note"
     assert store.get_emission("router", path.resolve()) is None, (
         "a non-auto match must leave NO checkpoint — otherwise the flip below "
@@ -935,7 +1440,7 @@ def test_flipping_auto_true_fires_at_an_unchanged_note_hash(
     )
 
     hands_free = router_config(fixture_vault, route(["rt-workout"], TRAINING_LOG, auto=True))
-    summary = run_consumers(hands_free, store, paths=paths)
+    summary = drive(hands_free, store, paths)
 
     assert next(c for c in summary.consumers if c.name == "router").success == 1
     assert "Deferred." in target.read_text(encoding="utf-8")
@@ -956,7 +1461,7 @@ def test_a_failing_route_does_not_stop_the_run(
     broken = write_capture(fixture_vault, "aaa-broken", tags=["rt-broken"])
     good = write_capture(fixture_vault, "zzz-good", tags=["rt-workout"], body="Still ran.")
 
-    summary = run_consumers(config, store, paths=paths)
+    summary = drive(config, store, paths)
     consumer_summary = next(c for c in summary.consumers if c.name == "router")
 
     assert consumer_summary.error == 1, consumer_summary.failures
@@ -981,7 +1486,7 @@ def test_a_dry_run_touches_neither_the_vault_nor_the_store(
     before = target.read_text(encoding="utf-8")
     path = write_capture(fixture_vault, "rehearse", tags=["rt-workout"], body="Not yet.")
 
-    summary = run_consumers(config, store, dry_run=True, paths=paths)
+    summary = drive(config, store, paths, dry_run=True)
 
     assert next(c for c in summary.consumers if c.name == "router").would_process == 1
     assert target.read_text(encoding="utf-8") == before
@@ -993,7 +1498,7 @@ def test_a_dry_run_touches_neither_the_vault_nor_the_store(
     ).read_text(encoding="utf-8").strip()
 
     # firing control — the same setup, for real
-    run_consumers(config, store, paths=paths)
+    drive(config, store, paths)
     assert target.read_text(encoding="utf-8") != before
     assert store.get_emission("router", path.resolve()) is not None
 
@@ -1010,7 +1515,7 @@ def test_a_no_ai_capture_survives_a_full_run_untouched(
     before = protected.read_bytes()
     control = write_capture(fixture_vault, "journal-ok", tags=["journal"], body="Fine.")
 
-    run_consumers(config, store, paths=paths)
+    drive(config, store, paths)
 
     assert protected.read_bytes() == before
     assert store.get_emission("router", protected.resolve()) is None

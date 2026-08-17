@@ -438,6 +438,165 @@ def test_write_back_creates_a_block_when_the_note_has_none(fixture_vault: Path) 
     assert doc.body == LONG_BODY
 
 
+# ---------------------------------------------------------------------------
+# the write-back is a RECORDED meta_edit (spec 12 §2 / PHASE-5 checklist a)
+# ---------------------------------------------------------------------------
+
+
+def test_the_write_back_is_a_recorded_meta_edit_not_a_bare_atomic_write(
+    fixture_vault: Path,
+) -> None:
+    """ARCHITECTURE, "Phase-4 rulings, auto_tagger batch" (f24ee2e), PHASE-5
+    CHECKLIST item (a), verbatim: "learn consumer's SOURCE-note write-back
+    (processing_status: learn-processed) is a meta_edit in the doc-12 enum
+    and must migrate to update_frontmatter + op_context (new-output files —
+    flashcards/answers — stay store-audited, defensible as-is)".
+
+    So the corpus must show ONE ``meta_edit`` for the source note, actored to
+    the consumer, and the operations log must have a line. Every value is a
+    LITERAL (anti-vacuity standard 2): comparing against
+    ``actions.OPERATIONS`` or an imported ACTOR constant would agree with a
+    flipped constant.
+    """
+    import json
+
+    from test_consumer_learn_fakes import core_paths_for
+
+    note = learn_note(fixture_vault)
+    llm = FakeLLM(responses=[cards_response(*CARDS)])
+    paths = core_paths_for(fixture_vault)
+
+    assert (
+        make_learn().handle(payload_for(note), run_context(fixture_vault, llm)).status
+        is Status.SUCCESS
+    )
+
+    files = sorted(Path(paths.actions_dir).glob("*.jsonl"))
+    records = [
+        json.loads(line)
+        for file in files
+        for line in file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    meta_edits = [r for r in records if r["operation"] == "meta_edit"]
+    assert len(meta_edits) == 1, records
+    record = meta_edits[0]
+    assert record["actor"] == "consumer:learn"
+    assert record["capture"]["path"] == str(note)
+    assert record["capture"]["frontmatter_after"]["processing_status"] == "learn-processed"
+    assert [t["role"] for t in record["targets"]] == ["destination"]
+
+    oplog = Path(paths.operations_log)
+    assert oplog.is_file() and oplog.read_text(encoding="utf-8").strip()
+
+
+def test_the_write_back_teaches_the_learner_NOTHING(fixture_vault: Path) -> None:
+    """TRAP TEST. A ``meta_edit`` files nothing, and its actor is a consumer:
+    two independent reasons ``learn.record_action`` must return ``None``.
+    Both are asserted, and the FIRING CONTROL proves the callback was live.
+    """
+    import dataclasses
+    import json
+
+    from organize_core.actions import ActionRecord
+    from organize_core.cli import _learn_from_action
+    from organize_core.learn import LearningData, save_learning
+    from test_consumer_learn_fakes import core_paths_for, make_config, op_context_for
+
+    paths = core_paths_for(fixture_vault)
+    paths.ensure_state_dirs()
+    learning = Path(paths.learning_path)
+    save_learning(learning, LearningData())
+    before = learning.read_bytes()
+
+    config = make_config(fixture_vault)
+    op_context = dataclasses.replace(
+        op_context_for(fixture_vault),
+        on_record=lambda record: _learn_from_action(paths, config, record),
+    )
+    assert op_context.on_record is not None, "the pin is vacuous without the callback"
+
+    note = learn_note(fixture_vault)
+    llm = FakeLLM(responses=[cards_response(*CARDS)])
+    result = make_learn().handle(
+        payload_for(note), run_context(fixture_vault, llm, op_context=op_context)
+    )
+    assert result.status is Status.SUCCESS, result.message
+    assert learning.read_bytes() == before, "a meta_edit is not a filing decision"
+
+    # firing control: the SAME wired callback, fed a Matt-actored MOVE, writes
+    files = sorted(Path(paths.actions_dir).glob("*.jsonl"))
+    raw = [
+        json.loads(line)
+        for file in files
+        for line in file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert raw, "nothing was recorded — the assertion above was vacuous"
+    record = ActionRecord.from_json(raw[0])
+    op_context.on_record(
+        dataclasses.replace(record, actor="matt", operation="move")  # type: ignore[arg-type]
+    )
+    assert learning.read_bytes() != before, "the control did not fire — trap is vacuous"
+
+
+def test_without_an_op_context_the_consumer_refuses_rather_than_writing(
+    fixture_vault: Path,
+) -> None:
+    """ARCHITECTURE, "Phase-4 rulings, auto_tagger batch" (f24ee2e), verbatim:
+    "a consumer that would write the vault with op_context=None emits
+    Status.ERROR rather than performing an unrecorded write (refusing to
+    become a second unrecorded write path is the doc-12 discipline; errors
+    retry, so the run self-heals once the seam lands)".
+
+    Refused BEFORE the LLM call, so a wiring fault does not burn a
+    generation: the fake client's call log must be empty. Firing control: the
+    identical note through a context that HAS one succeeds and calls the LLM.
+    """
+    note = learn_note(fixture_vault)
+    before = note.read_bytes()
+    llm = FakeLLM(responses=[cards_response(*CARDS)])
+
+    result = make_learn().handle(
+        payload_for(note), run_context(fixture_vault, llm, op_context=None)
+    )
+
+    assert result.status is Status.ERROR
+    assert "OperationContext" in result.message
+    assert note.read_bytes() == before
+    assert llm.calls == [], "the refusal must precede the expensive half"
+    review_dir = fixture_vault / "resources/flashcards/review"
+    assert not list(review_dir.glob("*.md")) if review_dir.is_dir() else True
+
+    control = make_learn().handle(payload_for(note), run_context(fixture_vault, llm))
+    assert control.status is Status.SUCCESS, "the control did not fire — pin is vacuous"
+    assert llm.calls, "the control did not reach the LLM"
+
+
+def test_the_write_back_backs_the_note_up_and_updates_the_index(
+    fixture_vault: Path,
+) -> None:
+    """Two more things the bare ``atomic_write`` silently skipped: doc 05
+    §1.4's backup, and the index entry the composition root later flushes."""
+    from test_consumer_learn_fakes import op_context_for
+
+    note = learn_note(fixture_vault)
+    op_context = op_context_for(fixture_vault)
+    llm = FakeLLM(responses=[cards_response(*CARDS)])
+
+    assert (
+        make_learn()
+        .handle(payload_for(note), run_context(fixture_vault, llm, op_context=op_context))
+        .status
+        is Status.SUCCESS
+    )
+
+    backups = list(Path(op_context.backup_dir).rglob("*.md"))
+    assert backups, f"no backup under {op_context.backup_dir} (05 §1.4)"
+    record = op_context.index.get(note)
+    assert record is not None, "the composition root's index never saw the edit"
+
+
 def test_generation_log_is_created_from_a_template_when_missing(
     fixture_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -741,17 +900,40 @@ def test_audio_without_whisper_host_warns_and_degrades(
     assert any("whisper_host" in record.getMessage() for record in caplog.records)
 
 
-def test_invalid_utf8_in_a_note_does_not_crash_the_consumer(fixture_vault: Path) -> None:
-    """08 §B1 class: bytes that are not valid UTF-8 must decode, not raise."""
+def test_invalid_utf8_in_a_note_does_not_crash_and_is_never_silently_repaired(
+    fixture_vault: Path,
+) -> None:
+    """08 §B1 class: undecodable bytes must not raise out of ``handle``.
+
+    They must also not be written back MANGLED, and that is what the Phase-5
+    migration of the write-back changed. While it used a bare
+    ``fileops.atomic_write`` the note was re-read with ``errors="replace"``,
+    so stamping ``processing_status`` rewrote every undecodable byte as
+    U+FFFD and reported success — silent corruption of Matt's note, which
+    spec 05 §1 ("no code path may lose note content") forbids.
+    ``update_frontmatter`` refuses instead (``fileops._decode_for_mutation``:
+    "refusing to rewrite it because the copy would silently differ from the
+    original"), and that refusal's own hint is "fix the encoding of the note
+    […] and retry" — i.e. ``Status.ERROR``, the status the runner retries.
+
+    The load-bearing assertion is the last one: THE FILE IS UNCHANGED.
+    """
     path = fixture_vault / "resources/performing/bad-bytes.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"---\ntags:\n- learn\n---\n" + b"caf\xe9 " * 60)
+    raw = b"---\ntags:\n- learn\n---\n" + b"caf\xe9 " * 60
+    path.write_bytes(raw)
     payload = payload_for(path)
     llm = FakeLLM(responses=[cards_response(*CARDS)])
 
     assert make_learn().should_process(payload) is True
     result = make_learn().handle(payload, run_context(fixture_vault, llm))
-    assert result.status is Status.SUCCESS
+
+    assert result.status is Status.ERROR, "retried, per the primitive's own hint"
+    assert "UTF-8" in result.message
+    assert path.read_bytes() == raw, (
+        "the source must be byte-identical — the old bare-atomic_write path "
+        "replaced every undecodable byte with U+FFFD and called it success"
+    )
 
 
 def test_a_bare_learn_processed_mark_with_no_output_regenerates(fixture_vault: Path) -> None:

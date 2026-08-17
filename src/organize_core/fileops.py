@@ -118,6 +118,7 @@ from organize_core.actions import (
     ActionRecord,
     ActionRecorder,
     CaptureState,
+    LLMTrace,
     SuggestionShown,
     TargetState,
     new_action_id,
@@ -1036,6 +1037,7 @@ def _record_action(
     route: str | None = None,
     action: str | None = None,
     partial_failure: str | None = None,
+    llm: LLMTrace | None = None,
 ) -> None:
     """Emit the spec 12 §2 ActionRecord for an operation that CHANGED THE VAULT.
 
@@ -1058,8 +1060,28 @@ def _record_action(
     :class:`OperationContext`, so the counterfactual doc 12 exists to
     capture is filled in by whichever door the user came through instead of
     being hardcoded empty on every real record.
+
+    ``llm`` is the doc-12 §2 ``llm`` block, supplied by the ONE caller that
+    has one: :mod:`organize_core.integrate` (Phase-5 seam). It is a parameter
+    rather than a second record-building path in that module because doc 12 §2
+    describes ONE record shape and the Phase-4 facade ruling requires
+    recording to stay "structurally unavoidable: redirectable, never
+    suppressible". Passing it here means the SAME record object reaches both
+    ``ctx.recorder`` and ``ctx.on_record``, which matters: ``learn.
+    is_matt_decided`` reads the verdict off exactly this block, so a record
+    that reached the learner without it would invert the fold rule in both
+    directions.
     """
     filters: dict[str, Any] = dict(ctx.filters)
+    # `durations_ms` (12 §2) names two phases, `decision` and `operation`.
+    # Only the CLIENT can time the decision (capture shown → Matt acts) and
+    # only the CORE can time its own write, so the core measures `operation`
+    # here rather than echoing whatever the caller sent: `now` is the clock
+    # reading each operation takes on entry, and this runs after the write.
+    # Without it every real record carried a half-empty dict and the field
+    # advertised a phase with no producer.
+    durations_ms: dict[str, int] = dict(ctx.durations_ms)
+    durations_ms.setdefault("operation", max(0, int((ctx.clock() - now) * 1000)))
     try:
         record = ActionRecord(
             id=new_action_id(now=now),
@@ -1078,9 +1100,10 @@ def _record_action(
                 suggestions_shown=tuple(ctx.suggestions_shown),
                 chosen_rank=ctx.chosen_rank,
                 auto_tags_present=tuple(ctx.auto_tags_present),
-                durations_ms=dict(ctx.durations_ms),
+                durations_ms=durations_ms,
             ),
             edit_mode=edit_mode,  # type: ignore[arg-type]
+            llm=llm,
         )
     except Exception:  # noqa: BLE001 - recording never blocks the operation
         logger.error(

@@ -28,7 +28,7 @@ from conftest import QUIRK_FILES
 from organize_core import routes as routes_mod
 from organize_core.actions import ActionRecord, ActionRecorder
 from organize_core.config import Config, FileOpsConfig, RouteConfig, VaultConfig
-from organize_core.errors import RouteConfigError
+from organize_core.errors import OperationError, RouteConfigError
 from organize_core.fileops import (
     OperationContext,
     OperationLog,
@@ -459,16 +459,68 @@ def test_nothing_reaches_the_corpus_when_no_destination_was_applied(
 
 
 # ---------------------------------------------------------------------------
-# integrate — the doc-12 §1 handoff boundary (Phase 5)
+# integrate — doc 12 §1's Claude-edit path, wired in Phase 5
 # ---------------------------------------------------------------------------
+#
+# `apply_route`'s integrate branch is the `review = "auto"` half of 12 §1
+# ONLY. The default gate puts a human between the proposal and the write, and
+# a function returning one OperationResult has nowhere to put a proposal
+# awaiting review; that path is op.integrate_propose/commit (tests/
+# test_integration.py drives it end to end). Both refusals here are checked
+# WITH firing controls, because "integrate refuses" would otherwise pass
+# against an implementation that never integrates at all.
+
+
+class RouteFakeLLM:
+    """Minimal ``LLMClient`` for the route path: answers with one canned
+    integration and records every prompt, so a test can assert the model was
+    NOT called on a refusal."""
+
+    def __init__(self, content: str, *, rationale: str = "Filed under the log.") -> None:
+        self._payload = json.dumps({"content": content, "rationale": rationale})
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str, **kwargs: Any) -> Any:
+        from organize_core.llm import LLMResponse, extract_json
+
+        self.prompts.append(prompt)
+        return LLMResponse(
+            text=self._payload,
+            model="fake-sonnet",
+            backend="claude-cli",
+            duration_ms=7,
+            json=extract_json(self._payload),
+        )
+
+    def available(self) -> bool:
+        return True
+
+
+def integrate_route(
+    tags: list[str], destination: str, *, review: str = "diff", description: str = ""
+) -> RouteConfig:
+    return RouteConfig(
+        tags=tags,
+        destination=destination,
+        mode="integrate",
+        review=review,  # type: ignore[arg-type]
+        description=description,
+    )
+
+
+def woven_health_index(vault: Path) -> str:
+    """The target with the capture's body woven in, VERBATIM — what a
+    well-behaved model returns. Built from the real file so the golden cannot
+    drift from the fixture."""
+    return (vault / HEALTH_INDEX).read_text(encoding="utf-8") + "\n## Training\n\nleg day PR\n"
 
 
 def test_an_integrate_route_still_resolves_and_still_ranks_above_scored(
     fixture_vault: Path
 ) -> None:
-    """Phase 4 ships tag ROUTING; the integrate EDITING half is Phase 5. The
-    route must still be visible everywhere it was before — refusing to SHOW it
-    would hide a configured destination from the UI (11 §1)."""
+    """The route must be visible everywhere it was before — refusing to SHOW
+    an integrate route would hide a configured destination from the UI
+    (11 §1)."""
     config = make_config(
         fixture_vault,
         route(["workout"], HEALTH_INDEX, "integrate", description="Woven into the log."),
@@ -483,42 +535,330 @@ def test_an_integrate_route_still_resolves_and_still_ranks_above_scored(
     assert merged[0].reasons == ("Route 'workout' (integrate)",)
 
 
-def test_applying_an_integrate_route_refuses_cleanly_and_names_phase_five(
+def test_a_gated_integrate_route_refuses_and_never_reaches_the_model(
     fixture_vault: Path, state: Path
 ) -> None:
-    config = make_config(fixture_vault, route(["workout"], HEALTH_INDEX, "integrate"))
+    """``review = "diff"`` (the default) means a human decides. This door
+    cannot show a diff, so it refuses — and it refuses BEFORE building a
+    prompt, which is the assertion that matters: an LLM call for a proposal
+    nobody can accept is a bill and a latency spike for nothing."""
+    config = make_config(fixture_vault, integrate_route(["workout"], HEALTH_INDEX))
     ctx = make_ctx(fixture_vault, state, config)
     (match,) = resolve(["workout"], config)
+    llm = RouteFakeLLM(woven_health_index(fixture_vault))
+    target_before = (fixture_vault / HEALTH_INDEX).read_bytes()
 
-    with pytest.raises(NotImplementedError) as excinfo:
-        apply_route(ctx, capture_record(fixture_vault), match)
+    with pytest.raises(OperationError) as excinfo:
+        apply_route(ctx, capture_record(fixture_vault), match, llm=llm)
 
-    message = str(excinfo.value)
-    assert "integrate" in message
-    assert "Phase 5" in message
-    assert str(fixture_vault / HEALTH_INDEX) in message
+    assert "review" in str(excinfo.value)
+    assert "integrate_propose" in (excinfo.value.hint or "")
+    assert llm.prompts == []  # the model was never asked
+    assert (fixture_vault / HEALTH_INDEX).read_bytes() == target_before
+    assert log_lines(ctx) == []
+    assert records(ctx) == []
+
+
+def test_an_integrate_route_with_no_client_refuses_rather_than_silently_skipping(
+    fixture_vault: Path, state: Path
+) -> None:
+    """A composition root that forgot to wire ``llm=`` is a WIRING FAULT, and
+    the one thing it must not do is look like "no route matched". This is the
+    `taskwarrior.llm_enabled` failure class, made loud."""
+    config = make_config(
+        fixture_vault, integrate_route(["workout"], HEALTH_INDEX, review="auto")
+    )
+    ctx = make_ctx(fixture_vault, state, config)
+    (match,) = resolve(["workout"], config)
+    target_before = (fixture_vault / HEALTH_INDEX).read_bytes()
+
+    with pytest.raises(OperationError) as excinfo:
+        apply_route(ctx, capture_record(fixture_vault), match, llm=None)
+
+    assert "no LLM client" in str(excinfo.value)
+    assert (fixture_vault / HEALTH_INDEX).read_bytes() == target_before
+    assert records(ctx) == []
+
+
+def test_an_ungated_integrate_route_weaves_the_capture_in_and_records_it(
+    fixture_vault: Path, state: Path
+) -> None:
+    """THE FIRING CONTROL for both refusals above, and the doc-12 §1 golden:
+    ``review = "auto"`` + a client ⇒ the target is rewritten to the model's
+    content, the capture's words survive VERBATIM, and one ActionRecord
+    carries the full ``llm`` trace with ``verdict: "accepted"``.
+
+    Without this test the two refusals would pass just as happily against an
+    implementation that refused every integrate route unconditionally.
+    """
+    config = make_config(
+        fixture_vault,
+        integrate_route(["workout"], HEALTH_INDEX, review="auto", description="The log."),
+    )
+    ctx = make_ctx(fixture_vault, state, config)
+    (match,) = resolve(["workout"], config)
+    expected = woven_health_index(fixture_vault)
+    llm = RouteFakeLLM(expected)
+
+    result = apply_route(ctx, capture_record(fixture_vault), match, llm=llm)
+
+    assert result.ok is True
+    assert result.operation == "integrate"
+    assert result.details["verdict"] == "accepted"
+    assert result.details["edit_mode"] == "integrate"
+    # EXACT bytes, not "contains": the applied file is the reviewed content.
+    assert (fixture_vault / HEALTH_INDEX).read_text(encoding="utf-8") == expected
+    # Matt's words, character for character (12 §1's VERBATIM directive).
+    assert "leg day PR" in expected
+
+    (record,) = records(ctx)
+    assert record["operation"] == "integrate"
+    assert record["edit_mode"] == "integrate"
+    assert record["llm"]["verdict"] == "accepted"
+    assert record["llm"]["backend"] == "claude-cli"
+    # proposed == final for an accepted verdict, and both are non-empty.
+    assert record["llm"]["proposed_diff"] == record["llm"]["final_diff"]
+    assert record["llm"]["proposed_diff"].startswith("--- ")
+    assert record["llm"]["proposal_id"].startswith("prop_")
+    (target,) = record["targets"]
+    assert target["role"] == "merge_target"
+    assert target["path"] == str(fixture_vault / HEALTH_INDEX)
+    # The ROUTE's description reached the record (12 §2 targets[].description).
+    assert target["description"] == "The log."
+    # And the route's description reached the PROMPT (12 §1 inputs).
+    assert "The log." in llm.prompts[0]
+
+
+def test_an_ungated_integrate_route_through_apply_all_archives_the_capture(
+    fixture_vault: Path, state: Path
+) -> None:
+    """spec 11 §1: the capture archives ONCE, after every destination
+    succeeded — integrate is a destination like any other. ``apply_route``
+    alone deliberately leaves the original in place (ruling #11), so this is
+    the pin that a single integrate route filed through ``apply_all``
+    completes the 11 §4 acceptance shape."""
+    config = make_config(
+        fixture_vault, integrate_route(["workout"], HEALTH_INDEX, review="auto")
+    )
+    ctx = make_ctx(fixture_vault, state, config)
+    expected = woven_health_index(fixture_vault)
+    llm = RouteFakeLLM(expected)
+
+    results = apply_all(
+        ctx, capture_record(fixture_vault), resolve(["workout"], config), llm=llm
+    )
+
+    assert [r.operation for r in results] == ["integrate", "archive"]
+    assert all(r.ok for r in results)
+    assert (fixture_vault / HEALTH_INDEX).read_text(encoding="utf-8") == expected
+    assert not (fixture_vault / WORKOUT_CAPTURE).is_file()
+    assert archived(fixture_vault).is_file()
+    # ONE aggregate record for the logical action (12 §2), actored to the
+    # route because exactly one fired.
+    (record,) = records(ctx)
+    assert record["actor"] == "route:workout"
+    assert record["operation"] == "integrate"
+    assert record["llm"]["verdict"] == "accepted"
 
 
 def test_an_integrate_route_in_a_batch_refuses_before_anything_is_written(
     fixture_vault: Path, state: Path
 ) -> None:
     """A batch that cannot be carried out as asked must not be
-    half-carried-out: the refusal comes BEFORE the sibling append runs."""
+    half-carried-out: the refusal comes BEFORE the sibling append runs.
+
+    The CAUSE changed at Phase 5 (the review gate / a missing client, not "the
+    feature does not exist"); the PROPERTY is the same and is the reason
+    ``apply_all`` keeps a pre-flight pass instead of discovering the problem
+    on destination 2 of 2.
+    """
     config = make_config(
         fixture_vault,
         route(["workout"], IDEAS, "append"),
-        route(["exercise", "workout"], HEALTH_INDEX, "integrate"),
+        integrate_route(["exercise", "workout"], HEALTH_INDEX),  # gated
     )
     ctx = make_ctx(fixture_vault, state, config)
     ideas_before = (fixture_vault / IDEAS).read_bytes()
+    llm = RouteFakeLLM(woven_health_index(fixture_vault))
 
-    with pytest.raises(NotImplementedError):
-        apply_all(ctx, capture_record(fixture_vault), resolve(["workout"], config))
+    with pytest.raises(OperationError):
+        apply_all(ctx, capture_record(fixture_vault), resolve(["workout"], config), llm=llm)
 
     assert (fixture_vault / IDEAS).read_bytes() == ideas_before
     assert (fixture_vault / WORKOUT_CAPTURE).is_file()
     assert log_lines(ctx) == []
     assert records(ctx) == []
+    assert llm.prompts == []
+
+    # FIRING CONTROL: ungate the integrate route and the SAME batch applies
+    # both destinations and archives once — so the pre-flight is what refused
+    # above, not a batch that could never work.
+    config = make_config(
+        fixture_vault,
+        route(["workout"], IDEAS, "append"),
+        integrate_route(["exercise", "workout"], HEALTH_INDEX, review="auto"),
+    )
+    ctx = make_ctx(fixture_vault, state, config)
+    results = apply_all(
+        ctx, capture_record(fixture_vault), resolve(["workout"], config), llm=llm
+    )
+    assert [r.operation for r in results] == ["append", "integrate", "archive"]
+    assert all(r.ok for r in results)
+    assert (fixture_vault / IDEAS).read_bytes() != ideas_before
+    assert archived(fixture_vault).is_file()
+
+    # ...and the ONE aggregate record tells the truth about what happened.
+    # This used to ship green while the record read `operation: integrate`,
+    # `edit_mode: append` (an impossible pair) and `llm: null` — because
+    # `_merged_record` took `edit_mode` from the first non-null record and
+    # never merged `llm` at all. Both fields are what `organize actions stats`
+    # slices integrate accept/edit/reject rates on.
+    (record,) = records(ctx)
+    assert record["operation"] == "integrate", "strongest mutation wins"
+    assert record["edit_mode"] == "integrate", "and the edit mode belongs to the WINNER"
+    assert record["llm"]["verdict"] == "accepted"
+    assert record["llm"]["proposed_diff"].startswith("--- ")
+    assert record["llm"]["proposal_id"].startswith("prop_")
+    assert [Path(t["path"]).name for t in record["targets"]] == ["ideas.md", "index.md"]
+    assert all(t["diff"] for t in record["targets"]), "12 §2: both diffs, per file"
+
+
+def woven_ideas(vault: Path) -> str:
+    """The OTHER integrate destination, woven the same way."""
+    return (vault / IDEAS).read_text(encoding="utf-8") + "\n## From capture\n\nleg day PR\n"
+
+
+class TwoTargetFakeLLM:
+    """One canned integration PER CALL, so a two-destination batch produces two
+    genuinely different proposals (different prompts ⇒ different prompt
+    hashes) — which is the thing the aggregate record has to keep."""
+
+    def __init__(self, *contents: str) -> None:
+        self._contents = list(contents)
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str, **kwargs: Any) -> Any:
+        from organize_core.llm import LLMResponse, extract_json
+
+        self.prompts.append(prompt)
+        payload = json.dumps(
+            {"content": self._contents[len(self.prompts) - 1], "rationale": "Filed."}
+        )
+        return LLMResponse(
+            text=payload,
+            model="fake-sonnet",
+            backend="claude-cli",
+            duration_ms=7,
+            json=extract_json(payload),
+        )
+
+    def available(self) -> bool:
+        return True
+
+
+def test_two_integrate_destinations_keep_BOTH_traces(
+    fixture_vault: Path, state: Path
+) -> None:
+    """Spec 12 §2 is "ONE ENTRY PER FILE TOUCHED" and "diffs of every touched
+    file, per file" — Matt explicitly adds one capture to several files. The
+    record-level ``llm`` block has room for one trace, so the second
+    destination's ``prompt_hash``/``proposed_diff``/``final_diff``/
+    ``proposal_id`` were silently dropped. Each trace now rides on the target
+    it belongs to.
+    """
+    config = make_config(
+        fixture_vault,
+        integrate_route(["workout"], IDEAS, review="auto"),
+        integrate_route(["exercise", "workout"], HEALTH_INDEX, review="auto"),
+    )
+    ctx = make_ctx(fixture_vault, state, config)
+    # Goldens computed BEFORE the writes, so the assertions below compare
+    # against a fixed expectation rather than re-reading what was just written.
+    expected_ideas = woven_ideas(fixture_vault)
+    expected_health = woven_health_index(fixture_vault)
+    llm = TwoTargetFakeLLM(expected_ideas, expected_health)
+
+    results = apply_all(
+        ctx, capture_record(fixture_vault), resolve(["workout"], config), llm=llm
+    )
+
+    assert [r.operation for r in results] == ["integrate", "integrate", "archive"]
+    assert all(r.ok for r in results)
+    assert (fixture_vault / IDEAS).read_text(encoding="utf-8") == expected_ideas
+    assert (fixture_vault / HEALTH_INDEX).read_text(encoding="utf-8") == expected_health
+
+    (record,) = records(ctx)
+    first, second = record["targets"]
+    assert [Path(t["path"]).name for t in record["targets"]] == ["ideas.md", "index.md"]
+    hashes = [t["llm"]["prompt_hash"] for t in record["targets"]]
+    assert all(hashes), "every trace survived"
+    assert hashes[0] != hashes[1], "and they are the two DIFFERENT proposals"
+    assert [t["llm"]["verdict"] for t in record["targets"]] == ["accepted", "accepted"]
+    assert first["llm"]["proposal_id"] != second["llm"]["proposal_id"]
+    # Each per-file diff is that file's own, not the other's.
+    assert Path(first["path"]).name in first["llm"]["final_diff"]
+    assert Path(second["path"]).name in second["llm"]["final_diff"]
+    # The record-level block still exists for every reader that expects one.
+    assert record["llm"]["verdict"] == "accepted"
+    assert record["llm"]["prompt_hash"] in hashes
+
+
+def test_a_move_plus_integrate_batch_does_not_drop_the_trace(
+    fixture_vault: Path, state: Path
+) -> None:
+    """The worst case for the old `replace(base, ...)`: `base` is chosen for
+    the CAPTURE's post-state, which is the MOVE record — and a move record's
+    `llm` is None, so the whole trace vanished.
+
+    That is not only corpus fidelity. `learn.is_matt_decided` reads the
+    verdict off exactly this block, and a record reaching the learner without
+    it inverts the fold rule: every accepted integration by an automated actor
+    stops folding.
+    """
+    config = make_config(
+        fixture_vault,
+        route(["workout"], PERFORMING, "move"),
+        integrate_route(["exercise", "workout"], HEALTH_INDEX, review="auto"),
+    )
+    ctx = make_ctx(fixture_vault, state, config)
+    expected = woven_health_index(fixture_vault)
+    llm = RouteFakeLLM(expected)
+
+    results = apply_all(
+        ctx, capture_record(fixture_vault), resolve(["workout"], config), llm=llm
+    )
+
+    assert [r.operation for r in results] == ["move", "integrate", "archive"]
+    assert all(r.ok for r in results)
+
+    (record,) = records(ctx)
+    assert record["operation"] == "move", "strongest mutation still wins"
+    assert record["capture"]["frontmatter_after"] is not None, "and base is still the move"
+    assert record["llm"] is not None, "the integrate trace is NOT dropped"
+    assert record["llm"]["verdict"] == "accepted"
+    assert record["llm"]["prompt_hash"]
+    assert record["edit_mode"] == "integrate"
+    assert len(record["targets"]) == 2
+
+
+def test_a_single_integrate_destination_does_not_grow_a_per_target_trace(
+    fixture_vault: Path, state: Path
+) -> None:
+    """The per-target slot is for the COLLISION only. Populating it always
+    would store the big diff strings twice on every ordinary integrate record
+    and change the shape of every record already on Matt's disk."""
+    config = make_config(
+        fixture_vault, integrate_route(["workout"], HEALTH_INDEX, review="auto")
+    )
+    ctx = make_ctx(fixture_vault, state, config)
+    llm = RouteFakeLLM(woven_health_index(fixture_vault))
+
+    apply_all(ctx, capture_record(fixture_vault), resolve(["workout"], config), llm=llm)
+
+    (record,) = records(ctx)
+    (target,) = record["targets"]
+    assert "llm" not in target, "one trace ⇒ the record-level block says it all"
+    assert record["llm"]["verdict"] == "accepted"
 
 
 def test_an_unknown_route_mode_raises_rather_than_guessing(

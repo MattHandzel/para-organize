@@ -96,8 +96,26 @@ SPEC_10_METHODS: tuple[str, ...] = (
 #: `actions stats` measures acceptance rate against it), but spec 10 §2's
 #: list has no method for it, so the decision was unrecordable from the nvim
 #: client — the counterfactual silently lost every time a user pressed `s`.
+#:
+#: `op.integrate_propose` / `op.integrate_commit` are the Phase-5 pair, added
+#: by an EXPLICIT architect ruling rather than by a seat's judgement:
+#: ARCHITECTURE "Phase-5 integrate wire contract" names them verbatim —
+#: "**Names**: op.integrate_propose / op.integrate_commit (op.* namespace
+#: beside op.merge_preview/commit; preview=deterministic seed vs propose=LLM+
+#: review gate, asymmetry deliberate)". Spec 12 §1's review gate is "the nvim
+#: client shows the unified diff in the right pane", which is unreachable
+#: without a wire surface, and the split into two calls is forced by the same
+#: ruling's STATELESS-proposals reasoning (the idle core exits during review).
 EXTRA_METHODS: frozenset[str] = frozenset(
-    {"meta.fields", "meta.values", "folder.list", "folder.children", "op.skip"}
+    {
+        "meta.fields",
+        "meta.values",
+        "folder.list",
+        "folder.children",
+        "op.skip",
+        "op.integrate_propose",
+        "op.integrate_commit",
+    }
 )
 
 
@@ -118,6 +136,7 @@ def test_mutating_methods_are_exactly_the_dispatch_contract() -> None:
             "op.merge_commit",
             "op.archive",
             "op.skip",
+            "op.integrate_commit",
             "meta.set",
             "folder.create",
             "index.reindex",
@@ -125,6 +144,34 @@ def test_mutating_methods_are_exactly_the_dispatch_contract() -> None:
         }
     )
     assert MUTATING_METHODS <= set(RPC_METHODS)
+
+
+def test_integrate_propose_is_not_queued_and_integrate_commit_is() -> None:
+    """The one place ``op.*`` is NOT queued wholesale, and the asymmetry is
+    deliberate (ARCHITECTURE Phase-5 integrator ruling).
+
+    ``op.integrate_propose`` writes no vault byte; its only state write is an
+    append to the append-only action corpus, which spec 12 §2 specifies as
+    atomic appends and which therefore needs no lock. Queuing it would park
+    the SINGLE writer for the length of an LLM call — the same class as the
+    ``_ReadWriteLock`` phase-fairness finding, where a slow lock holder froze
+    the picker. Propose-time races are covered instead by ``target_snapshot``
+    + the commit-time TOCTOU check, which also covers the far bigger window
+    while a human reviews.
+
+    ``op.integrate_commit`` IS queued and IS index-changing: it rewrites a
+    note. Asserted as LITERALS on both sides so flipping either classification
+    is a red build rather than a silent latency or staleness regression.
+    """
+    from organize_core.server import NON_QUEUED_LLM_METHODS
+
+    assert "op.integrate_propose" not in MUTATING_METHODS
+    assert NON_QUEUED_LLM_METHODS == frozenset({"op.integrate_propose"})
+    assert "op.integrate_commit" in MUTATING_METHODS
+    assert "op.integrate_commit" in INDEX_CHANGING_METHODS
+    # And propose is still a real, dispatchable method — "not queued" must not
+    # be reachable by simply forgetting to register it.
+    assert "op.integrate_propose" in RPC_METHODS
 
 
 def test_every_rpc_method_has_a_handler(fixture_vault: Path, tmp_path: Path) -> None:

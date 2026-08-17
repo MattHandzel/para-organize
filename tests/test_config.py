@@ -297,10 +297,12 @@ FULL_RAW: dict[str, Any] = {
             "template": "## {date}",
             "review": "auto",
         },
-        # `auto` cannot ride on the integrate route above: unattended
-        # integrate is refused at validation until Phase 5 lands it. It gets
-        # its own append route instead, so FULL_RAW still carries a
-        # non-default value for every leaf.
+        # `auto` rides on a separate APPEND route rather than on the integrate
+        # route above. It could now ride on it — Phase 5 narrowed the refusal
+        # to `auto = true` + integrate + review != "auto", and that route sets
+        # review = "auto" — but keeping them apart is what makes FULL_RAW
+        # carry a non-default value for `auto` AND for a non-auto integrate
+        # route at the same time. The narrowed rule has its own tests.
         {
             "tags": ["blog-idea"],
             "destination": "projects/blog/ideas.md",
@@ -386,8 +388,7 @@ def test_every_config_key_is_honored() -> None:
         auto_create_folders=False,
     )
     assert [f.key for f in config.metadata_fields] == ["energy"]
-    # `auto` lives on the second (append) route: unattended integrate is
-    # refused at validation until Phase 5.
+    # `auto` lives on the second (append) route — see the FULL_RAW comment.
     assert config.routes[0].auto is False
     assert config.routes[1].auto is True
     assert config.routes[0].template == "## {date}"
@@ -447,10 +448,12 @@ RESERVED_CONFIG_LEAVES: dict[str, str] = {
     # own persistence honors spec 09 §40 through the BATCH half
     # (`VaultIndex.flush_threshold`), which is also its crash bound.
     "vault.incremental_debounce": "spec 03 §7 — client-side reindex trigger (Phase 2)",
-    # spec 12 §1 integrate mode — Phase 5.
-    "integrate.default_mode": "spec 12 §1 — integrate edit mode (Phase 5)",
-    "integrate.review": "spec 12 §1 — integrate review gate (Phase 5)",
-    "integrate.max_deleted_lines": "spec 12 §1 — integrate deletion guard (Phase 5)",
+    # ALL THREE `[integrate]` keys left this list at the Phase-5 landing, by
+    # the allowlist's own anti-rot half — each now has a real reader:
+    #   integrate.max_deleted_lines → integrate.check_guards (the deletion guard)
+    #   integrate.review            → routes.effective_review (the 12 §1 gate)
+    #   integrate.default_mode      → routes.effective_mode (12 §1's "global
+    #                                 default", reported by `routes resolve`)
     # spec 13 automatic organize — Phase 6.
     "auto_organize.trust": "spec 13 §2 — automatic organize (Phase 6)",
     "auto_organize.confidence_threshold": "spec 13 §2 — automatic organize (Phase 6)",

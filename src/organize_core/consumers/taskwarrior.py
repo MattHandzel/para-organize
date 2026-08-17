@@ -65,7 +65,7 @@ from organize_core.consumers.base import (
     register,
 )
 from organize_core.errors import ConfigError, ConsumerError, OrganizeError
-from organize_core.frontmatter import Document, Frontmatter, is_no_ai
+from organize_core.frontmatter import Frontmatter
 from organize_core.paths import default_env, expand
 
 LOG = logging.getLogger("organize_core.consumers.taskwarrior")
@@ -284,9 +284,15 @@ def _note_tags(payload: NotePayload) -> list[str]:
     return [str(tag) for tag in Frontmatter(fields=dict(payload.frontmatter)).get_list("tags")]
 
 
-def _note_is_no_ai(payload: NotePayload) -> bool:
-    """The vault law (spec 02), evaluated by the shared implementation."""
-    return is_no_ai(Document(Frontmatter(fields=dict(payload.frontmatter)), payload.content))
+# `_note_is_no_ai` used to live here, rebuilding a `Document` just to reach
+# `frontmatter.is_no_ai`. It is DELETED (ARCHITECTURE "Phase-4 rulings,
+# auto_tagger batch", PHASE-5 CHECKLIST item (b), commit f24ee2e:
+# "taskwarrior.py's redundant `_note_is_no_ai` delegating helper simplifies to
+# payload.no_ai"). `NotePayload.no_ai` is the ONE no-ai rule — it delegates to
+# `frontmatter.fields_are_no_ai`, which `is_no_ai(Document)` also calls
+# (Phase-3 ruling: "no_ai MUST delegate to the frontmatter module's no-ai
+# predicate — ONE rule in the codebase"). The wrapper was a second door onto
+# the same rule and the last thing keeping `Document`/`is_no_ai` imported here.
 
 
 # ---------------------------------------------------------------------------
@@ -769,8 +775,9 @@ class TaskwarriorConsumer(Consumer):
         # ``uses_llm`` is False (the task itself is created for every note),
         # so the runner's central guard does not cover this branch — the
         # prompt-building path is guarded here instead (spec 02 vault law,
-        # ARCHITECTURE resolution #12's reasoning).
-        if _note_is_no_ai(payload):
+        # ARCHITECTURE resolution #12's reasoning). ``payload.no_ai`` is the
+        # ONE shared rule (Phase-5 checklist item (b), f24ee2e).
+        if payload.no_ai:
             LOG.info("taskwarrior: no-ai note, skipping LLM enrichment for %s", payload.path)
             return task
         if ctx.llm is None:

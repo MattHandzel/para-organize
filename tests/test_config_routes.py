@@ -75,7 +75,19 @@ def test_no_routes_section_means_no_routes() -> None:
 def test_route_defaults() -> None:
     config = validate_config(raw_with({"tags": ["x"], "destination": "a/b.md", "mode": "append"}))
     assert config.routes[0] == RouteConfig(
-        tags=["x"], destination="a/b.md", mode="append", description="", template=None, auto=False
+        tags=["x"],
+        destination="a/b.md",
+        mode="append",
+        description="",
+        template=None,
+        auto=False,
+        # RESOLVED at load: a route that states no `review` inherits
+        # `[integrate] review` (default "diff"), so a loaded route always
+        # carries the gate actually in force and `routes.effective_review`
+        # reads back the same answer the config gate judged. `None` — the
+        # dataclass default — means "nobody stated one" and can only survive on
+        # a hand-built RouteConfig that never went through validation.
+        review="diff",
     )
 
 

@@ -1221,6 +1221,65 @@ def test_no_ai_underscore_spelling_is_also_honored(
     assert llm.prompts == []
 
 
+@pytest.mark.parametrize(
+    ("front", "expected_prompted"),
+    [
+        ("no-ai: true\n", False),
+        ("no_ai: true\n", False),
+        ('no-ai: "true"\n', False),  # ambiguous truthy ⇒ over-match is the safe error
+        ("no-ai: false\n", True),
+        ("", True),
+    ],
+)
+def test_the_enrichment_guard_is_NotePayload_no_ai_and_nothing_else(
+    fake_task: FakeTask,
+    tmp_path: Path,
+    fixture_vault: Path,
+    front: str,
+    expected_prompted: bool,
+) -> None:
+    """The consumer's local no-ai guard is ``payload.no_ai`` — ONE rule.
+
+    ARCHITECTURE, "Phase-4 rulings, auto_tagger batch" (f24ee2e), PHASE-5
+    CHECKLIST item (b), verbatim: "taskwarrior.py's redundant
+    ``_note_is_no_ai`` delegating helper simplifies to payload.no_ai". The
+    deleted wrapper rebuilt a ``Document`` to reach ``frontmatter.is_no_ai``;
+    both doors already end at ``frontmatter.fields_are_no_ai`` (Phase-3
+    ruling: "no_ai MUST delegate to the frontmatter module's no-ai
+    predicate — ONE rule in the codebase").
+
+    Every cell is asserted, refusing AND firing, so a guard that answered
+    ``True`` unconditionally (enrichment permanently dead — the
+    ``llm_enabled``-is-inert failure) fails as loudly as one that answered
+    ``False`` (the vault law breached). Agreement with the payload property
+    is asserted alongside, so the two cannot drift.
+    """
+    stem = front.replace(":", "").replace(" ", "").replace('"', "").replace("\n", "") or "none"
+    path = fixture_vault / "capture" / "raw_capture" / f"guard-{stem}.md"
+    path.write_text(f"---\ntags:\n- todo\n{front}---\nGuarded thing\n", encoding="utf-8")
+    note = payload_from_file(path)
+    assert note.no_ai is not expected_prompted, "the fixture does not exercise this cell"
+
+    llm = ScriptedLLM(text='{"utility": 8}')
+    consumer = make_consumer(fake_task, tmp_path, llm_enabled=True)
+    result = consumer.handle(note, make_context(fixture_vault, llm=llm))
+
+    assert result.status is Status.SUCCESS, "the TASK is created either way (#12)"
+    assert bool(llm.prompts) is expected_prompted
+
+
+def test_the_deleted_no_ai_wrapper_stays_deleted() -> None:
+    """The de-dup obligation, made structural rather than a comment: a second
+    module-level no-ai predicate here would be a second door onto the vault
+    law, which is exactly what the ONE-rule ruling exists to prevent."""
+    from organize_core.consumers import taskwarrior as module
+
+    assert not hasattr(module, "_note_is_no_ai")
+    assert [name for name in vars(module) if name.endswith("is_no_ai")] == [], sorted(
+        name for name in vars(module) if "no_ai" in name
+    )
+
+
 def test_enrichment_is_skipped_when_the_taskrc_lacks_the_udas(
     fake_task: FakeTask, tmp_path: Path, fixture_vault: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

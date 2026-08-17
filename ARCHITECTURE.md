@@ -57,6 +57,21 @@ everything ◀── cli, server (composition roots)
 tags and must go through the ONE shared `normalize_tag` (09 §2). `frontmatter`
 is dependency-free, so the edge is acyclic.
 
+`frontmatter ◀── actions` was added at Phase-5 close, for the IDENTICAL
+law-backed reason: `ActionRecorder.query_similar` (spec 13 §3) compares a
+query's tags against the corpus's, so it must go through the ONE
+`normalize_tag` and the ONE shared list coercion — never a hand-rolled
+re-parse (08 §B9 class), which is load-bearing because Matt's vault has
+scalar `tags:` values. `frontmatter` is dependency-free, so this is acyclic;
+`actions` deliberately did NOT take an edge on `suggest` (see the Phase-5
+consolidation ruling), and a test pins its import set as exactly
+`{errors, frontmatter}` so adding one later is a red build.
+
+`routes ◀── integrate` was added at Phase-5 close so `apply_route` can
+dispatch `mode = "integrate"`. Acyclic — `integrate` imports
+fileops/actions/config/errors/frontmatter/llm and never `routes` — and the
+import is function-local, in the one branch that needs it.
+
 Two more edges recorded at the Phase-1 fix pass:
 
 - `frontmatter ◀── config` — `config.coerce_metadata_value` applies the doc-07
@@ -91,9 +106,9 @@ composition roots supply `routes.get_description` for
 | **suggest** | `suggest.py` | `tests/test_suggest*.py` (numeric goldens) | 04, 08 §A7/§A22, 13 §3 | learn (score readback), index (NoteRecord), config |
 | **learn** | `learn.py` | `tests/test_learn*.py` (numeric goldens) | 04 §3-7, 08 §A22/§A23, 12 §2 (uses #2) | index (NoteRecord), config |
 | **fileops** | `fileops.py` | `tests/test_fileops*.py` | 05 (all), 10 §4, 08 §A14-A16/§A24/§A25, 09 §5.6 | frontmatter, actions, index, config |
-| **actions** | `actions.py` | `tests/test_actions*.py` | 12 (all), 13 §3 (query-by-similarity comes later) | — (pure + file append) |
+| **actions** | `actions.py` | `tests/test_actions*.py` | 12 (all), 13 §3 (query-by-similarity) | `frontmatter` (Phase 5; was "— (pure + file append)") |
 | **session** | `session.py` | `tests/test_session*.py` | 03 §2/§6, 09 §2 | index |
-| **routes** | `routes.py` | `tests/test_routes*.py` | 11 (all), 12 §1 (integrate handoff) | config, fileops, suggest, index |
+| **routes** | `routes.py` | `tests/test_routes*.py` | 11 (all), 12 §1 (integrate dispatch) | config, fileops, suggest, index, `integrate` (Phase 5, function-local) |
 | **llm** | `llm.py` | `tests/test_llm*.py` (fake endpoints) | 09 §2, 06 §3.2-3.3/§6, 11 §2, 12 §1, 08 §B11 | config |
 | **config** | `config.py` | `tests/test_config*.py` | 03 §1, 06 §2, 07, 10 §3, 11 §1, 12, 13 §2, 08 §A35/§C | paths |
 | **store** | `consumers/store.py` | `tests/test_store*.py` (incl. migration against a COPY of the live DB — coordinate with integrator; never open the live file directly) | 06 §1, 08 §B4/§B5 | paths |
@@ -630,6 +645,29 @@ skeleton signature changed incompatibly.
 - **actions** — `ActionContext.dry_run`; `include_dry_run=` on `query`,
   `stats` and `export`; `ActionSchemaError`; `OPERATIONS` / `EDIT_MODES` /
   `VERDICTS` / `TARGET_ROLES`; `ActionRecorder.month_files()`.
+- **actions (Phase 5)** — `SIMILARITY_WEIGHTS`, `SimilarAction`,
+  `tokenize()`, `ActionRecorder.query_similar()` (spec 13 §3);
+  `LLMTrace.proposal_id` (trailing, defaulted, omitted from `to_json` when
+  empty — the wire contract's correlation id).
+- **integrate (Phase 5, NEW MODULE)** — `read_document` /
+  `IntegrationDocument`; `IntegrationProposal` (+ `to_json`/`from_json`, the
+  STATELESS wire); `propose()`, `apply()`, `check_guards()`,
+  `apply_unified_diff()`, `build_prompt()`, `prompt_hash()`,
+  `deleted_line_count()`, `normalize_whitespace()`, `new_proposal_id()`,
+  `integrate_client()`; constants `ACTOR` / `EDIT_MODE` / `OPERATION` /
+  `TARGET_ROLE` / `PROMPT_TEMPLATE` / `SYSTEM_PROMPT` /
+  `JUSTIFIED_FRONTMATTER_KEYS`.
+- **routes (Phase 5)** — `effective_mode()`, `effective_review()`,
+  `match_for()`, `named()`; keyword-only `llm=` on `apply_route`/`apply_all`.
+  (`_refuse_integrate` and `_PHASE_5_HINT` are DELETED — the handoff boundary
+  they guarded is now implemented.)
+- **fileops (Phase 5)** — `_record_action(..., llm: LLMTrace | None = None)`.
+- **consumers/base (Phase 5)** — `Consumer.wants_llm(config: Config | None
+  = None)` (a widening; the runner now passes the global Config).
+- **cli (Phase 5)** — subcommand `integrate`; `cmd_integrate`;
+  `actions query`.
+- **server (Phase 5)** — `op.integrate_propose` / `op.integrate_commit` in
+  `RPC_METHODS`; `NON_QUEUED_LLM_METHODS`.
 - **fileops** — `OperationContext.clock`; `LoggedOperation.backup` and
   `.dry_run`; `update_frontmatter(..., replace_keys=)`.
   (`DRY_RUN_FILTER_KEY` was removed — superseded by `ActionContext.dry_run`.)
@@ -1555,6 +1593,38 @@ The "already delivered" truth lives in the VAULT, not the store.
   proposal_id is a CORRELATION id echoed into the ActionRecord, never a
   server-side lookup key. Trace fidelity trusts the single-user client;
   SAFETY never does (see below). Document both.
+- **CORRECTION (Phase-5 verification, 2026-08-16) — what "SAFETY never
+  trusts the client" actually covers.** The original wording ("Nothing in
+  the returned object is trusted for SAFETY") overclaimed, and one field
+  falsified it outright. Precisely:
+  - **`summarize` is no longer read back at all.** It disables 12 §1's
+    VERBATIM guard, so a client that flipped one key in the returned object
+    — hostile, or merely buggy — landed a machine paraphrase on the vault
+    under actor `claude-integrate`, and it folded into learning.json (both
+    the RPC and the CLI two-step were executed). `IntegrationProposal.
+    from_json` now defaults it to `False` unconditionally; `to_json` still
+    emits it for trace fidelity; the flag survives only on an in-process
+    `propose(..., summarize=True)`, which no composition root sets (ruling
+    #6). The actor was already FORCED rather than read from params; this is
+    the same rule applied to the only other field of the proposal that is a
+    safety decision rather than a trace.
+  - **`target_snapshot` is HONEST-RACE protection, not client-independent
+    safety.** The proposal is stateless by design, so a client that
+    refreshes the snapshot (deliberately, or merely by re-stat'ing the file
+    while serialising) gets a stale proposal applied. That is a stale WRITE,
+    not data loss, and it is accepted as-is. The client-independent
+    properties are the STRICT diff application (`apply_unified_diff` refuses
+    on any context mismatch) and the COMMIT-TIME GUARD RE-RUN, both against
+    the re-read bytes — verified to hold against a tampered diff that tried
+    to gut the target. Anyone wanting more must sign the proposal (an HMAC
+    over capture/target/diff/snapshot with a per-core key); the stateless
+    contract cannot deliver it otherwise.
+  - A `rejected` commit deliberately skips the TOCTOU check, so its record
+    can pair a propose-time `proposed_diff` with a post-race `before_text`.
+    That pair is unreplayable and doc 12 §2's stated purpose for it is that
+    it be a labeled edit example, so the trace now carries
+    `llm.stale_target: true` (trailing, defaulted, omitted when false) and a
+    corpus reader can skip what it cannot replay.
 - **op.integrate_commit runs on the writer queue with FRESH checks**:
   (i) target_snapshot TOCTOU check → ConcurrentModificationError if the
   vault moved since propose; (ii) the DELETION GUARD re-runs at commit
@@ -1577,3 +1647,461 @@ The "already delivered" truth lives in the VAULT, not the store.
   ANY state records — all-destinations-skip + archive-completes yields
   ONE aggregate record (archive effect + every target marked
   already-delivered); a run with zero state changes records nothing.
+
+## Integrator seam rulings — Phase 5 close (2026-08-16)
+
+Three seats shipped (integrate-engine, learning-alignment, actions-similarity)
+and raised 15 seams. The engine, the learning filter and the retrieval layer
+landed green; this section records the dispositions and the wiring the
+integrator added on top (routes dispatch, config narrowing, RPC pair, CLI
+surfaces, end-to-end flows).
+
+### Granted (implemented by the integrator)
+
+1. **`actions.LLMTrace.proposal_id: str = ""`.** The Phase-5 wire contract
+   calls `proposal_id` "a CORRELATION id echoed into the ActionRecord" but doc
+   12 §2's schema names no slot, and the alternative — `context.filters` — is
+   exactly what `dry_run` and `partial_failure` were promoted OUT of, for the
+   recorded reason that `filters` is the SESSION's search filters and no
+   reader could branch on it. TRAILING and DEFAULTED, and `to_json` OMITS the
+   key when empty, so every record already on Matt's disk reads back
+   unchanged and a non-integrate `llm` block serializes byte-identically.
+   The integrate seat's self-removing seam probe activated itself on landing
+   (it was the suite's one skip; it is now a passing test).
+2. **`fileops._record_action(..., llm: LLMTrace | None = None)`** — the
+   fileops seat's option (b). Option (a) (promote eight private helpers) was
+   DECLINED: it is a mechanical rename across the most safety-critical module
+   in the repo, for no behavioural gain, and integrate's own docstring already
+   says "nothing here depends on their privacy". Option (b) pays for itself —
+   integrate's `_TracedRecorder` facade AND its `_traced_on_record` wrapper
+   are both DELETED, so the trace now reaches `ctx.recorder` and
+   `ctx.on_record` as ONE object built once, instead of two wrappers that
+   could disagree. That matters concretely: `learn.is_matt_decided` reads the
+   verdict off exactly that block, and a record reaching the learner without
+   it inverts the fold rule in both directions.
+3. **`Consumer.wants_llm(config: Config | None = None)` + the runner passing
+   it** — the learning-alignment seat's SAFETY GATE, landed in the same change
+   as the config narrowing below, exactly as that seat demanded. A pure
+   widening; the runner keeps its class-flag fallback and gains a `TypeError`
+   fallback for a third-party override that never grew the parameter.
+   `tag_router` now hands `ctx.llm` to `routes.apply_all`.
+4. **RESERVED_CONFIG_LEAVES: all three `[integrate]` keys retired.**
+   `max_deleted_lines` (integrate's deletion guard) was the designed
+   acceptance signal and fired as predicted. `review` and `default_mode`
+   retired with it, because the wiring below gave them real readers — leaving
+   them reserved would have meant shipping two keys an operator can set and
+   nothing honors (08 §A35).
+5. **`test_repo_hygiene.py`'s absolute-home check is ANCHORED** (`^/(home|
+   Users)/`, not a bare `"/home/"` substring). The bare form rejected a
+   vault-relative fixture path like `areas/home/errands.md`, and `areas/home`
+   is a plausible real PARA folder. Reported by the actions-similarity seat,
+   which had renamed its fixture to work around it.
+
+### Declined, with reasons
+
+6. **`[integrate] summarize` config key.** Spec 12 §1's verbatim guard has an
+   escape hatch ("unless mode metadata says summarize was explicitly
+   configured") but names no key, and a GLOBAL one is backwards: it would
+   disable the VERBATIM directive — the thing 12 §1 exists to enforce —
+   everywhere at once. `propose(..., summarize=False)` stays a keyword no
+   composition root sets, which is the intended state. If Matt ever wants it,
+   the shape is a per-route `summarize = true`, next to that route's `mode`.
+7. **Consolidating `suggest.string_similarity` with actions' token overlap.**
+   They STAY SEPARATE, and this is recorded so a later seat does not merge
+   them by reflex (the "Atomic-write triplication" disposition, same shape).
+   They are different metrics for different jobs: character Levenshtein for
+   folder-NAME matching, token overlap for corpus retrieval over full capture
+   bodies — where O(n·m) per pair against 10k records is unusable. The
+   actions seat's structural pin on its import set (`{errors, frontmatter}`)
+   makes an `import suggest` a red build rather than a quiet graph change.
+8. **`SIMILARITY_WEIGHTS` as config.** `actions` takes no `Config` by design;
+   it is imported by `fileops` on every mutating operation, so a config
+   dependency would drag `config`/`paths` into the write path. If Phase 6
+   wants tunable retrieval the cheapest shape is a keyword-only `weights=` on
+   `query_similar` that the composition root fills.
+9. **The no-trailing-newline diff limitation.** Confirmed as-is: `propose()`
+   and `apply()` both refuse loudly, naming the cause and the fix, because
+   `difflib` emits no `\ No newline at end of file` marker and a
+   terminator-less line lands mid-diff where nothing can tell where it ended.
+   Guessing is the one unacceptable option. If such notes turn out to be
+   common on the real vault, the fix is a renderer that emits the marker —
+   an actions/fileops decision, since `targets[].diff` uses the same renderer.
+
+### Deferred to Phase 6 (recorded, not decided)
+
+10. **Does an `auto-organize` record with verdict accepted|edited fold into
+    learning.json?** The learning-alignment seat implemented the safest
+    reading — `learn.LLM_EDIT_ACTORS = frozenset({"claude-integrate"})`, so
+    `auto-organize` never folds — and flagged the real tension: spec 13 §2's
+    `propose` rung is Matt-confirmed, but the `auto_below` rung applies
+    WITHOUT asking, and folding that path would make doc-13 proposals
+    self-reinforcing. Confirmed as the Phase-5 position. Widening it is one
+    frozenset, and whoever does it must first make `LLMTrace` able to
+    distinguish machine-applied from human-confirmed — which it cannot today.
+
+### Corrections to the record
+
+11. **The reported `IntegrateConfig.max_deleted_lines → n` rename DID NOT
+    HAPPEN.** The actions-similarity seat flagged it for a ruling, having
+    observed `config.py` validating `{"default_mode", "review", "n"}` and
+    `integrate.py` reading `config.integrate.n`. Verified at close:
+    `config.py` validates `max_deleted_lines` and `integrate.py` reads
+    `config.integrate.max_deleted_lines`. That seat also reported the suite's
+    collected-test count changing mid-run (2159 → 2284) and a 17-failure
+    cluster appearing and vanishing — i.e. it was reading files while another
+    seat wrote them. No ruling needed; recorded so it is not re-investigated.
+12. **The learning-alignment seat's brief was wrong about `learn.record_action`
+    lacking the verdict filter** (it had already landed). The integrate seat
+    found the same thing independently, deleted its interim caller-side copy
+    and kept only the trace re-attachment. Both handled it correctly. This is
+    the fourth brief/record divergence; the Phase-4 process rule (briefs must
+    QUOTE rulings verbatim with cites) is re-affirmed.
+
+## Phase-5 integrator rulings — the wiring (2026-08-16)
+
+The wire contract said WHAT to build. These are the decisions taken while
+building it, each pinned by a test and each covered by the mutation audit.
+
+### `routes`: integrate-mode dispatch is the `review = "auto"` half ONLY
+
+`apply_route`/`apply_all` gain a keyword-only `llm`, and `mode = "integrate"`
+now dispatches to `integrate.propose` + `integrate.apply(verdict="accepted")`
+— but ONLY when the effective review gate is `"auto"`. A gated route raises
+`OperationError` naming the gate and pointing at
+`op.integrate_propose`/`organize integrate`.
+
+The reason is structural, not a limitation: 12 §1's default gate puts a HUMAN
+between the proposal and the write, and a function that returns one
+`OperationResult` has nowhere to put a proposal awaiting review. The reviewed
+path has to cross a process boundary and come back, which is what the
+stateless-proposal RPC pair is for. Both refusals (gated route, missing
+client) are ADDRESSING failures and RAISE, per the error-line rule: neither
+names an operation that could be attempted.
+
+`apply_all` refuses both conditions in a PRE-FLIGHT pass over every match,
+before the first byte is written — both are knowable without a model call, so
+discovering one on destination 3 of 4 would be a self-inflicted partial
+failure. The gated-route refusal is pinned with the assertion that the model
+was never asked (`llm.prompts == []`): a refusal AFTER the prompt was sent has
+already paid for, and waited on, a proposal nobody can accept.
+
+`routes → integrate` is a new import edge. It is acyclic (`integrate` imports
+fileops/actions/config/errors/frontmatter/llm and never `routes`) and is
+function-local, the same shape and reason as `config`'s function-local
+`frontmatter` import: one branch needs it, and a module-level import would
+make every `import routes` drag the LLM layer in for vaults with no integrate
+route.
+
+### `effective_review` / `effective_mode`: route-then-global, ONE resolution
+
+**SUPERSEDED, with the reasoning corrected (Phase-5 verification,
+2026-08-16).** The shipped rule was OR-of-`auto` — `"auto"` iff the route says
+so OR `[integrate] review` says so — justified in this document by the claim
+that a "last one wins" rule "would let a global default … silently un-gate one
+that spelled `review = "diff"` on purpose". That reasoning is inverted:
+last-one-wins with the ROUTE last is precisely what PREVENTS that, and
+OR-of-`auto` is what causes it. Executed: `[integrate] review = "auto"` plus a
+route `review = "diff"` resolved to `auto`, i.e. a global key silently turned
+"Claude asks first" into "Claude writes silently" on a route the operator
+deliberately gated. The same paragraph asserted "the shipped example says so";
+it did not — it documented `review` only as "the per-route gate".
+
+The rule is now: **a route that STATES `review` keeps it; `[integrate] review`
+is the default a route that says nothing inherits.** That is what a global
+default means, it matches spec 12 §1's "(per-route opt-in)" and the example's
+"per-route gate", and it fails safe in the direction that matters.
+
+**There is exactly one resolution, and it happens at config validation.**
+`config._validate_route` writes the resolved gate into `RouteConfig.review`
+(`None` means "nobody stated one" and survives only on a hand-built route),
+and `routes.effective_review` reads it back. This closes the second half of
+the finding: the config-time refusal of `auto = true` was judging the ROUTE's
+`review` while the runtime ORed in the global, so `[integrate] review =
+"auto"` plus a route `auto = true` was refused at load with a message that was
+factually false — making the shipped global key uncombinable with the one
+shape the Phase-5 ruling says it exists for. The two layers are now pinned
+against each other as a BICONDITIONAL over all nine combinations
+(`tests/test_integrate_review_gate.py`): `auto = true` loads iff
+`effective_review` resolves `"auto"`.
+
+The `review` dead-key refusal on a move/append route is judged on the STATED
+value only — resolving a global `auto` into an append route and then refusing
+it would make `[integrate] review = "auto"` unusable in any vault that also
+has an append route.
+
+`routes.resolve` (RPC) now also reports the effective `review` for integrate
+matches. `organize routes resolve --json` already did, and the nvim client
+already READ `match.review`; the value was simply never sent, so the client
+could not tell the two gates apart until a proposal came back carrying one
+(spec 10 §3: CLI and UI can never disagree). Additive.
+
+`routes.effective_mode(match, config)` is 12 §1's mode resolution: the route's
+`mode`, else `[integrate] default_mode`. The TOP layer (Matt's per-invocation
+choice) belongs to the client, which is why the client must READ this rather
+than re-derive it. Surfaced on `organize routes resolve`.
+
+### `config`: `auto = true` + `integrate` is now narrowed, not blanket-refused
+
+The Phase-4 ruling said the check "lifts when Phase 5 lands". It is NARROWED
+rather than lifted: `auto = true` + `mode = "integrate"` is refused unless the
+EFFECTIVE gate is `"auto"` (see the resolution above — the check originally
+read the route's `review` alone, which is the half of the disagreement that
+made a working config unloadable). The Phase-4 RATIONALE survives intact and gets sharper —
+fail once at the door for the config that could ONLY ever produce a per-note
+error. `auto = true` with the default `review = "diff"` is exactly that: a
+standing instruction to integrate unattended that contradicts its own "ask a
+human first" gate, and it would fire the OnFailure alert every ten minutes.
+A route that says both `auto = true` and `review = "auto"` has opted in twice,
+deliberately, and is the one shape docs 11 §1 and 12 §1 jointly describe.
+
+### `server`: `op.integrate_propose` is NOT on the writer queue
+
+The one place `op.*` is not queued wholesale, and the contrast with
+`op.merge_preview` (which IS) is the point:
+
+- It writes no vault byte. Its only state write is one append to the action
+  corpus, which spec 12 §2 specifies as "append-only, atomic appends" — the
+  same property that lets `ActionRecorder.record` need no lock and never
+  raise. Serializing an atomic append buys nothing.
+- It calls an LLM. The writer queue is single-file by design, so queuing
+  propose would park EVERY other client write for the length of a model call.
+  That is the class of the `_ReadWriteLock` phase-fairness finding (real-data
+  ruling 14), where a slow lock holder froze the picker for seconds.
+- Propose-time races are already handled BY DESIGN: the proposal carries
+  `target_snapshot` and `op.integrate_commit` re-checks it on the writer
+  queue. A lock at propose time would duplicate that check and still not
+  cover the far larger window while a human reviews.
+
+Pinned by `NON_QUEUED_LLM_METHODS` plus literal assertions on both sides.
+
+`op.integrate_commit` IS queued AND index-changing. A `rejected` commit
+therefore emits a spurious `index-updated`; that is the deliberate direction
+of the trade, because excluding the method would leave an ACCEPTED commit
+silent and a UI showing pre-integration content for a note just rewritten is
+a silently wrong answer (09 §1.5). A spurious refetch on the rare path is the
+cheaper error. (`op.skip` went the other way for the opposite reason: it never
+changes the index at all.)
+
+Both handlers FORCE `actor = integrate.ACTOR`, never reading it from params.
+An LLM authored the edit whoever asked for it, and `learn.LLM_EDIT_ACTORS`
+keys the learning fold off exactly that string — a client claiming
+`actor: "matt"` would make an unreviewed machine edit look like a human
+decision in the corpus.
+
+`routes.named(config, name)` is the shared `--route NAME` lookup for BOTH
+composition roots, because spec 10 §3's rule is that "CLI and UI can never
+disagree" and two copies of "which route is this?" is how they start to.
+
+### `cli`: `organize integrate`, and `actions query`
+
+`organize integrate <note> <target> [--route NAME]` PROPOSES by default
+(prints diff + rationale, writes nothing); `--apply` is refused unless the
+effective gate is `"auto"`; `--commit-from FILE --verdict … [--final-diff
+FILE]` is the scripted two-step. Both positionals are optional at the PARSER
+level and required by the HANDLER, because `--commit-from`'s proposal carries
+its own capture and target — making them mandatory would force a caller to
+repeat, and be able to CONTRADICT, what the proposal already says.
+
+`--route NAME` is a claim about ATTRIBUTION, not a tag query: it supplies the
+prompt's description, the review gate and the record's route label, while the
+TARGET still comes from the command line, so naming a route whose destination
+differs never silently redirects the write.
+
+`organize actions query --similar-to <text> [--tags A,B]` is spec 13 §3's
+named surface. The composition root supplies the two things the engine cannot:
+`config.suggestions.tag_normalization` (without it a vault mapping like
+`project -> projects` never reaches retrieval) and the `--tags` split, where
+absent (`None`, "no tag information") and empty (`[]`, "genuinely untagged")
+are different and both meaningful.
+
+### A standalone `integrate` does NOT archive the capture; a ROUTE does
+
+`move` and `merge` archive the capture (05 §2/§4), and `routes.apply_all`
+archives once after every destination succeeds (11 §1). `integrate.apply`
+deliberately does neither, and the reason is doc 12's own opening directive:
+"I may be adding them to multiple files." The commit is STATELESS, so it
+cannot know whether another integration of the same capture is coming, and
+archiving after the first would break the second. A rejected verdict must
+obviously not archive either.
+
+The obligation this creates is that the asymmetry must be VISIBLE. A capture
+that is neither archived nor reported sits in the backlog forever with
+nothing saying why — the 09 §1.5 silently-wrong-answer class from the other
+direction. `organize integrate` therefore names the file and the one command
+that finishes the job, and a test asserts BOTH halves (the file is still
+there AND the command said so) plus that the named follow-up actually works.
+The UI equivalent is `op.archive`, exactly as it already is after a skip.
+
+### Surface change: `organize routes resolve --json` is an OBJECT
+
+It was a bare array; it is now `{default_mode, matches: [...]}`, and each
+match carries the EFFECTIVE `mode` and, for integrate routes, the effective
+`review`. The array had nowhere to carry the doc 12 §1 answer for a capture
+that matched NOTHING, which is precisely when `[integrate] default_mode`
+applies. `--json` is the approved-additive agent surface and has no shipped
+client — the nvim thin client goes through RPC — so the change costs one
+blackbox test update. Recorded here because it IS a wire change.
+
+### Phase-5 measured results (integrator gate, 2026-08-16)
+
+- `pytest tests/` — **2366 passed, 0 failed, 0 skipped**, 1 deselected (slow).
+  Baseline at handback was 2340 passed / 1 failed / 1 skipped; the failure was
+  the designed config-allowlist signal (now retired) and the skip was the
+  self-removing `proposal_id` seam probe (now self-activated and passing).
+- `ruff check src tests` — clean.
+- `make perf` — 1 passed: `full_reindex(10000 notes) = 1.98 s` (gate 5 s).
+- `make test-plugin` — ~~209 specs across 8 files~~ **CORRECTED (Phase-5
+  verification): 246 specs across 9 spec files**, 0 failed, 0 errors — and the
+  claim "no lua file was touched this phase" was **false in both halves**.
+  Four lua files changed: `lua/para-organize/actions.lua` and
+  `lua/para-organize/ui.lua` (modified), plus a new 908-line
+  `lua/para-organize/integrate.lua` and its 1108-line
+  `tests/plugin/integrate_spec.lua`. That new nvim integrate client is the
+  single largest new surface of the phase, and a reader taking the original
+  sentence at face value would have skipped client-side review of it
+  entirely. The e2e spec does still drive a real `organize serve` end to end,
+  and the three new E2E integrate specs assert real disk bytes, the
+  un-archived capture via `fs_stat`, and the JSONL record.
+- MUTATION AUDIT: **34/34 caught**. ~~(script at
+  `scratchpad/mutate_phase5.py`)~~ — **CORRECTED: that path does not exist in
+  the repo**; the script lived only in an ephemeral session scratchpad, so the
+  34/34 claim was not reproducible from the checkout. The verify-fix pass
+  COMMITTED its own harness at `tools/mutate_phase5_verify.py` (see the
+  verify-fix record below); a mutation audit whose script is not in the tree
+  is an assertion, not evidence. The first pass was 24/34, and all ten
+  misses were real holes, each closed by a named test in
+  `tests/test_integration.py` §5b — including three that would have shipped
+  silently: nothing pinned the narrowed `auto`+`integrate` CONFIG GATE at
+  all, nothing drove an unattended integrate route THROUGH the pipeline (so
+  every link of the `wants_llm` → runner → tag_router → apply_all chain was
+  mutable while green), and nothing asserted that the RPC door FORCES the
+  `claude-integrate` actor (a client claiming `actor: "matt"` would have
+  recorded a machine edit as a human decision and folded it into learning).
+- End-to-end integrate (`tests/test_integration.py`, new section 5): the
+  interactive RPC flow (propose → accept → commit) with a REAL `ClaudeCLIClient`
+  driven against a fake `claude` script — so config → `get_client` → propose is
+  under test, including through the CLI as a SUBPROCESS where no monkeypatch
+  reaches; the rejected flow (record written, vault byte-identical, learning
+  untouched); the CLI two-step with `verdict: edited` and two DIFFERENT diffs;
+  `--apply` refused behind the gate and allowed without it (firing control);
+  the deletion guard refusing and recording through the real stack; and `no-ai`
+  refusing through both doors for every actor, with the assertion that the
+  protected note never reached the backend at all.
+
+## Phase-5 verification fixes (fixer, 2026-08-16)
+
+Nine major/critical and ten minor findings from two adversarial verifiers, all
+fixed, none rejected. The through-line: **the integrate guards bounded
+DESTRUCTION and nothing else**, so every shape that destroys without deleting
+went through — and one field of the wire proposal switched the remaining guard
+off. Everything below is pinned by a regression whose mutation was executed
+and caught (`tools/mutate_phase5_verify.py`, 19/19).
+
+### The guards (`integrate.check_guards`)
+
+`deleted_line_count` is an order-insensitive multiset over non-blank lines.
+That was a deliberate, correct choice for what it measures, and it left four
+holes that each measured zero:
+
+1. **VERBATIM was checked against the whole result, not the added region.** A
+   target that already contained the capture's words satisfied it for free —
+   a repeat capture, or a route appending to a log where a phrase recurs — so
+   the model could return an editorialised paraphrase and pass, unattended, on
+   `review = "auto"`. Now checked against the ADDED REGION, taken from the same
+   line alignment the diff uses (`added_lines`, the `+` side). Deliberately
+   NOT a multiset difference: that would credit a pre-existing copy for a new
+   one and falsely reject a legitimate repeat capture.
+2. **RE-ORDERING passed everything.** A model could scramble Matt's note across
+   its own headings with a deletion count of zero. `reordered_line_count` now
+   requires `before`'s non-blank lines to survive as a SUBSEQUENCE of
+   `after`'s, minus the genuine deletions so a permitted `max_deleted_lines`
+   is not double-counted. Repositioning the CAPTURE stays legal — its lines
+   are not in `before`. O(n log n) by indexed positions + bisect.
+3. **GROWTH was unbounded.** 500 fabricated lines were accepted and written.
+   New `[integrate] max_added_lines` (default 10) = non-blank lines allowed
+   BEYOND the capture's own count — the deletion threshold's missing
+   counterpart, generous enough for a heading, a bullet and a re-wrapped long
+   line.
+4. **DUPLICATION was invisible to all of the above.** Emitting the target's own
+   body twice deletes nothing, re-orders nothing, and on a small file fits
+   inside any sane growth bound. An added line that reproduces an existing one
+   is now refused unless the capture itself carries it (either direction:
+   the capture inside the line, or the line a fragment of a multi-line
+   capture).
+
+Also: `last_edited_date` is on `JUSTIFIED_FRONTMATTER_KEYS` as machine
+bookkeeping and had NO value validation, so the model could write arbitrary
+attacker-controlled text into frontmatter the whole vault is indexed from, and
+that flows back into later prompts. It must now match `^\d{4}-\d{2}-\d{2}$` —
+the shape `fileops.append_to_note` stamps.
+
+`IntegrationRejected` gains `kind`. `_guard_error` used to label EVERY
+commit-time refusal "the integrate deletion guard" and hint at `organize
+merge` "to delete or rewrite existing content" — for a paraphrase that deleted
+nothing. `check_guards`' own docstring explains that the guard ORDER exists to
+name the actionable cause (09 §1.5); the wrapper was overwriting it. The
+merge-path hint is now chosen only for the kinds it fits
+(deletion/reorder/duplication).
+
+### `_merged_record` was losing the integrate trace
+
+`replace(base, …)` never merged `llm`, and `base` is chosen for the capture's
+post-state — the MOVE record, whose `llm` is `None`. Consequences, all silent:
+a `move` + `integrate` batch dropped the trace entirely (which also inverts
+`learn.is_matt_decided`: no verdict ⇒ an automated actor never folds); two
+`integrate` destinations kept only the first; and `edit_mode` came from the
+first non-null record rather than the winning operation, producing recorded
+pairs like `operation: integrate` + `edit_mode: append`. Both fields are what
+`organize actions stats` slices integrate accept/edit/reject rates on.
+
+Now: `edit_mode` and `llm` come from the record that WON the operation
+precedence contest. When a batch produced MORE THAN ONE trace, each rides on
+its own `targets[]` entry (`TargetState.llm`, trailing/defaulted/omitted when
+`None`) — 12 §2 is "ONE ENTRY PER FILE TOUCHED" and "diffs of every touched
+file, per file", and its single record-level block has nowhere to put the
+second. Collision-only, so no record that exists today changes shape and the
+big diff strings are never stored twice.
+
+### `op.integrate_propose` really is off the lock now
+
+Keeping it off the writer QUEUE never delivered the ruling's decisive reason.
+The dispatcher wrapped every non-mutating method in `self._rwlock.read()` and
+a writer waits for `_readers == 0`, so propose parked every other client write
+for the whole model call anyway (measured: 3.5 s of write latency behind a 4 s
+model call; with the shipped `[llm] timeout_seconds = 60.0`, a minute).
+`NON_QUEUED_LLM_METHODS` is now LOAD-BEARING — `_dispatch_for` branches on it
+and hands those methods the request with no lock held — and the handler takes
+the read lock itself for the index-touching part, releasing it before
+`llm.generate()`. `integrate.resolve_description` is public so the folder's
+index note is read under that lock rather than from inside `propose`. Pinned
+as a HAPPENS-WHILE (a write completes while a blocked model call is in
+flight), plus the mutation `NON_QUEUED_LLM_METHODS = frozenset()` going red —
+which is what the previous literal-equality assertion could not do.
+
+### `actions._append_line` heals a torn tail
+
+The rollback only covered a partial write in THIS process. A SIGKILL or power
+loss leaves a line with no terminator, and the next append glued a brand-new,
+otherwise-valid record onto it — the reader skipped ONE physical line and the
+new record was gone, silently. Exactly the failure 12 §3's torn-write item
+exists to prevent, from the other direction. `_append_line` now `pread`s the
+final byte under the same lock and starts a new line if it is not `\n`,
+loudly. One record lost per crash becomes one pre-existing corrupt line,
+skipped.
+
+### `durations_ms.operation` has a producer
+
+12 §2 names two phases and only `decision` was ever written — by the nvim
+client; the core echoed whatever it was handed, so every real record carried a
+half-empty dict and every test that showed both keys injected them by hand.
+`fileops._record_action` now measures its own write (`ctx.clock()` at record
+time minus the `now` each operation takes on entry) and `setdefault`s it, so a
+caller that genuinely knows better still wins.
+
+### Gate
+`pytest tests/` 2432 passed / 0 failed / 0 skipped (1 deselected slow);
+`ruff check src tests` clean; `make perf` 1 passed
+(`full_reindex(10000 notes) = 1.92 s`, gate 5 s); `make test-plugin` 246 specs
+across 9 files, 0 failed / 0 errors; mutation audit 19/19
+(`tools/mutate_phase5_verify.py`, committed — a mutation audit whose script is
+not in the tree is an assertion, not evidence).

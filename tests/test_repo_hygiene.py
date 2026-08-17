@@ -15,6 +15,7 @@ explanatory comment is a rule people delete.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -264,15 +265,25 @@ def test_no_test_file_hardcodes_an_absolute_home_path() -> None:
     Everything a test needs is reachable from ``Path(__file__)``,
     ``sys.executable`` or ``tmp_path``. Docstrings are exempt (they explain
     the rule); executable string literals are not.
+
+    ANCHORED at the start of the string, not a bare substring. ``"/home/"``
+    anywhere matched a VAULT-RELATIVE fixture path like
+    ``areas/home/errands.md`` — and ``areas/home`` is a perfectly plausible
+    real PARA folder, so the rule was rejecting correct test data. (Reported
+    by the actions-similarity seat, which worked around it by renaming its
+    fixture; the workaround is unnecessary now.) What the rule is actually
+    about is an ABSOLUTE machine path, which by definition starts at the
+    root.
     """
     this_file = Path(__file__).resolve()
+    absolute_home = re.compile(r"^/(home|Users)/")
     offenders: list[str] = []
     for path in sorted(TESTS.rglob("*.py")):
         if path.resolve() == this_file:
             continue  # this file names the forbidden prefixes to search for
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for text in _non_docstring_strings(tree):
-            if "/home/" in text or "/Users/" in text:
+            if absolute_home.match(text):
                 offenders.append(f"{path.name}: {text[:80]!r}")
     assert offenders == [], (
         "test files must locate the repo from __file__/sys.executable, never an "

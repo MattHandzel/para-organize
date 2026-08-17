@@ -454,14 +454,24 @@ def test_routes_list_and_resolve(core: Core) -> None:
     proc = core.run("routes", "list", "--json")
     assert json.loads(proc.stdout)[0]["destination"] == "resources/performing/"
 
+    # `resolve --json` is an OBJECT, not a bare array: the doc-12 §1 answer
+    # for a capture that matched NOTHING is `[integrate] default_mode`, and an
+    # empty array has nowhere to carry it. Changed at the Phase-5 landing —
+    # recorded in ARCHITECTURE; `--json` is an approved-additive agent surface
+    # with no shipped client (the nvim thin client goes through RPC).
     proc = core.run("routes", "resolve", CAPTURE, "--json")
-    matches = json.loads(proc.stdout)
+    payload = json.loads(proc.stdout)
+    assert payload["default_mode"] == "manual"  # spec 12 §1 global default
+    matches = payload["matches"]
     assert matches[0]["route"] == "impro"
     assert matches[0]["relative_destination"] == "resources/performing"
+    # A non-integrate route has no review gate to report.
+    assert matches[0]["review"] is None
 
     proc = core.run("routes", "resolve", QUIRK_FILES["context_as_string"])
     assert proc.returncode == 0
     assert proc.stdout.startswith("no routes match")
+    assert "default edit mode: manual" in proc.stdout
 
 
 def test_routes_describe_reads_the_folder_description(core: Core) -> None:
@@ -1215,7 +1225,11 @@ def test_skip_records_the_decision_with_its_session(core: Core) -> None:
     assert record["capture"]["content_hash"], "the core fills the capture state"
     assert record["context"]["session_id"] == "ses_cli_1"
     assert record["context"]["dry_run"] is False
-    assert record["context"]["durations_ms"] == {"decision": 8400}
+    # The CLI supplies `decision`; the core measures its own `operation` phase
+    # (12 §2 names both, and nothing used to produce the second).
+    durations = record["context"]["durations_ms"]
+    assert durations["decision"] == 8400
+    assert "operation" in durations and durations["operation"] >= 0
     assert record["context"]["suggestions_shown"][0]["rank"] == 1
     assert record["context"]["vault_stats"], "the core fills vault_stats"
     assert record["targets"] == [], "a skip touches no file, so no targets"

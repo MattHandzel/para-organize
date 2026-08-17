@@ -89,9 +89,24 @@ class NoAiRefusal(OperationError):
 
 
 class IntegrationRejected(OperationError):
-    """The `integrate` deletion guard fired (spec 12 §1): the LLM proposal
-    deletes existing non-whitespace lines beyond the configured threshold.
-    Target untouched; recorded with ``verdict: "rejected"``."""
+    """A structural `integrate` guard fired (spec 12 §1): the proposal deletes,
+    re-orders, duplicates or inflates existing content, rewrites frontmatter
+    the capture does not justify, or paraphrases instead of adding and
+    weaving. Target untouched; recorded with ``verdict: "rejected"``.
+
+    ``kind`` names WHICH guard refused. A caller that wraps this error
+    (``integrate._guard_error``) must not attribute every refusal to the
+    DELETION guard and send the user to a merge editor for a paraphrase that
+    deleted nothing — that is the 09 §1.5 actionable-diagnosis rule, and
+    ``check_guards`` already orders its guards to serve it. A plain string
+    with a permissive default, so no raiser is forced to pick one.
+    """
+
+    def __init__(
+        self, message: str, *, hint: str | None = None, kind: str = "guard"
+    ) -> None:
+        super().__init__(message, hint=hint)
+        self.kind = kind
 
 
 class LearningDataError(OrganizeError):

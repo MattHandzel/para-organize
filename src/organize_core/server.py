@@ -110,7 +110,9 @@ from organize_core.learn import (
     save_learning,
 )
 from organize_core.paths import CorePaths
+from organize_core.routes import effective_review as get_effective_review
 from organize_core.routes import get_description, merge_route_suggestions
+from organize_core.routes import named as route_named
 from organize_core.routes import resolve as resolve_routes
 from organize_core.session import Outcome, Session, start_session
 from organize_core.suggest import CaptureFeaturesView, generate_candidates
@@ -129,6 +131,8 @@ RPC_METHODS: tuple[str, ...] = (
     "op.merge_commit",     # (path, target, content, snapshot) → OperationResult
     "op.archive",          # (path) → OperationResult                 spec 05 §3
     "op.skip",             # (note, session_id) → {ok, outcome}       spec 03 §2/§6
+    "op.integrate_propose",  # (note, target, route?) → proposal      spec 12 §1
+    "op.integrate_commit",   # (proposal, verdict, final_diff?) → OperationResult
     "meta.set",            # (path, changes) → OperationResult        spec 05 §5, 07
     "meta.fields",         # () → metadata_fields[] + completions      spec 07, 10 §3
     "meta.values",         # (key) → distinct values in the vault      spec 07 complete="existing"
@@ -153,12 +157,50 @@ MUTATING_METHODS: frozenset[str] = frozenset(
         "op.merge_commit",
         "op.archive",
         "op.skip",
+        "op.integrate_commit",
         "meta.set",
         "folder.create",
         "index.reindex",
         "auto.apply",
     }
 )
+
+#: ``op.integrate_propose`` is DELIBERATELY NOT in :data:`MUTATING_METHODS`,
+#: and the contrast with ``op.merge_preview`` — which IS — is the interesting
+#: part, so it is recorded here rather than in a commit message.
+#:
+#: ``merge_preview`` is queued for SNAPSHOT CONSISTENCY: it hands the client a
+#: snapshot that ``merge_commit`` will verify, and it is fast. Every reason to
+#: queue it argues the other way for propose:
+#:
+#: 1. **It writes no vault byte.** Its only state write is one append to the
+#:    action corpus (a structural rejection's ``verdict: "rejected"`` record),
+#:    and spec 12 §2 specifies that corpus as "append-only, atomic appends" —
+#:    which is exactly why ``ActionRecorder.record`` needs no lock and never
+#:    raises. Serializing an atomic append buys nothing.
+#: 2. **It calls an LLM.** The writer queue is single-file by design, so
+#:    queuing propose would park EVERY other client write for the length of a
+#:    model call — tens of seconds on ``claude-cli``. That is the same class as
+#:    the ``_ReadWriteLock`` phase-fairness finding (real-data ruling 14): a
+#:    slow holder of a global lock freezes the picker.
+#: 3. **Propose-time races are already handled, by design.** The proposal
+#:    carries ``target_snapshot`` and ``op.integrate_commit`` re-checks it on
+#:    the writer queue, raising ``ConcurrentModificationError`` if the vault
+#:    moved. That TOCTOU check is the mechanism the stateless-proposal ruling
+#:    exists to provide; a lock at propose time would duplicate it and still
+#:    not cover the far larger window between propose and the human's accept.
+#:
+#: LOAD-BEARING, not documentation: :meth:`OrganizeServer._dispatch_for`
+#: branches on this set so a method listed here is dispatched with NO lock
+#: held. Keeping propose off the writer QUEUE alone did not deliver reason 2 —
+#: the dispatcher wrapped every non-mutating method in ``self._rwlock.read()``,
+#: and a write waits for ``_readers == 0``, so propose parked every other
+#: client write for the whole model call anyway (measured: a 4 s model call
+#: made a concurrent ``op.move`` wait 3.5 s; with the shipped
+#: ``[llm] timeout_seconds = 60.0`` a hung backend froze every vault write for
+#: a minute). The handler takes the read lock itself for the index-touching
+#: part and releases it before calling the model.
+NON_QUEUED_LLM_METHODS: frozenset[str] = frozenset({"op.integrate_propose"})
 
 #: The subset of :data:`MUTATING_METHODS` that can change the index, and so
 #: emits ``index-updated``. ``op.merge_preview`` is queued for snapshot
@@ -901,6 +943,8 @@ class OrganizeServer:
             "op.merge_commit": self._op_merge_commit,
             "op.archive": self._op_archive,
             "op.skip": self._op_skip,
+            "op.integrate_propose": self._op_integrate_propose,
+            "op.integrate_commit": self._op_integrate_commit,
             "meta.set": self._meta_set,
             "meta.fields": self._meta_fields,
             "meta.values": self._meta_values,
@@ -1182,6 +1226,13 @@ class OrganizeServer:
                     {"known_methods": list(RPC_METHODS)},
                 )
             )
+        if method in NON_QUEUED_LLM_METHODS:
+            # NO LOCK HELD HERE. The handler takes the read lock for the
+            # index-touching part itself and releases it before the model call
+            # — a read lock held across `llm.generate()` blocks every writer
+            # for the length of that call, which is the very thing keeping this
+            # method off the writer queue was supposed to avoid.
+            return handler(conn, params)
         if method not in MUTATING_METHODS:
             with self._rwlock.read():
                 return handler(conn, params)
@@ -1338,6 +1389,18 @@ class OrganizeServer:
                 "auto": match.route.auto,
                 "description": match.route.description,
                 "template": match.route.template,
+                # The EFFECTIVE doc-12 §1 gate, additively. `organize routes
+                # resolve --json` already reports it and the nvim client
+                # already READS `match.review` (integrate.lua's `review_for`)
+                # — it was simply never sent, so the client could not tell
+                # "Claude asks first" from "Claude writes silently" until a
+                # proposal came back carrying it. Spec 10 §3: CLI and UI can
+                # never disagree.
+                "review": (
+                    get_effective_review(match, self.config)
+                    if str(match.route.mode) == "integrate"
+                    else None
+                ),
                 "suggestion": asdict(match.as_suggestion()),
             }
             for match in matches
@@ -1422,6 +1485,113 @@ class OrganizeServer:
         if not ctx.dry_run:
             session.mark_processed(record.path, Outcome.SKIPPED)
         return {"ok": True, "outcome": Outcome.SKIPPED.value}
+
+    def _op_integrate_propose(
+        self, _conn: _Connection | None, params: dict[str, Any]
+    ) -> Any:
+        """``op.integrate_propose`` — spec 12 §1 + the ARCHITECTURE Phase-5
+        wire contract.
+
+        Returns the COMPLETE proposal, which the client hands straight back to
+        ``op.integrate_commit``. STATELESS on purpose, and the reason is
+        decisive rather than stylistic: review time is exactly when an idle
+        core exits, so server-held state would yield "unknown proposal_id" at
+        the moment Matt presses accept. ``proposal_id`` is a CORRELATION id
+        echoed into the ActionRecord, never a lookup key.
+
+        Trace fidelity trusts the single-user client; the GUARDS never do. The
+        commit re-reads the target and re-runs every structural guard against
+        the bytes that will actually be written, and it refuses a diff whose
+        context does not match — those two are the client-independent
+        properties. ``target_snapshot`` is honest-race protection rather than
+        a safety boundary (a client that refreshes it gets a stale write), and
+        ``summarize`` is not read back from the client at all, because it
+        switches 12 §1's verbatim guard off. See
+        :class:`~organize_core.integrate.IntegrationProposal`.
+
+        The ``actor`` is forced to ``integrate.ACTOR``, not read from params:
+        an LLM authored this edit whoever asked for it, and
+        ``learn.LLM_EDIT_ACTORS`` keys the learning fold off exactly that
+        string. Letting a client claim ``actor: "matt"`` here would make an
+        unreviewed machine edit look like a human decision in the corpus.
+        """
+        from organize_core import integrate as integrate_mod
+
+        # THE READ LOCK COVERS THE INDEX-TOUCHING PART ONLY, and is released
+        # before the model call below. `_dispatch_for` deliberately hands this
+        # method the request with no lock held (see NON_QUEUED_LLM_METHODS):
+        # holding a read lock across `llm.generate()` makes every writer wait
+        # for the whole model call, which is the exact cost keeping propose off
+        # the writer queue exists to avoid.
+        with self._rwlock.read():
+            record = self._record_for(_require(params, "note"))
+            target = self._vault_path(_require(params, "target"))
+            if not target.is_file():
+                raise VaultError(
+                    f"integrate target not found: {target}",
+                    hint="integrate weaves INTO an existing note (spec 12 §1)",
+                )
+            route_name = params.get("route")
+            match = None
+            if route_name:
+                match = route_named(self.config, str(route_name))
+            ctx = self._context({**params, "actor": integrate_mod.ACTOR})
+            capture_doc = integrate_mod.read_document(Path(record.path))
+            target_doc = integrate_mod.read_document(target)
+            # Resolved HERE so `propose` does not have to reach for it (and so
+            # the folder's index note is read under the lock like every other
+            # index read). A route's own words win, exactly as in `propose`.
+            description = ((match.route.description or "").strip() or None) if match else None
+            if description is None:
+                description = integrate_mod.resolve_description(ctx, target)
+            review = (
+                get_effective_review(match, self.config)
+                if match
+                else str(self.config.integrate.review)
+            )
+
+        proposal = integrate_mod.propose(
+            capture_doc,
+            target_doc,
+            self.config,
+            integrate_mod.integrate_client(self.config),
+            route=match.route_name if match else None,
+            description=description,
+            ctx=ctx,
+        )
+        payload = proposal.to_json()
+        payload["review"] = review
+        return payload
+
+    def _op_integrate_commit(
+        self, _conn: _Connection | None, params: dict[str, Any]
+    ) -> Any:
+        """``op.integrate_commit`` — the writer-queue half, with FRESH checks.
+
+        Queued and INDEX-CHANGING. The index-changing classification is per
+        METHOD, so a ``rejected`` commit (which writes nothing) also emits
+        ``index-updated``; that is the deliberate direction of the trade. The
+        alternative — excluding the method — would leave an ACCEPTED commit
+        silent, and a UI showing pre-integration content for a note that was
+        just rewritten is a silently wrong answer (09 §1.5). A spurious
+        refetch on the rare rejected path is the cheaper error.
+        """
+        from organize_core import integrate as integrate_mod
+
+        proposal = integrate_mod.IntegrationProposal.from_json(
+            empty_array_as_object(_require(params, "proposal"))
+        )
+        verdict = str(_require(params, "verdict"))
+        final_diff = params.get("final_diff")
+        ctx = self._context({**params, "actor": integrate_mod.ACTOR})
+        result = integrate_mod.apply(
+            ctx,
+            Path(proposal.target_path),
+            proposal,
+            verdict,  # type: ignore[arg-type]
+            str(final_diff) if final_diff is not None else None,
+        )
+        return asdict(result)
 
     def _session_for(self, value: Any) -> Session:
         """The live session named by ``session_id``.

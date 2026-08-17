@@ -18,6 +18,13 @@ point, and the composition roots call it from the recorder's own success
 callback, never in parallel with it. ``record_move`` itself stays public and
 pure for tests and for callers that already hold a ``NoteRecord``.
 
+The corpus is WIDER than the learner: doc 12 §2 records every state-changing
+operation by every actor, while doc 04 learns only from Matt's own decisions
+(ARCHITECTURE ruling 4ffef89, "LEARNING FOLDS ONLY MATT-DECIDED ACTIONS").
+:func:`is_matt_decided` is that gate, and it lives HERE — on the one write
+path — so that a composition root can wire ``OperationContext.on_record``
+unconditionally without every caller re-deriving the rule.
+
 Implementation notes (deviations from the scaffold, disclosed to the
 integrator):
 
@@ -365,6 +372,101 @@ LEARNED_OPERATIONS: frozenset[str] = frozenset({"move", "merge", "append", "inte
 #: ``targets[].role`` values that name where the capture LANDED, best first.
 _DESTINATION_ROLES: tuple[str, ...] = ("destination", "merge_target", "append_target")
 
+#: Actors that ARE Matt at a keyboard (doc 12 §2's actor enum, plus the
+#: ``human:*`` namespace ``fileops.is_ai_actor`` already honors).
+#:
+#: Duplicated rather than imported: ARCHITECTURE ruling 15 (Phase-1 close)
+#: REJECTED a ``learn -> fileops`` edge — "making the pure scoring/learning
+#: module import the whole mutation layer (which pulls in ``actions`` and
+#: ``index``) to reuse ~15 lines would cost more than the duplication:
+#: structural decision 3 ('scoring/learning are pure') stops being
+#: enforceable". ``tests/test_learn.py`` pins that this set and
+#: ``fileops.is_ai_actor`` answer identically for every actor in the doc 12 §2
+#: enum, so the duplication cannot drift silently.
+HUMAN_ACTORS: frozenset[str] = frozenset({"matt", "user", "human"})
+
+#: Prefix reserved for named humans (``human:matt``), mirroring
+#: ``fileops.is_ai_actor``.
+_HUMAN_ACTOR_PREFIX = "human:"
+
+#: The one AUTOMATED actor whose records can still be Matt-decided, and only
+#: via :data:`MATT_DECIDED_VERDICTS`. Doc 12 §1's ``integrate`` review gate is
+#: a human decision wearing a machine's name: Claude proposes, the nvim client
+#: shows the unified diff and Matt presses ``<CR>`` (accepted) or edits the
+#: proposal first (edited). ARCHITECTURE, "Phase-4 rulings, bind + actor
+#: batch" (4ffef89): "integrate records use the verdict-based reading (verdict
+#: accepted/edited = Matt-decided even though actor is claude-integrate)".
+#:
+#: Deliberately NOT extended to ``auto-organize``: spec 13 §2's trust ladder
+#: has an ``auto_below`` rung that applies WITHOUT asking, and a machine-set
+#: ``verdict`` on that path would make doc-13 proposals self-reinforcing —
+#: exactly the failure the routes ruling names. Phase 6 owns that decision
+#: (raised as a seam); until it rules, the safe answer is "does not fold".
+LLM_EDIT_ACTORS: frozenset[str] = frozenset({"claude-integrate"})
+
+#: ``llm.verdict`` values that mean a human approved the proposed edit
+#: (spec 12 §2). ``"rejected"`` is excluded for the same reason
+#: ``partial_failure`` is: 12 §3 says a rejected proposal leaves "target
+#: untouched", so the destination is not where anything landed.
+MATT_DECIDED_VERDICTS: frozenset[str] = frozenset({"accepted", "edited"})
+
+
+def actor_is_human(actor: Any) -> bool:
+    """True when ``actor`` names Matt at a keyboard (doc 12 §2 actor enum).
+
+    The complement of ``fileops.is_ai_actor`` — ``consumer:<name>``,
+    ``route:<name>``, ``auto-organize`` and ``claude-integrate`` are all
+    automated tooling. See :data:`HUMAN_ACTORS` for why this is not imported.
+    """
+    name = str(actor or "").strip().lower()
+    return name in HUMAN_ACTORS or name.startswith(_HUMAN_ACTOR_PREFIX)
+
+
+def is_matt_decided(record: Any) -> bool:
+    """Did MATT decide this action? The doc-04 learning gate (spec 12 §2).
+
+    ARCHITECTURE, "Phase-4 rulings, bind + actor batch" (4ffef89), verbatim:
+
+        **LEARNING FOLDS ONLY MATT-DECIDED ACTIONS** (principle recorded for
+        Phase 5's learn.record_action filter): a route firing is config, not
+        a decision — folding it would make routes self-reinforcing and
+        corrupt the accept-rate corpus. […] Phase-5 nuances deferred:
+        interactive route acceptance in the UI (actor matt) folds as a normal
+        accept; integrate records use the verdict-based reading (verdict
+        accepted/edited = Matt-decided even though actor is claude-integrate).
+
+    Three answers, in order:
+
+    1. A record carrying an ``llm`` trace whose ``verdict`` is not
+       ``accepted``/``edited`` NEVER folds, whatever the actor. Spec 12 §3:
+       a rejected proposal leaves the "target untouched", so teaching it
+       would steer the next capture at a destination nothing was written to
+       — the same reasoning that already excludes ``partial_failure``.
+    2. A HUMAN actor folds. Interactive route acceptance in the UI arrives
+       here as ``actor: "matt"`` and is an ordinary accept.
+    3. An actor in :data:`LLM_EDIT_ACTORS` folds only WITH such a verdict —
+       the review gate is the human decision. Every other automated actor
+       (``consumer:*``, ``route:*``, ``auto-organize``) never folds.
+
+    Why this lives in the CALLEE rather than in each caller: while it was a
+    caller-side choice, ``tag_router`` had to build its own
+    ``OperationContext`` with ``on_record`` unset just to stay out of
+    learning.json (ARCHITECTURE Phase-4 landing, "Omission ACCEPTED as a
+    Phase-5 rider"), which meant a second index writer and a second recorder
+    in the pipeline. With the rule here, every composition root can wire
+    ``on_record`` unconditionally and the filter cannot be forgotten by the
+    next caller.
+    """
+    llm = getattr(record, "llm", None)
+    verdict = getattr(llm, "verdict", None) if llm is not None else None
+    if verdict is not None and str(verdict) not in MATT_DECIDED_VERDICTS:
+        return False
+
+    actor = getattr(record, "actor", "")
+    if actor_is_human(actor):
+        return True
+    return verdict is not None and str(actor or "").strip().lower() in LLM_EDIT_ACTORS
+
 
 @dataclass(frozen=True)
 class ActionCapture:
@@ -468,10 +570,10 @@ def record_action(data: LearningData, record: Any, *, now: float) -> LearningDat
     and a move fed in through ``organize record`` never reached the learner
     at all.
 
-    Skipped: dry runs (a rehearsal is not a precedent — the same rule every
-    other corpus reader applies), PARTIALLY-APPLIED operations, operations
-    outside :data:`LEARNED_OPERATIONS`, and records with no destination
-    target.
+    Skipped: actions MATT DID NOT DECIDE (see :func:`is_matt_decided`), dry
+    runs (a rehearsal is not a precedent — the same rule every other corpus
+    reader applies), PARTIALLY-APPLIED operations, operations outside
+    :data:`LEARNED_OPERATIONS`, and records with no destination target.
 
     Spec 04 §33 records "on every **successful** accept/move/merge". A
     partially-applied move copied the note but never archived the original,
@@ -480,6 +582,12 @@ def record_action(data: LearningData, record: Any, *, now: float) -> LearningDat
     failed. Three failed moves against one folder produced an association
     with ``count: 3, success_rate: 1.0``, and every retry compounded it.
     """
+    # WHO decided, first: an unattended route firing is CONFIG, and folding it
+    # would make routes self-reinforcing (ARCHITECTURE ruling 4ffef89,
+    # "LEARNING FOLDS ONLY MATT-DECIDED ACTIONS"). Enforced here rather than
+    # by each caller so no composition root can forget it.
+    if not is_matt_decided(record):
+        return None
     context = getattr(record, "context", None)
     if bool(getattr(context, "dry_run", False)):
         return None

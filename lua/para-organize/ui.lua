@@ -90,6 +90,14 @@ M.DEFAULTS = {
       new_resource = "<leader>nr",
       merge_complete = "<leader>mc",
       merge_cancel = "<leader>mx",
+      -- Spec 12 §1's edit modes and review gate. Listed here (and not only in
+      -- `actions.CORE_KEYS`) because `config.lua` derives its closed set of
+      -- rebindable keymap names from exactly this table — a row missing here
+      -- is a key an operator cannot rebind, which is the "every config key is
+      -- honored or deleted" rule read from the other direction.
+      integrate = "<leader>mi",
+      integrate_mode = "<leader>mm",
+      integrate_edit = "e",
     },
   },
 }
@@ -442,13 +450,20 @@ local function draw_capture_header(buf, state, cfg)
   })
 end
 
-local function draw_merge_hint(buf, state, cfg)
+--- Draw one instruction line ABOVE an editable pane, as virtual text.
+---
+--- Used by the merge editor and by the spec 12 §1 review gate's edit mode.
+--- Both put a MODIFIABLE buffer in the organize pane whose contents are sent
+--- straight to the core, so their instructions may never be buffer lines
+--- (spec 03 §5) — a `<leader>mc` would otherwise ship the header as part of
+--- the merged note or the final diff.
+local function draw_hint(buf, text, cfg)
   if not (buf and vim.api.nvim_buf_is_valid(buf)) then
     return
   end
   local hl = (cfg.ui and cfg.ui.highlights) or {}
   pcall(vim.api.nvim_buf_set_extmark, buf, NS_CAPTURE, 0, 0, {
-    virt_lines = { { { render.merge_hint(state, cfg), hl.header or "Title" } }, { { "", "Normal" } } },
+    virt_lines = { { { text, hl.header or "Title" } }, { { "", "Normal" } } },
     virt_lines_above = true,
   })
 end
@@ -491,20 +506,33 @@ function M.refresh(state)
   draw_capture_header(ui.capture_buf, state, cfg)
 
   -- Right pane.
-  local rendered = render.right_pane(state, cfg)
   local view = state.view or "suggestions"
+  -- The spec 12 §1 review gate is the pane's fifth state. It renders through
+  -- the module that owns it rather than through `render.right_pane`, so the
+  -- integrate flow's rendering, keymaps and wire handling stay in one file —
+  -- and a tree with no `integrate` module still renders the other four.
+  local integrate = view == "integrate" and select(2, pcall(require, "para-organize.integrate")) or nil
+  local editing = view == "integrate" and ((state.integrate or {}).editing == true)
+  local rendered
+  if type(integrate) == "table" and type(integrate.render) == "function" then
+    rendered = integrate.render(state, cfg)
+  else
+    rendered = render.right_pane(state, cfg)
+  end
   set_lines(ui.organize_buf, rendered.lines)
-  vim.bo[ui.organize_buf].modifiable = (view == "merge")
+  vim.bo[ui.organize_buf].modifiable = (view == "merge") or editing
   apply_marks(ui.organize_buf, rendered.marks, rendered.lines)
   vim.api.nvim_buf_clear_namespace(ui.organize_buf, NS_CAPTURE, 0, -1)
   if view == "merge" then
-    draw_merge_hint(ui.organize_buf, state, cfg)
+    draw_hint(ui.organize_buf, render.merge_hint(state, cfg), cfg)
+  elseif editing and type(integrate) == "table" and type(integrate.hint) == "function" then
+    draw_hint(ui.organize_buf, integrate.hint(state, cfg), cfg)
   end
   ui.map = rendered.map
   ui.view = view
 
   -- Keep the cursor on the selected item so `<CR>`/`j`/`k` agree.
-  if view ~= "merge" and vim.api.nvim_win_is_valid(ui.organize_win) then
+  if view ~= "merge" and view ~= "integrate" and vim.api.nvim_win_is_valid(ui.organize_win) then
     local selected = state.selected or 1
     local target = rendered:line_of(function(item)
       return item.index == selected
@@ -535,6 +563,20 @@ function M.item_at_cursor()
     return nil
   end
   return M.item_at(pos[1])
+end
+
+--- The organize pane's current buffer text, verbatim.
+---
+--- The one read a thin client is allowed to make of its own pane: it is what
+--- Matt just typed, not a vault byte. `merge_content` is the spec 03 §5
+--- specialisation of it; the spec 12 §1 review gate uses the general form
+--- because what it collects is a hand-edited DIFF, not a note body.
+---@return string|nil
+function M.organize_content()
+  if not (M._ui and vim.api.nvim_buf_is_valid(M._ui.organize_buf)) then
+    return nil
+  end
+  return table.concat(vim.api.nvim_buf_get_lines(M._ui.organize_buf, 0, -1, false), "\n")
 end
 
 --- Contents of the merge editor (spec 03 §5 step 3 sends this to

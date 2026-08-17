@@ -1045,3 +1045,139 @@ def test_record_action_learns_from_a_merge() -> None:
     assert data is not None
     assert data.statistics.total_moves == 1
     assert list(data.statistics.destinations) == [DEST]
+
+
+# --- the MATT-DECIDED filter (ARCHITECTURE ruling 4ffef89) -----------------
+#
+# "LEARNING FOLDS ONLY MATT-DECIDED ACTIONS (principle recorded for Phase 5's
+#  learn.record_action filter): a route firing is config, not a decision —
+#  folding it would make routes self-reinforcing and corrupt the accept-rate
+#  corpus. […] Phase-5 nuances deferred: interactive route acceptance in the
+#  UI (actor matt) folds as a normal accept; integrate records use the
+#  verdict-based reading (verdict accepted/edited = Matt-decided even though
+#  actor is claude-integrate)."
+
+
+def _actored(actor: str, *, operation: str = "move", llm: Any = None) -> Any:
+    import dataclasses
+
+    record = _action_record(["meeting"], f"{DEST}/note.md", operation=operation)
+    return dataclasses.replace(record, actor=actor, llm=llm)
+
+
+def _llm_trace(verdict: str) -> Any:
+    from organize_core.actions import LLMTrace
+
+    return LLMTrace(
+        backend="claude-cli",
+        model="opus",
+        prompt_hash="h",
+        proposed_diff="--- a\n+++ b\n+one\n",
+        final_diff="--- a\n+++ b\n+one\n",
+        verdict=verdict,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.parametrize("actor", ["matt", "user", "human", "human:matt", "MATT", " matt "])
+def test_a_human_actor_folds(actor: str) -> None:
+    """LITERAL actor strings, not an imported constant — flipping
+    ``HUMAN_ACTORS`` must not be able to make this suite agree with itself."""
+    assert learn_mod.record_action(LearningData(), _actored(actor), now=NOW) is not None
+
+
+@pytest.mark.parametrize(
+    "actor",
+    [
+        "route:workout",
+        "route:blog",
+        "consumer:tag_router",
+        "consumer:auto_tagger",
+        "consumer:learn",
+        "auto-organize",
+        "claude-integrate",  # no verdict ⇒ nobody reviewed it
+        "",
+    ],
+)
+def test_an_automated_actor_never_folds(actor: str) -> None:
+    """The whole point of the filter. Every member of doc 12 §2's actor enum
+    that is NOT Matt is listed, spelled literally.
+
+    A route firing is CONFIG. Folding it would make routes self-reinforcing:
+    the route files the capture, learning learns "captures like this go
+    there", suggestion scoring then ranks that folder higher for the next
+    capture — a loop with no human in it.
+    """
+    assert learn_mod.record_action(LearningData(), _actored(actor), now=NOW) is None
+
+
+def test_the_filter_is_the_only_thing_refusing_an_automated_actor() -> None:
+    """MUTATE-THE-GUARD-AWAY control (anti-vacuity standard 1): the record a
+    route writes is otherwise a perfectly foldable one — same operation, same
+    targets, same tags. Only the actor differs."""
+    routed = _actored("route:workout")
+    matt = _actored("matt")
+    assert routed.operation == matt.operation
+    assert [t.path for t in routed.targets] == [t.path for t in matt.targets]
+    assert learn_mod.record_action(LearningData(), routed, now=NOW) is None
+    assert learn_mod.record_action(LearningData(), matt, now=NOW) is not None
+
+
+@pytest.mark.parametrize("verdict", ["accepted", "edited"])
+def test_claude_integrate_folds_when_matt_accepted_or_edited_the_proposal(
+    verdict: str,
+) -> None:
+    """Ruling 4ffef89: "integrate records use the verdict-based reading
+    (verdict accepted/edited = Matt-decided even though actor is
+    claude-integrate)". The review gate (12 §1) IS the human decision."""
+    record = _actored("claude-integrate", operation="integrate", llm=_llm_trace(verdict))
+    assert learn_mod.record_action(LearningData(), record, now=NOW) is not None
+
+
+def test_a_rejected_proposal_never_folds_whoever_the_actor_is() -> None:
+    """Spec 12 §3: a rejected proposal leaves the "target untouched", so the
+    destination is not where anything landed — the same reasoning that
+    already excludes ``partial_failure``. Asserted for BOTH actors, because
+    an actor-only reading would let a Matt-rejected integrate teach."""
+    for actor in ("claude-integrate", "matt"):
+        record = _actored(actor, operation="integrate", llm=_llm_trace("rejected"))
+        assert learn_mod.record_action(LearningData(), record, now=NOW) is None, actor
+
+    # firing control: the same record, accepted, DOES fold
+    accepted = _actored("matt", operation="integrate", llm=_llm_trace("accepted"))
+    assert learn_mod.record_action(LearningData(), accepted, now=NOW) is not None
+
+
+def test_matt_decided_actors_agree_with_the_fileops_no_ai_actor_rule() -> None:
+    """AGREEMENT LINE. ``learn`` duplicates the human-actor set rather than
+    importing ``fileops`` (ARCHITECTURE ruling 15 rejected that edge to keep
+    the scoring module pure). Duplication is only acceptable if it cannot
+    drift, so the two are compared for every actor in doc 12 §2's enum plus
+    the ``human:`` namespace.
+    """
+    from organize_core.fileops import HUMAN_ACTORS, is_ai_actor
+
+    assert learn_mod.HUMAN_ACTORS == HUMAN_ACTORS
+    for actor in (
+        "matt",
+        "user",
+        "human",
+        "human:matt",
+        "claude-integrate",
+        "auto-organize",
+        "route:workout",
+        "consumer:tag_router",
+        "",
+    ):
+        assert learn_mod.actor_is_human(actor) is (not is_ai_actor(actor)), actor
+
+
+def test_the_matt_decided_vocabulary_matches_the_action_schema() -> None:
+    """The verdicts this module keys on must be verdicts the schema can
+    actually carry (12 §2), and the LLM-edit actor must be a member of the
+    documented actor enum."""
+    from organize_core.actions import VERDICTS
+
+    assert learn_mod.MATT_DECIDED_VERDICTS == frozenset({"accepted", "edited"})
+    assert learn_mod.MATT_DECIDED_VERDICTS < VERDICTS
+    assert VERDICTS - learn_mod.MATT_DECIDED_VERDICTS == frozenset({"rejected"})
+    assert learn_mod.LLM_EDIT_ACTORS == frozenset({"claude-integrate"})
