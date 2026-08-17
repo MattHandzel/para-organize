@@ -2105,3 +2105,14 @@ caller that genuinely knows better still wins.
 across 9 files, 0 failed / 0 errors; mutation audit 19/19
 (`tools/mutate_phase5_verify.py`, committed — a mutation audit whose script is
 not in the tree is an assertion, not evidence).
+
+## Phase-6 learning ruling (architect, final pass, 2026-08-16)
+
+KEEP NARROW: learn.LLM_EDIT_ACTORS stays frozenset({"claude-integrate"}).
+Widening to auto-organize before the trace distinguishes machine-applied
+from human-confirmed would corrupt the trust ladder's OWN calibration
+loop (13 §2 calibrates confidence against accepted proposals) — the
+self-reinforcement class one layer up. PHASE-6 PRECONDITION, verbatim:
+ActionRecord/LLMTrace gains an explicit applied-via distinction
+("matt-confirmed" | "auto_below") FIRST; then trust=propose confirmations
+may fold (genuinely Matt-decided) while auto_below applications never do.
