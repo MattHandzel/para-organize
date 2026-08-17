@@ -160,6 +160,10 @@ local SCHEMA = {
             hint = { type = "string" },
           },
         },
+        -- Free map: window-local option names. Merged over the pane defaults
+        -- (`ui.PANE_WIN_OPTIONS`) at mount, so `{ foldenable = true }` opts
+        -- back into the user's global folds.
+        win_options = { free = true, value = { type = "scalar" } },
         icons = {
           fields = {
             project = { type = "string" },

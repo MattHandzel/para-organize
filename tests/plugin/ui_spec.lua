@@ -203,6 +203,62 @@ describe("para-organize.ui", function()
       local lines = organize_lines()
       assert.is_true((has_line(lines, "^%[P%] alpha$")))
     end)
+
+    -- Reported from the live install: with the common markdown setup
+    -- (`foldmethod=expr` + a treesitter `foldexpr`) BOTH panes opened folded.
+    -- `foldexpr = "1"` reproduces that without treesitter: every line sits in
+    -- a level-1 fold, and `foldlevel = 0` starts it closed.
+    it("opens both panes unfolded even when the user's globals fold everything", function()
+      local saved = {
+        foldmethod = vim.o.foldmethod,
+        foldexpr = vim.o.foldexpr,
+        foldenable = vim.o.foldenable,
+        foldlevel = vim.o.foldlevel,
+      }
+      vim.o.foldmethod = "expr"
+      vim.o.foldexpr = "1"
+      vim.o.foldenable = true
+      vim.o.foldlevel = 0
+
+      ui.mount(state, { bind = false })
+      local wins = ui.current_wins()
+      local observed = {}
+      for _, pane in ipairs({ "capture", "organize" }) do
+        local win = wins[pane]
+        observed[pane] = {
+          foldenable = vim.wo[win].foldenable,
+          foldmethod = vim.wo[win].foldmethod,
+          first_closed_fold = vim.api.nvim_win_call(win, function()
+            return vim.fn.foldclosed(1)
+          end),
+        }
+      end
+
+      -- Restored BEFORE the assertions so a failure cannot leak fold globals
+      -- into the rest of the suite.
+      for name, value in pairs(saved) do
+        vim.o[name] = value
+      end
+
+      for _, pane in ipairs({ "capture", "organize" }) do
+        assert.is_false(observed[pane].foldenable)
+        -- Not just `foldenable=false`: manual defeats a later `zx` too.
+        assert.are.equal("manual", observed[pane].foldmethod)
+        -- The symptom Matt actually saw: line 1 swallowed by a closed fold.
+        assert.are.equal(-1, observed[pane].first_closed_fold)
+      end
+    end)
+
+    it("honors ui.win_options, the way back to the user's own fold settings", function()
+      ui.setup({ ui = { win_options = { foldenable = true, wrap = false } } })
+      ui.mount(state, { bind = false })
+      local wins = ui.current_wins()
+      assert.is_true(vim.wo[wins.capture].foldenable)
+      assert.is_false(vim.wo[wins.capture].wrap)
+      assert.is_true(vim.wo[wins.organize].foldenable)
+      -- A pane default the user did NOT override still applies.
+      assert.are.equal("manual", vim.wo[wins.capture].foldmethod)
+    end)
   end)
 
   describe("UI states (spec 03 §3)", function()

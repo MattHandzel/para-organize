@@ -65,6 +65,9 @@ M.DEFAULTS = {
     -- Empty by default so spec 03's literal `[P]`/`[A]`/`[R]`/`[🗑]` markers
     -- are what render; set e.g. `icons.project = " "` to override.
     icons = {},
+    -- Window-local options merged over `M.PANE_WIN_OPTIONS` and applied to
+    -- BOTH panes at mount. Free map: any window option name is honored.
+    win_options = {},
   },
   keymaps = {
     buffer = {
@@ -253,6 +256,38 @@ local function mount_float(cfg, capture_buf, organize_buf)
   return { mode = "float", layout = layout, left = left, right = right, capture_win = left.winid, organize_win = right.winid }
 end
 
+--- Window-local options forced on BOTH panes at mount.
+---
+--- Neither `mount_float` nor `mount_split` used to touch the fold options, so
+--- the panes inherited the user's globals — and with the common markdown setup
+--- (`foldmethod=expr` + `nvim_treesitter#foldexpr()`) both panes opened
+--- FOLDED. That is the one thing this UI must never do: the capture pane
+--- exists to be read at a glance, and the organize pane's rows ARE the choice
+--- being made. `foldmethod=manual` (not just `foldenable=false`) so a later
+--- `zx`/`foldenable` flip from another plugin cannot re-apply the expr folds.
+M.PANE_WIN_OPTIONS = {
+  foldenable = false,
+  foldmethod = "manual",
+  foldlevel = 99,
+  foldcolumn = "0",
+}
+
+--- Apply `PANE_WIN_OPTIONS`, then the user's `ui.win_options` over them, to
+--- both panes. A user who wants folds back writes
+--- `ui = { win_options = { foldenable = true } }`; every other window-local
+--- option is settable through the same door.
+local function apply_win_options(handles, cfg)
+  local overrides = (cfg.ui and cfg.ui.win_options) or {}
+  local options = vim.tbl_extend("force", vim.deepcopy(M.PANE_WIN_OPTIONS), overrides)
+  for _, win in ipairs({ handles.capture_win, handles.organize_win }) do
+    if win and vim.api.nvim_win_is_valid(win) then
+      for name, value in pairs(options) do
+        pcall(vim.api.nvim_set_option_value, name, value, { win = win })
+      end
+    end
+  end
+end
+
 local function mount_split(capture_buf, organize_buf)
   local ok, result = pcall(function()
     local capture_win = vim.api.nvim_open_win(capture_buf, true, { split = "right", win = 0 })
@@ -311,6 +346,7 @@ function M.mount(state, opts)
   handles.organize_buf = organize_buf
   handles.owned_bufs = owned_bufs
   handles.map = {}
+  apply_win_options(handles, cfg)
   M._ui = handles
 
   M._install_autocmds()
