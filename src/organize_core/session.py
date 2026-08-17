@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import secrets
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
 
@@ -189,13 +189,40 @@ class Session:
         )
 
 
+def narrow_to_backlog(filters: QueryCriteria) -> QueryCriteria:
+    """Apply the capture-backlog defaults to any criterion the caller left
+    open.
+
+    A session filter NARROWS the backlog — it never widens the query to the
+    whole vault. 03 §2 reads "Defaults when no filters: ``status=raw``,
+    restricted to the capture folder", and taking that literally (defaults
+    only when the filter set is entirely empty) made every filtered session
+    a vault-wide one: on the live vault ``since=2025-01-01`` answered with
+    **12,873 of 13,252 indexed notes** instead of captures, so "filter my
+    captures by tag/date" handed back the entire vault with already-filed
+    notes offered for filing again. Narrowing is what the words mean in a
+    stage whose whole job is the capture backlog.
+
+    An explicit ``status=``/``para_type=`` from the caller still wins — that
+    is the deliberate override. The vault-wide query surface is
+    ``organize search``, which is unaffected.
+    """
+    defaults = default_filters()
+    return replace(
+        filters,
+        status=list(filters.status) or list(defaults.status),
+        para_type=list(filters.para_type) or list(defaults.para_type),
+    )
+
+
 def start_session(index: VaultIndex, filters: QueryCriteria | None = None) -> Session:
     """Build the capture list per filters (default ``status=raw`` +
-    para_type ``capture``), ordered per module docstring. Zero matches ⇒
+    para_type ``capture``, and see ``narrow_to_backlog`` for how a partial
+    filter set inherits them), ordered per module docstring. Zero matches ⇒
     returns an ACTIVE session with an empty list — the CLIENT decides how
     to notify ("No captures found matching filters", 03 §2) — clients never
     interpret an exception for a non-error."""
-    criteria = filters if filters is not None else default_filters()
+    criteria = narrow_to_backlog(filters) if filters is not None else default_filters()
     captures = index.query(criteria)
     return Session(
         session_id=new_session_id(),

@@ -102,6 +102,62 @@ def test_start_session_honours_explicit_filters(ordered_index: VaultIndex) -> No
     assert session.filters.tags == ["t2"]
 
 
+def test_a_filtered_session_still_only_offers_captures(tmp_path: Path) -> None:
+    """A session filter NARROWS the backlog; it never widens it to the vault.
+
+    Reported from the live install: `:ParaOrganize since=2025-01-01` answered
+    with 12,873 of 13,252 indexed notes — the whole vault, already-filed notes
+    included — because a supplied filter REPLACED the ``status=raw`` +
+    ``para_type=capture`` defaults instead of inheriting them.
+    """
+    vault = build_ordered_vault(tmp_path / "narrow", count=2)
+    # A filed note and an already-processed capture, both matching the filter.
+    write_note(
+        vault,
+        "resources/reference/filed.md",
+        "---\ntimestamp: '2026-01-15T00:00:00+00:00'\ntags:\n- t0\n---\nfiled\n",
+    )
+    write_note(
+        vault,
+        "capture/raw_capture/already-done.md",
+        "---\ntimestamp: '2026-01-20T00:00:00+00:00'\ntags:\n- t0\n"
+        "processing_status: processed\n---\ndone\n",
+    )
+    index = make_index(vault, tmp_path)
+
+    session = start_session(index, QueryCriteria(since="2025-01-01"))
+
+    assert names(session.captures) == ["note-0.md", "note-1.md"]
+    # The defaults were inherited, not discarded…
+    assert session.filters.status == ["raw"]
+    assert session.filters.para_type == ["capture"]
+    # …and the caller's own criterion survived intact.
+    assert session.filters.since == "2025-01-01"
+
+
+def test_an_explicit_para_type_still_overrides_the_backlog_default(tmp_path: Path) -> None:
+    """The narrowing is a DEFAULT, not a cage: naming ``para_type`` wins.
+
+    ``status`` is a separate criterion and is NOT overridden here, so it still
+    inherits ``raw`` — narrowing is per-criterion. Querying the vault without
+    the backlog defaults at all is ``organize search``'s job, not a session's.
+    """
+    vault = build_ordered_vault(tmp_path / "override", count=1)
+    write_note(
+        vault,
+        "resources/reference/filed.md",
+        "---\ntimestamp: '2026-01-15T00:00:00+00:00'\ntags:\n- t0\n"
+        "processing_status: raw\n---\nfiled\n",
+    )
+    index = make_index(vault, tmp_path)
+
+    session = start_session(index, QueryCriteria(para_type=["resource"]))
+
+    assert names(session.captures) == ["filed.md"]
+    assert session.filters.para_type == ["resource"]
+    assert session.filters.status == ["raw"]
+
+
 def test_zero_matches_is_an_active_empty_session(ordered_index: VaultIndex) -> None:
     """ARCHITECTURE resolution #9 — a non-error is never an exception."""
     session = start_session(ordered_index, QueryCriteria(tags=["nothing-matches-this"]))
