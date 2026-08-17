@@ -20,6 +20,23 @@ A complete specification for rebuilding the KMS *organize* stage **from scratch*
 | [12-edit-modes-and-action-recording.md](12-edit-modes-and-action-recording.md) | manual/append/integrate edit modes (Claude edits in Matt's wording + target style); total state/diff recording of every action as a learning corpus |
 | [13-automatic-organize.md](13-automatic-organize.md) | FUTURE: highlight/write text in nvim → Claude files it to the correct place(s); trust ladder; built on 10–12 |
 
+Docs 14–18 were written after the 2026-08-16 cutover, from Matt's feedback on
+first contact with the running system. **14 governs 15–18**: it is the doc that
+turns "Matt's tool" into something a stranger can install, so every behaviour
+15–18 specify ships with a default, a config key, a documented meaning, and a
+test that the key is honored. The measured evidence behind all four —
+the real capture-pane "before", frontmatter key frequency across 1,000 real
+captures, the fold defect, the live keymap surface — is
+[`doc/FEEDBACK-EVIDENCE-2026-08-16.md`](../doc/FEEDBACK-EVIDENCE-2026-08-16.md).
+
+| Doc | Contents |
+|---|---|
+| [14-built-for-others.md](14-built-for-others.md) | **PRINCIPLES**: two users (Matt, and a stranger with a different vault), the zero-config promise, the de-Matt-ification work list, configuration law, extension seams and their stability contract, discoverability/documentation and distribution obligations, privacy toward a stranger |
+| [15-capture-presentation.md](15-capture-presentation.md) | The capture pane redesign: pane fold defaults, the pinned/hidden/rest field policy, per-field formatters (readable timestamps), the compact→full→raw cycle that keeps *all* metadata reachable, the custom-renderer escape hatch |
+| [16-navigation-and-throughput.md](16-navigation-and-throughput.md) | Reaching the exact folder fast: tmux-thumbs style hint labels, whole-vault hint jump, and the throughput set for a 1,862-capture backlog — repeat-destination, sticky pin, batch marking, numeric accept, MRU, queue filtering, progress/resume, destination preview |
+| [17-undo-and-action-history.md](17-undo-and-action-history.md) | Undoing the previous action: what is undoable and what honestly is not, reversal-as-forward-operation, the refusal predicates, the learning firewall, the history view, the RPC/CLI surface |
+| [18-teach-mode.md](18-teach-mode.md) | The sandboxed first-run tutorial: mechanically provable isolation (no real data, ever), a generated stranger-safe corpus, and a lesson curriculum that doubles as the acceptance checklist |
+
 **Provenance facts an implementer must know before reading any old code** (full detail in 01/08):
 
 1. The original plugin's **HEAD never worked** (refactor left stubs). Behavioral reference: `git show d753672~1:<path>` for `lua/para-organize/{indexer,suggest,learn,move,utils}.lua` — the old code was deleted on this branch but is fully available from git history, and the `main` branch/worktree still has the complete original tree.
