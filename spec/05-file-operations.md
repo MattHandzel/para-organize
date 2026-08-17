@@ -52,6 +52,8 @@ The capture pane edits the real file's buffer. Explicit `:w` saves normally (and
 
 ## 8. Undo story (parity, not new scope)
 
+⚠ **Superseded by doc 17 (undo and action history): automated undo IS in scope** — the heading's "not new scope" qualifier and the "No automated undo command is in scope" sentence below no longer hold. Everything else in this section stands: `get_undo_info()` is unchanged, and the operation log plus backups remain the manual reversal path.
+
 `get_undo_info()` returns the last operation with enough detail to reverse it by hand (src, dst, backup path). No automated undo command is in scope — but the operation log plus backups must make every operation manually reversible, and `:ParaOrganize debug` surfaces the recent-operations tail.
 
 ## 9. Acceptance tests

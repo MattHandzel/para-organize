@@ -2,7 +2,17 @@
 
 A complete specification for rebuilding the KMS *organize* stage **from scratch**: exact feature parity with the original (minus its bugs), re-architected as a core engine + thin Neovim client, plus four new capabilities. Written 2026-08-15 from a deep audit of the code (git history and HEAD), the live deployment (systemd units, state databases, Matt's real configs), and the real vault data.
 
-**Read in order.** Docs 01–09 define the parity baseline; docs 10–13 are the new directives and override earlier docs where they conflict (only 10 does, and says exactly where).
+**Read in order.** Docs 01–09 define the parity baseline; docs 10–13 are the new directives, docs 14–18 the post-cutover directives. A later doc overrides an earlier one where they conflict, and each override names exactly where. The complete register:
+
+| Doc | Overrides |
+|---|---|
+| **10** | The component split: the core owns all behaviour, the Neovim plugin is a thin client. Supersedes every place 03/07 puts vault reads or writes in the plugin. |
+| **14** | Principles — **normative over all** (two users, the zero-config promise, configuration law, the seam stability tiers). Tie-break: where 14 and a later doc name the same config key or seam, **the later doc's spelling wins**, and 14's citation is corrected in the same change; 14 stays normative on principles, tiers and laws. |
+| **15** | 03 §3's left-pane header list, and the whole `ui.display.*` block, which 15 deletes. No doc adds a key under `ui.display.*`. |
+| **16** | 03 §2's default session ordering (`unseen_first`, declared as a deviation in 16 §3.7; `order = "oldest"` restores 03's exact ordering). |
+| **17** | 05 §8's "no automated undo command is in scope" sentence (marked superseded at 05:55; the rest of 05 §8 stands). |
+
+No other sentence in 01–09 is superseded. A conflict that is not in this register is a defect in the specs — report it, do not resolve it by choosing.
 
 | Doc | Contents |
 |---|---|

@@ -342,7 +342,9 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
   destination) and is uncapped; capping is `suggest.for_note`'s job. The
   `EXTRA_METHODS` set in `tests/test_server_protocol.py` pins the list and
   fails on any further addition — that failure IS the approval step.
-- **`op.skip` approved — the one WRITING addition beyond spec 10 §2.** Spec
+- **`op.skip` approved — the FIRST writing addition beyond spec 10 §2.** (It
+  was the only one until `op.undo` was granted; see "Shared-file grants for
+  the docs 14-18 build" §1 at the end of this file.) Spec
   03 §2/§6 makes skip a first-class session decision and doc 12 §2 already
   lists `skip` in the ActionRecord operation enum, but spec 10 §2 named no
   method for it, so the decision was unrecordable from a thin client: every
@@ -456,6 +458,10 @@ constants (`ORGANIZE_ERROR = -32000` carries taxonomy name + hint in
   empty name and a name carrying a path separator all raise `ConfigError`,
   so ONE `error.data.kind` covers every way of misaddressing
   `folder.create`; only an unwritable PARA root reaches `ok=false`.
+
+  AMENDED for TWO undo-refusal rows only — see "Shared-file grants for the
+  docs 14-18 build" §4 at the end of this file. Nothing else about this
+  ruling changed, and concurrent modification was always on the RAISE side.
 - **Phase gates run `make gate`** (test + perf + lint): the spec 09 §4
   full-scale perf tests are `-m slow` and excluded from the default suite,
   so a bare `make test` is NOT a complete phase gate.
@@ -2116,3 +2122,130 @@ self-reinforcement class one layer up. PHASE-6 PRECONDITION, verbatim:
 ActionRecord/LLMTrace gains an explicit applied-via distinction
 ("matt-confirmed" | "auto_below") FIRST; then trust=propose confirmations
 may fold (genuinely Matt-decided) while auto_below applications never do.
+
+## Shared-file grants for the docs 14-18 build (architect, routed 2026-08-16)
+
+The 14-18 series is built by five parallel seats, and four of the changes it
+needs land against surfaces this manifest reserves to the
+architect/integrator — the `EXTRA_METHODS` approval gate in
+`tests/test_server_protocol.py`, `errors.py`, `paths.py`, and this file.
+Serialising five requests through the architect would stall the build, so
+every shared-file change the series needs is granted HERE, once, with the
+editing seat named. The list is exhaustive: a change not on it is still a
+request, and none of the gates that make these grants visible is relaxed.
+
+### 1. `EXTRA_METHODS` gains three names
+
+`dest.recent` (doc 16), `op.undo` and `history.list` (doc 17). ONE
+justification shape covers all three — the same one that admitted
+`folder.list` / `meta.fields`: **spec 10 §1 forbids a thin client from
+reading or writing vault state itself, and each capability already exists
+core-side with no wire surface.** Recent destinations come from the learning
+and action corpora (`learn.get_top_destinations`, `ActionRecorder.query`);
+the history reader is `ActionRecorder.query`/`stats`, reachable from
+`organize actions` and from nothing else; and everything an undo inverts —
+the operations log, the backups directory, `OperationLog.undo_info` — is
+core-side today. Doc 17 builds the applier ON TOP of that state, in the
+core, which is where spec 10 §1 requires the file moves to happen: it is
+precisely because `undo_info` stops at "enough detail to reverse it by hand"
+(05 §8) that a client offered no method would have to do the reversing
+itself, out of the vault, which is the exact prohibition.
+
+`op.undo` is the SECOND writing addition beyond spec 10 §2 (after
+`op.skip`), granted on the same footing and for the same reason: the
+decision is recordable only through a method, and an undo the UI cannot
+reach is an undo Matt does not have at the moment he needs it. Doc 05 §8's
+"no automated undo" sentence is superseded by doc 17, which is why this is a
+grant rather than a contradiction. `dest.recent` and `history.list` are
+read-only.
+
+`tests/test_server_protocol.py` is edited ONCE, by **doc 17's seat**, adding
+all three names in a single patch — doc 16 does not touch the file. The set
+still fails on any FURTHER addition; that failure remains the approval step,
+and the seat cites this section by name in the comment above the set, as the
+Phase-5 pair already does.
+
+The three names also join `RPC_METHODS` in `server.py`. That is not a
+contradiction of the scaffold's "the 15 doc-10 §2 names, exact" under
+"Public interfaces": since the first extras landed, the pinning test has
+asserted the doc-10 names are a SUBSET of `RPC_METHODS` and appear in
+spec order — containment and order, never size.
+
+### 2. `errors.py` — one consolidated taxonomy change
+
+`UndoRefused` (doc 17) and `TeachSandboxError` / `TeachConfinementError`
+(doc 18) enter the shared taxonomy as ONE patch, applied by the architect,
+which updates the **errors** line under "Public interfaces" in the same
+change. Three classes, one edit, no builder seat touching the file. The
+names are as spelled here — `UndoRefused` sits beside `NoAiRefusal` and is
+not to be "corrected" to an `-Error` suffix.
+
+They clear the bar the Phase-1 close set when it REJECTED moving
+`ActionSchemaError` out of `actions.py` (rejected item 17): these are not
+one module's payload-validation errors. Each is raised in one module and
+BRANCHED ON at the wire by another — `error.data.kind` is what a client
+reads to tell "the world moved under this undo" from "your request was
+malformed", and doc 18's two are the discriminable kinds a confinement
+refusal carries. An error class that is part of a contract two processes
+share cannot live in one module's private namespace.
+
+### 3. `paths.py` — `$ORGANIZE_TEACH_DIR`, read where every other variable is read
+
+Doc 18's sandbox precedence (`--sandbox-dir` > `$ORGANIZE_TEACH_DIR` >
+`[teach] sandbox_dir` > `<tmpdir>/organize-teach-<uid>/`) needs one new
+environment variable. It is added to `paths.py` and read THERE, in the shape
+`$ORGANIZE_CORE_STATE_DIR` already has: structural decision 4 (nothing
+consults `os.environ` or `Path.home()` outside `paths.py`) is unamended, and
+`teach.py` reads no environment itself.
+
+A `[teach] sandbox_dir` key coexisting with the variable is NOT a repeat of
+the `[state] dir` key the Phase-3 fix pass rejected. That key was rejected
+for creating a SILENT second source of truth for a location the service
+resolves elsewhere; doc 18's four sources carry a stated precedence and a
+preflight that refuses a resolved root overlapping the configured vault, so
+the answer to "which one won" is always readable.
+
+`CorePaths.resolve(..., env=…)` already carries the injection channel (see
+"Public interfaces"); this grant does not add it, it PINS it as the only
+channel doc 18 may use — the scrubbed environment the teach parent hands its
+child travels through `env=`, never through a process-global mutation. The
+Phase-1 close's rejected item 18 (no `env=` on `load_config`) stands and is
+what makes that workable: `config.py` still reads no environment at all.
+
+`paths.py` remains integrator-owned, and this variable plus that parameter
+are the ONLY grants against it. In particular `CorePaths` gains no teach
+root and no sandbox-derived property — the sandbox root lives in doc 18's
+own `TeachConfig`, which is what keeps "the teach loader structurally cannot
+return a `CorePaths` value" a testable claim rather than a careful one.
+
+### 4. Amendment to "Where the error line falls" — TWO undo-refusal rows
+
+The ADDRESSING-vs-WORLD-STATE ruling above stands unchanged for every
+operation, undo included, with exactly two rows added to the RAISE side and
+only for undo REFUSALS:
+
+| Undo refusal | Side | Why |
+|---|---|---|
+| the archived original is missing | RAISE, reaching the wire as `-32000` with a discriminable `error.data.kind` | nothing was touched |
+| no backup exists | RAISE, reaching the wire as `-32000` with a discriminable `error.data.kind` | nothing was touched |
+
+Both are `UndoRefused` (grant 2) — ONE taxonomy name for every undo refusal,
+with `error.data`'s hint naming WHICH precondition failed, so a client tells
+the two rows apart without a second error class per refusal reason.
+
+Both write NO oplog line. By the letter of the original ruling these read as
+world-state failures and would be `ok = false` plus a FAILED line; the
+amendment is granted because the ruling's own reason for that side is *"the
+operation was real and was attempted"*. A refused undo is not attempted —
+the precondition check runs BEFORE any file is moved, so a FAILED line would
+record an operation that never touched the vault, and a later undo of that
+line would have nothing to invert.
+
+Scope, stated so it cannot creep: the deviation is TWO ROWS.
+`ConcurrentModificationError` is already named on the RAISE side of the
+original ruling and is NOT a deviation — a doc claiming it as one is
+claiming a licence it already holds. Every other undo outcome keeps the
+standing rule: an undo that begins and then fails mid-flight returns
+`ok = false` with a FAILED oplog line, and clients still MUST check
+`result.ok` AND branch on `error.data.kind`. Doc 17 §3 records this same
+amendment; the two records are one ruling and must not drift.
