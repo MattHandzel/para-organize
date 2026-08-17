@@ -385,6 +385,44 @@ end
 
 function M._install_autocmds()
   local group = vim.api.nvim_create_augroup(AUGROUP, { clear = true })
+
+  -- `:w` in the organize pane. The pane is `acwrite` exactly while it holds
+  -- editable text, so this fires instead of E382, and it dispatches on the
+  -- VIEW rather than on what the text looks like (the 08 §A19 discipline).
+  -- Saving is what a person does when they mean "apply what I just wrote".
+  -- Buffer-scoped ONLY. A nil `buffer` here would register a GLOBAL
+  -- `BufWriteCmd` and hijack `:w` for every buffer in the editor.
+  local organize_buf = M._ui and M._ui.organize_buf
+  if organize_buf and vim.api.nvim_buf_is_valid(organize_buf) then
+    vim.api.nvim_create_autocmd("BufWriteCmd", {
+      group = group,
+      buffer = organize_buf,
+      callback = function()
+        local ui = M._ui
+        if not ui then
+          return
+        end
+        vim.bo[ui.organize_buf].modified = false
+        local ok, actions = pcall(require, "para-organize.actions")
+        if not ok then
+          return
+        end
+        -- `merge_complete` already splits on the view: in `merge` it commits
+        -- through `op.merge_commit`, in `integrate` it carries the review
+        -- gate's accept verdict. `:w` means the same thing in both — "apply
+        -- what I just wrote" — so one call covers both editable views.
+        if ui.view == "merge" or ui.view == "integrate" then
+          actions.merge_complete()
+        else
+          vim.notify(
+            "para-organize: nothing to save here — this pane is a view of the vault, not a file. "
+              .. "Press ? for the keys that change it.",
+            vim.log.levels.INFO
+          )
+        end
+      end,
+    })
+  end
   vim.api.nvim_create_autocmd("WinClosed", {
     group = group,
     callback = function(event)
@@ -438,6 +476,11 @@ local function set_lines(buf, lines)
   vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = was_modifiable
+  -- The organize pane is `acwrite` while the merge editor is open (so `:w`
+  -- reaches `BufWriteCmd` instead of failing E382). An `acwrite` buffer that
+  -- believes it is modified blocks `:q` with E37 — and every render here is
+  -- the PLUGIN writing, never the user, so nothing here is unsaved work.
+  vim.bo[buf].modified = false
 end
 
 local function apply_marks(buf, marks, lines)
@@ -556,7 +599,15 @@ function M.refresh(state)
     rendered = render.right_pane(state, cfg)
   end
   set_lines(ui.organize_buf, rendered.lines)
-  vim.bo[ui.organize_buf].modifiable = (view == "merge") or editing
+  local writable = (view == "merge") or editing
+  vim.bo[ui.organize_buf].modifiable = writable
+  -- `nofile` makes `:w` fail with "E382: Cannot write, 'buftype' option is
+  -- set" — which is what Matt hit the first time he edited a merge and
+  -- reached for the one key every Vim user reaches for. A pane that presents
+  -- editable text must accept the write; `acwrite` routes it to the
+  -- `BufWriteCmd` below, which commits through the CORE (thin-client law:
+  -- the client still never writes the vault itself).
+  vim.bo[ui.organize_buf].buftype = writable and "acwrite" or "nofile"
   apply_marks(ui.organize_buf, rendered.marks, rendered.lines)
   vim.api.nvim_buf_clear_namespace(ui.organize_buf, NS_CAPTURE, 0, -1)
   if view == "merge" then

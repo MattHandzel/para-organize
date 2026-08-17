@@ -362,6 +362,53 @@ describe("para-organize.ui", function()
       assert.are.equal(state.merge.content, ui.merge_content(state))
     end)
 
+    -- Reported from the live install: editing a merge and pressing `:w` — the
+    -- one key every Vim user reaches for — failed with "E382: Cannot write,
+    -- 'buftype' option is set", because the pane was `nofile`.
+    it("lets :w commit the merge instead of failing E382", function()
+      state.view = "merge"
+      state.merge = {
+        target = "/vault/projects/alpha/target.md",
+        content = "body\n\ncapture body",
+        snapshot = { mtime = 1, hash = "abc" },
+        previous_view = "suggestions",
+      }
+      ui.mount(state, { bind = false })
+      local bufs = ui.current_bufs()
+
+      -- The pane accepts a write at all…
+      assert.are.equal("acwrite", vim.bo[bufs.organize].buftype)
+
+      -- …and the write is routed to the merge commit, not to the filesystem.
+      local actions = require("para-organize.actions")
+      local committed = 0
+      local real_complete = actions.merge_complete
+      actions.merge_complete = function()
+        committed = committed + 1
+      end
+      local ok, err = pcall(function()
+        vim.api.nvim_buf_call(bufs.organize, function()
+          vim.cmd("write")
+        end)
+      end)
+      actions.merge_complete = real_complete
+
+      assert.is_true(ok, "«:w» errored in the merge editor: " .. tostring(err))
+      assert.are.equal(1, committed)
+      -- Nothing was written to disk: the pane has no file name to write to,
+      -- and the core is what touches the vault (thin-client law, 10 §1).
+      assert.are.equal("para-organize://organize", vim.api.nvim_buf_get_name(bufs.organize))
+      assert.is_false(vim.bo[bufs.organize].modified)
+    end)
+
+    it("keeps the pane nofile — and unwritable — outside the editable views", function()
+      state.view = "suggestions"
+      ui.mount(state, { bind = false })
+      local bufs = ui.current_bufs()
+      assert.are.equal("nofile", vim.bo[bufs.organize].buftype)
+      assert.is_false(vim.bo[bufs.organize].modifiable)
+    end)
+
     it("shows a help overlay generated from the keymap table", function()
       local actions = require("para-organize.actions")
       actions.setup({ state = state, config = ui.config() })
