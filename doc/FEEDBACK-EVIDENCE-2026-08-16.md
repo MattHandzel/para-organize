@@ -151,6 +151,24 @@ The last row is the one implementers get wrong. Spec 15 §3 already requires the
 `BufReadPost` re-apply that covers it; this table is the proof that the
 requirement is load-bearing rather than defensive.
 
+## 4c. The 16 §1 hint mechanism is empirically proven
+
+The other mechanism a builder could get badly wrong. Same method — headless
+probe, six suggestion rows, no plugin loaded:
+
+| Probe | Result |
+|---|---|
+| six labels drawn as `virt_text` with `virt_text_pos = "overlay"` | 6 extmarks, labels sit **on** the row's first cell with no reflow |
+| buffer text after labelling | byte-identical; `modified = false` |
+| `vim.fn.getcharstr()` after feeding `d` | returns `"d"` → resolves to row 3 (`[R] misc`) |
+| abort key | `<Esc>` reads as `"\27"`, so cancel is a plain comparison |
+| clearing labels | `nvim_buf_clear_namespace` leaves 0 extmarks |
+
+So hint mode needs no third-party library and no transient keymaps: draw
+overlay extmarks in a dedicated namespace, block on `getcharstr()`, clear the
+namespace on resolve or abort. Multi-character labels are the same loop run
+twice with the prefix filtered.
+
 ## 5. Keymap surface as it stands (generated from the live table)
 
 25 bindings today: `<CR>` accept, `<Esc>` cancel, `<Tab>`/`<S-Tab>` next/prev
