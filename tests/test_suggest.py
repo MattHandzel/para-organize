@@ -294,6 +294,15 @@ def test_signal_2_variant_matching_never_touches_the_shared_normalizer() -> None
     assert fm.normalize_tag("productivity-system") == "productivity-system"
     assert fm.normalize_tag("principle") == "principle"
 
+    # Spec 21 §4 #2 extends this pin to the two match-time rules that landed
+    # with note candidates: note KEY DERIVATION and the candidate STOPWORD
+    # filter both go through the same normalizer and neither may change it.
+    # `mind` is a shipped stopword and `Deep_Work Habits` is the shape the
+    # normalizer is contracted on; both come back untouched.
+    assert fm.normalize_tag("mind") == "mind"
+    assert fm.normalize_tag("Deep_Work Habits") == "deep-work-habits"
+    assert fm.normalize_tag("eduardo-pontes-reis") == "eduardo-pontes-reis"
+
 
 def test_signals_1_and_2_stack() -> None:
     candidate = cand("impro", "resources")

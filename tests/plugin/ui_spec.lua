@@ -70,7 +70,21 @@ describe("para-organize.ui", function()
           sources = { "obsidian" },
           context = { "morning" },
           modalities = { "text" },
-          frontmatter = { importance = "high" },
+          -- The `note.get` frontmatter dict, which is what the spec-15 card
+          -- renders from. Four of these keys ship HIDDEN and must not appear
+          -- in a compact card; `importance` is a spec-07 metadata field and
+          -- is therefore implicitly pinned.
+          frontmatter = {
+            timestamp = "2026-08-15T06:31:00",
+            context = { "morning" },
+            tags = { "alpha", "beta" },
+            sources = { "obsidian" },
+            importance = "high",
+            capture_id = "20260815T063100",
+            aliases = { "20260815T063100" },
+            location = { city = "San Francisco" },
+            processing_status = "raw",
+          },
         },
         { path = second_path, filename = "capture-two.md", title = "Capture two", tags = {} },
       },
@@ -176,15 +190,20 @@ describe("para-organize.ui", function()
       assert.is_false(vim.bo[bufs.capture].modified)
       -- ...and the header exists only as virtual text.
       local virtuals = virt_lines(bufs.capture)
-      assert.is_true((has_line(virtuals, "^Capture 1 of 2$")))
-      assert.is_true((has_line(virtuals, "tags: alpha, beta")))
-      assert.is_true((has_line(virtuals, "sources: obsidian")))
-      -- hide_capture_id defaults on: the capture_id alias is filtered out.
-      local aliases = select(2, has_line(virtuals, "^aliases:"))
-      assert.is_truthy(aliases)
-      assert.is_nil(aliases:match("20260815T063100"))
-      -- The spec-07 metadata summary is present.
-      assert.is_true((has_line(virtuals, "importance: high")))
+      assert.is_true((has_line(virtuals, "^ Capture 1 of 2$")))
+      -- `tags` is BOTH a shipped pinned key and a spec-07 metadata field, so
+      -- it renders once, with its edit keymap as a dim suffix.
+      assert.is_true((has_line(virtuals, "^ tags%s+#alpha #beta%s+%(t%)$")))
+      assert.is_true((has_line(virtuals, "^ sources%s+obsidian$")))
+      assert.is_true((has_line(virtuals, "^ context%s+morning$")))
+      -- The shipped `hidden` list (spec 15 §7): the four spellings of the
+      -- capture's identity never reach a compact card.
+      for _, gone in ipairs({ "capture_id", "aliases", "location", "processing_status" }) do
+        assert.is_false((has_line(virtuals, "^ " .. gone)), gone)
+      end
+      -- The spec-07 metadata field is implicitly pinned, and renders its edit
+      -- keymap as a dim suffix (spec 15 §2).
+      assert.is_true((has_line(virtuals, "^ importance high%s+%(i%)$")))
     end)
 
     it("renders the suggestions list with markers, scores and reasons", function()
@@ -197,8 +216,11 @@ describe("para-organize.ui", function()
       assert.is_true((has_line(lines, "^    tag match: alpha$")))
     end)
 
-    it("hides scores when ui.display.show_scores is off", function()
-      ui.setup({ ui = { display = { show_scores = false } } })
+    -- `ui.display.*` was DELETED as a section by spec 15 §2 / ruling R1; the
+    -- key's new home is `ui.organize.show_scores` (spec 15 §6), which is now
+    -- the SINGLE source the pane and the pickers both read.
+    it("hides scores when ui.organize.show_scores is off", function()
+      ui.setup({ ui = { organize = { show_scores = false } } })
       ui.mount(state, { bind = false })
       local lines = organize_lines()
       assert.is_true((has_line(lines, "^%[P%] alpha$")))
@@ -208,7 +230,9 @@ describe("para-organize.ui", function()
     -- (`foldmethod=expr` + a treesitter `foldexpr`) BOTH panes opened folded.
     -- `foldexpr = "1"` reproduces that without treesitter: every line sits in
     -- a level-1 fold, and `foldlevel = 0` starts it closed.
-    it("opens both panes unfolded even when the user's globals fold everything", function()
+    --- Observe both windows under hostile fold globals, restoring the globals
+    --- BEFORE any assertion so a failure cannot leak them into the suite.
+    local function observe_folds(setup_opts)
       local saved = {
         foldmethod = vim.o.foldmethod,
         foldexpr = vim.o.foldexpr,
@@ -220,6 +244,9 @@ describe("para-organize.ui", function()
       vim.o.foldenable = true
       vim.o.foldlevel = 0
 
+      if setup_opts then
+        ui.setup(setup_opts)
+      end
       ui.mount(state, { bind = false })
       local wins = ui.current_wins()
       local observed = {}
@@ -231,22 +258,46 @@ describe("para-organize.ui", function()
           first_closed_fold = vim.api.nvim_win_call(win, function()
             return vim.fn.foldclosed(1)
           end),
+          -- The fixture capture is `---` / `tags:` / `  - alpha` / `---`, so
+          -- line 5 is the first BODY line.
+          body_closed_fold = vim.api.nvim_win_call(win, function()
+            return vim.fn.foldclosed(5)
+          end),
         }
       end
 
-      -- Restored BEFORE the assertions so a failure cannot leak fold globals
-      -- into the rest of the suite.
       for name, value in pairs(saved) do
         vim.o[name] = value
       end
+      return observed
+    end
 
-      for _, pane in ipairs({ "capture", "organize" }) do
-        assert.is_false(observed[pane].foldenable)
-        -- Not just `foldenable=false`: manual defeats a later `zx` too.
-        assert.are.equal("manual", observed[pane].foldmethod)
-        -- The symptom Matt actually saw: line 1 swallowed by a closed fold.
-        assert.are.equal(-1, observed[pane].first_closed_fold)
-      end
+    -- ⚠ RULING R14: the assertions are made PER WINDOW, because the two
+    -- windows are not in the same state and never were. A blanket
+    -- `foldclosed(1) == -1` in BOTH windows is unsatisfiable against spec 15
+    -- §3 and an implementer would discharge it by deleting the frontmatter
+    -- fold — which reopens Matt item 5's sibling and empties spec 15 §2.
+    it("opens the organize pane unfolded even when the user's globals fold everything", function()
+      local observed = observe_folds(nil)
+      assert.is_false(observed.organize.foldenable)
+      -- Not just `foldenable=false`: manual defeats a later `zx` too.
+      assert.are.equal("manual", observed.organize.foldmethod)
+      -- The symptom Matt actually saw: line 1 swallowed by a closed fold.
+      assert.are.equal(-1, observed.organize.first_closed_fold)
+    end)
+
+    it("leaves exactly ONE closed fold in the capture pane: the plugin's frontmatter fold", function()
+      local observed = observe_folds(nil)
+      assert.are.equal("manual", observed.capture.foldmethod)
+      assert.are.equal(1, observed.capture.first_closed_fold)
+      -- …and it is the ONLY closed one: the body is open.
+      assert.are.equal(-1, observed.capture.body_closed_fold)
+    end)
+
+    it("creates no fold at all under the ui.capture.frontmatter = \"none\" control", function()
+      local observed = observe_folds({ ui = { close_on_complete = false, capture = { frontmatter = "none" } } })
+      assert.are.equal("manual", observed.capture.foldmethod)
+      assert.are.equal(-1, observed.capture.first_closed_fold)
     end)
 
     it("honors ui.win_options, the way back to the user's own fold settings", function()
@@ -256,8 +307,11 @@ describe("para-organize.ui", function()
       assert.is_true(vim.wo[wins.capture].foldenable)
       assert.is_false(vim.wo[wins.capture].wrap)
       assert.is_true(vim.wo[wins.organize].foldenable)
-      -- A pane default the user did NOT override still applies.
+      -- A pane default the user did NOT override still applies — and this is
+      -- the must-not-be-connected half of spec 15 §10.2: opting back into
+      -- folds must NEVER reconnect the user's `foldexpr` method.
       assert.are.equal("manual", vim.wo[wins.capture].foldmethod)
+      assert.are.equal("manual", vim.wo[wins.organize].foldmethod)
     end)
   end)
 
@@ -433,7 +487,7 @@ describe("para-organize.ui", function()
       state.current = 2
       ui.refresh(state)
       assert.are.equal(vim.fn.fnamemodify(second_path, ":p"), vim.api.nvim_buf_get_name(ui.current_bufs().capture))
-      assert.is_true((has_line(virt_lines(ui.current_bufs().capture), "^Capture 2 of 2$")))
+      assert.is_true((has_line(virt_lines(ui.current_bufs().capture), "^ Capture 2 of 2$")))
     end)
 
     it("moves the cursor to the selected suggestion", function()

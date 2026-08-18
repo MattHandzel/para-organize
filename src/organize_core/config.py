@@ -124,6 +124,13 @@ class LearningConfig:
     min_confidence: float = 0.3  # candidate floor, archive exempt (04 §2)
 
 
+#: The ``suggestions.max_candidate_depth`` value meaning "no depth limit"
+#: (spec 21 §2.1). Defined here, with the key it belongs to; ``index.py``
+#: (which imports this module) binds the same object rather than repeating
+#: the literal, so the validator and the walk cannot disagree.
+CANDIDATE_DEPTH_ALL = "all"
+
+
 @dataclass(frozen=True)
 class SuggestionsConfig:
     """Spec 04 §1-2. ``max_suggestions`` is the TOTAL list length including
@@ -143,6 +150,31 @@ class SuggestionsConfig:
     #: touched, since it also feeds learning association keys, the
     #: `<type>/<folder>` tag a move writes, and the frontmatter on disk.
     tag_suffix_strip: list[str] = field(default_factory=lambda: ["-system", "-systems"])
+    #: How many levels BELOW a PARA root a folder may be and still be a
+    #: scored candidate — an immediate subfolder is depth 1 (spec 21 §2.1).
+    #: Integer >= 1, or the string "all". Default 3, because depth <= 3 is
+    #: what reaches `areas/relationships/relationship-data/<person>` — the
+    #: 673-folder population behind the reported defect — and admits 1,177 of
+    #: the vault's 1,562 folders; 1 reproduces the pre-21 behaviour exactly.
+    #: This is the RANKING depth. `folder.list`'s `depth` (16 §2) is the
+    #: BROWSING depth; they are two knobs and nothing reconciles them.
+    max_candidate_depth: int | str = 3
+    #: Whether indexed NOTES are destinations too (spec 21 §3). `false`
+    #: restores the folders-only ballot; `false` + `max_candidate_depth = 1`
+    #: reproduces the pre-21 output byte for byte, which is the parity golden.
+    note_candidates: bool = True
+    #: Cap on NOTE rows in the final list, applied after ranking; folders
+    #: fill the remainder and `max_suggestions` is unchanged (21 §3.3).
+    max_note_suggestions: int = 3
+    #: Capture-side tokens that never match a destination (spec 21 §3.4).
+    #: Applied to the tag/normalized tag/source/alias BEFORE matching and
+    #: UNIFORMLY to folders and notes — a stopword is a property of the
+    #: token, not of the destination kind. MATCH-TIME ONLY: like
+    #: `tag_suffix_strip`, nothing here changes a tag written to a note or to
+    #: learning.json.
+    candidate_stopwords: list[str] = field(
+        default_factory=lambda: ["mind", "self", "me", "text", "voice", "note", "thought"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -834,6 +866,10 @@ _SUGGESTION_KEYS = {
     "learning",
     "tag_normalization",
     "tag_suffix_strip",
+    "max_candidate_depth",
+    "note_candidates",
+    "max_note_suggestions",
+    "candidate_stopwords",
 }
 
 
@@ -939,7 +975,48 @@ def _validate_suggestions(v: _Validator, raw: dict[str, Any]) -> SuggestionsConf
         tag_suffix_strip=v.string_list(
             table, "tag_suffix_strip", "suggestions", d_s.tag_suffix_strip
         ),
+        max_candidate_depth=_validate_candidate_depth(v, table, d_s.max_candidate_depth),
+        note_candidates=v.boolean(table, "note_candidates", "suggestions", d_s.note_candidates),
+        max_note_suggestions=v.integer(
+            table, "max_note_suggestions", "suggestions", d_s.max_note_suggestions, minimum=0
+        ),
+        candidate_stopwords=v.string_list(
+            table, "candidate_stopwords", "suggestions", d_s.candidate_stopwords
+        ),
     )
+
+
+def _validate_candidate_depth(
+    v: _Validator, table: dict[str, Any], default: int | str
+) -> int | str:
+    """``suggestions.max_candidate_depth`` is an integer >= 1 or the string
+    ``"all"`` (spec 21 §2.1) — the one config leaf in this file with two
+    legal types, so it gets its own reader rather than bending
+    ``v.integer``."""
+    value = table.get("max_candidate_depth", _MISSING)
+    if value is _MISSING:
+        return default
+    if isinstance(value, str):
+        if value.strip().casefold() == CANDIDATE_DEPTH_ALL:
+            return CANDIDATE_DEPTH_ALL
+        v.fail(
+            "suggestions.max_candidate_depth",
+            f'must be an integer >= 1 or "{CANDIDATE_DEPTH_ALL}", got {value!r}',
+            hint='depth is levels BELOW the PARA root; an immediate subfolder is 1',
+        )
+    if isinstance(value, bool) or not isinstance(value, int):
+        v.fail(
+            "suggestions.max_candidate_depth",
+            f'must be an integer >= 1 or "{CANDIDATE_DEPTH_ALL}", got {_typename(value)}',
+            hint='depth is levels BELOW the PARA root; an immediate subfolder is 1',
+        )
+    if value < 1:
+        v.fail(
+            "suggestions.max_candidate_depth",
+            f"must be >= 1, got {value}",
+            hint="1 is the pre-21 behaviour (immediate subfolders only)",
+        )
+    return int(value)
 
 
 _FILE_OPS_KEYS = {"create_backups", "backup_dir", "log_operations", "auto_create_folders"}
@@ -1842,6 +1919,27 @@ always_show_archive = true
 # `productivity-system` reaches `areas/productivity`. Match-time only: nothing
 # here changes a tag that is written to a note or to learning.json.
 tag_suffix_strip = ["-system", "-systems"]
+
+# How deep below a PARA root a folder may be and still be SUGGESTED. An
+# immediate subfolder is 1; "all" is unbounded. 3 is what reaches
+# `areas/relationships/relationship-data/<person>`; 1 is the pre-2026-08-16
+# behaviour (immediate subfolders only). This is the RANKING depth — the
+# destination picker's browse depth is a separate knob.
+max_candidate_depth = 3
+
+# Whether existing NOTES are offered as destinations too. Accepting a note
+# MERGES the capture into it (spec 05 §4) instead of moving the file.
+note_candidates = true
+
+# At most this many note rows in one suggestion list; folders fill the rest,
+# and `max_suggestions` (the total) is unchanged. Set it to `max_suggestions`
+# to disable the cap.
+max_note_suggestions = 3
+
+# Capture tags/sources too generic to name a destination. Filtered from the
+# CAPTURE side before matching, for folders and notes alike, so `source: mind`
+# stops dragging every capture to a note called `mind`. Match-time only.
+candidate_stopwords = ["mind", "self", "me", "text", "voice", "note", "thought"]
 
 # Scoring weights (spec 04 §2). These are the defaults-of-record; acceptance
 # tests assert them numerically.

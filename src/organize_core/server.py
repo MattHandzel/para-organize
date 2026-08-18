@@ -115,7 +115,7 @@ from organize_core.routes import get_description, merge_route_suggestions
 from organize_core.routes import named as route_named
 from organize_core.routes import resolve as resolve_routes
 from organize_core.session import Outcome, Session, start_session
-from organize_core.suggest import CaptureFeaturesView, generate_candidates
+from organize_core.suggest import CandidateSet, CaptureFeaturesView, build_candidate_set
 from organize_core.suggest import suggest as rank_suggestions
 
 logger = logging.getLogger(__name__)
@@ -914,6 +914,14 @@ class OrganizeServer:
         self._rwlock = _ReadWriteLock()
         self._learning: LearningData | None = None
         self._learning_lock = threading.Lock()
+        # The candidate ballot + its inverted index (spec 21 §2.4, §3.5):
+        # built ONCE and reused until the index says it changed, because the
+        # walk is one os.walk per PARA root and the index is one pass over
+        # every PARA note — costs that must not be paid per capture, and may
+        # never be paid inside `suggest()` (04's purity constraint).
+        self._candidate_set: CandidateSet | None = None
+        self._candidate_generation: int | None = None
+        self._candidate_lock = threading.Lock()
         self._sessions: dict[str, Session] = {}
         self._sessions_lock = threading.Lock()
 
@@ -1347,14 +1355,16 @@ class OrganizeServer:
                 f"no note at {path}", hint="index the note (index.reindex) or check the path"
             )
         capture = CaptureFeaturesView.from_record(record)
-        candidates = generate_candidates(self._candidate_folders())
         scored = rank_suggestions(
             capture,
-            candidates,
+            self._candidates(),
             self.config.suggestions,
             self._learning_data(),
             now=time.time(),
             archive_path=str(self._archive_folder()),
+            # A note is never a candidate for itself (21 §3.1) — this method
+            # scores an arbitrary indexed note, not only captures.
+            exclude_path=record.path,
         )
         matches = resolve_routes(list(record.normalized_tags or record.tags or []), self.config)
         merged = merge_route_suggestions(matches, scored)
@@ -1691,7 +1701,12 @@ class OrganizeServer:
     def _folder_create(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
         para_type = str(_require(params, "para_type"))
         name = str(_require(params, "name"))
-        return asdict(new_folder(self._context(params), para_type, name))
+        result = asdict(new_folder(self._context(params), para_type, name))
+        # A new folder holds no notes, so nothing in the index moves and the
+        # cached candidate walk would keep the freshly created destination
+        # off the ballot (21 §2.4 names `folder.create` as an invalidator).
+        self.index.invalidate_folder_cache()
+        return result
 
     def _folder_list(self, _conn: _Connection | None, params: dict[str, Any]) -> Any:
         """``folder.list`` — every immediate PARA subfolder, with its spec 11
@@ -1885,12 +1900,37 @@ class OrganizeServer:
         return record
 
     def _candidate_folders(self) -> dict[str, list[str]]:
-        folders: dict[str, list[str]] = {}
-        for key in self.config.vault.para_folders:
-            if key == "archives":
-                continue
-            folders[key] = [str(path) for path in self.index.para_subfolders(key)]
-        return folders
+        """The SCORED folder ballot (spec 21 §2) — every folder down to
+        ``suggestions.max_candidate_depth`` levels below a non-archive PARA
+        root. ``folder.list`` still browses ``para_subfolders`` at depth 1;
+        the two knobs are deliberately independent (21 §2.3)."""
+        return {
+            key: [str(path) for path in self.index.candidate_folders(key)]
+            for key in self.config.vault.para_folders
+        }
+
+    def _candidates(self) -> CandidateSet:
+        """The cached ballot. Rebuilt only when the index's own generation
+        counter moves — the invalidation hook doc 16 §2 already requires for
+        ``state.folders``, shared rather than reinvented (21 §2.4)."""
+        with self._candidate_lock:
+            generation = self.index.candidate_generation
+            if self._candidate_set is None or self._candidate_generation != generation:
+                notes = (
+                    self.index.candidate_notes()
+                    if self.config.suggestions.note_candidates
+                    else []
+                )
+                self._candidate_set = build_candidate_set(
+                    self._candidate_folders(), notes, self.config.suggestions
+                )
+                self._candidate_generation = generation
+                logger.debug(
+                    "server: candidate set rebuilt at generation %d (%d candidates)",
+                    generation,
+                    len(self._candidate_set),
+                )
+            return self._candidate_set
 
     def _archive_folder(self) -> Path:
         # `.resolve()` matches `cli._archive_folder`; without it a symlinked

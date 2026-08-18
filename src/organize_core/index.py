@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from organize_core import frontmatter
+from organize_core.config import CANDIDATE_DEPTH_ALL as _CANDIDATE_DEPTH_ALL
 from organize_core.config import Config
 from organize_core.errors import ConfigError, FrontmatterError, IndexingError
 
@@ -74,6 +75,21 @@ PARA_KEY_TO_TYPE: dict[str, ParaType] = {
     "archives": "archive",
 }
 PARA_TYPE_TO_KEY: dict[str, str] = {value: key for key, value in PARA_KEY_TO_TYPE.items()}
+
+#: Re-exported beside the walk that honors it; DEFINED in ``config.py`` with
+#: the key itself, so the validator and the walk cannot drift (21 §2.1).
+CANDIDATE_DEPTH_ALL = _CANDIDATE_DEPTH_ALL
+
+#: PARA types a NOTE candidate may have (spec 21 §3.1): the non-archive PARA
+#: types. Captures, archives, and everything else are never note candidates.
+CANDIDATE_NOTE_PARA_TYPES: frozenset[str] = frozenset({"project", "area", "resource"})
+
+#: The archives root is never a scored candidate, at any depth (spec 04 §1,
+#: 21 §2.3). ONE definition — ``suggest`` binds its own name to this object
+#: rather than repeating the pair, so the folder walk and the scorer cannot
+#: disagree about what "archive" means.
+EXCLUDED_CANDIDATE_PARA_KEYS: frozenset[str] = frozenset({"archives", "archive"})
+_EXCLUDED_CANDIDATE_PARA_KEYS = EXCLUDED_CANDIDATE_PARA_KEYS
 
 #: Frontmatter keys already promoted to first-class NoteRecord attributes.
 _PROMOTED_FIELDS: frozenset[str] = frozenset(frontmatter.KNOWN_FIELD_ORDER) | {"description"}
@@ -249,6 +265,19 @@ class VaultIndex:
         self._records: dict[str, NoteRecord] = {}
         self._pending = 0
         self._reindexing = False
+        # Candidate-folder walk cache (spec 21 §2.4): the walk is one os.walk
+        # per PARA root and must happen ONCE PER CANDIDATE-SET BUILD, never
+        # per capture and never inside `suggest()` (04's purity constraint).
+        # Keyed by the resolved depth token so browsing depth (16 §2) and
+        # ranking depth stay two knobs.
+        self._folder_cache: dict[str, list[Path]] = {}
+        # Bumped by folder-cache invalidation and by any index mutation that
+        # changed a note's CANDIDATE IDENTITY (`_candidate_identity`), so a
+        # caller that caches a built candidate SET (folders + notes +
+        # inverted index) has one integer to compare against — and archiving
+        # a capture, which changes neither half of the ballot, does not move
+        # it (21 §2.4).
+        self._candidate_generation = 0
 
     # --- lifecycle -------------------------------------------------------
 
@@ -258,6 +287,7 @@ class VaultIndex:
         Prunes records whose files no longer exist."""
         self._records = {}
         self._pending = 0
+        self.invalidate_folder_cache()  # 21 §2.4: a reload replaces the ballot
         if not self.index_path.exists():
             logger.info("index: no snapshot at %s — starting empty", self.index_path)
             return
@@ -425,6 +455,10 @@ class VaultIndex:
         if stale:
             logger.info("index: pruned %d entries whose files are gone", len(stale))
         self._pending += touched + len(stale)
+        # A scan is the one place directories are known to have been re-read,
+        # so it is also where a stale candidate-folder walk is dropped
+        # (21 §2.4 — `index.reindex` is one of the two named invalidators).
+        self.invalidate_folder_cache()
         return touched
 
     def update_file(self, path: Path) -> NoteRecord | None:
@@ -432,6 +466,7 @@ class VaultIndex:
         file is gone. Target < 500 ms (09 §4). Returns the new record."""
         resolved = self._resolve(path)
         key = str(resolved)
+        before = self._records.get(key)
         if not self._within_root(resolved):
             logger.warning(
                 "index: refusing to index %s — outside the vault root %s", resolved, self.root
@@ -439,28 +474,34 @@ class VaultIndex:
             if key in self._records:
                 del self._records[key]
                 self._touch()
+                self._note_candidacy_changed(before, None)
             return None
         rel = _relative_posix(str(self.root), key)
         if not _indexable(rel, tuple(self.config.vault.ignore_patterns or ())):
             if key in self._records:
                 del self._records[key]
                 self._touch()
+                self._note_candidacy_changed(before, None)
             return None
         record = self._build_record(resolved, rel, int(self.config.vault.max_file_size))
         if record is None:
             if key in self._records:
                 del self._records[key]
                 self._touch()
+                self._note_candidacy_changed(before, None)
             return None
         self._records[record.path] = record
         self._touch()
+        self._note_candidacy_changed(before, record)
         return record
 
     def remove_file(self, path: Path) -> None:
         key = str(self._resolve(path))
         if key in self._records:
+            before = self._records[key]
             del self._records[key]
             self._touch()
+            self._note_candidacy_changed(before, None)
 
     # --- reads -----------------------------------------------------------
 
@@ -554,6 +595,127 @@ class VaultIndex:
             children.append(entry)
         return children
 
+    # --- suggestion candidates (spec 21 §2, §3.1) -------------------------
+
+    @property
+    def candidate_generation(self) -> int:
+        """Monotonic counter bumped when the CANDIDATE POPULATION changes —
+        a folder-cache invalidation, or an index mutation that changed some
+        note's :meth:`_candidate_identity`.
+
+        Deliberately NOT "every index mutation": archiving a capture mutates
+        the index twice and changes neither half of the ballot, and coupling
+        the two made the review loop rebuild an 8,104-candidate set once per
+        capture (~100 ms, inside the server's read lock).
+
+        A caller that caches a built candidate SET (folders + notes + the
+        §3.5 inverted index) compares this one integer instead of inventing
+        its own invalidation rule — the same hook doc 16 §2 requires for
+        ``state.folders``, shared rather than duplicated.
+        """
+        return self._candidate_generation
+
+    def invalidate_folder_cache(self) -> None:
+        """Drop the cached candidate-folder walk (``folder.create`` and
+        anything else that creates a directory the index cannot see, because
+        an empty folder holds no notes)."""
+        self._folder_cache.clear()
+        self._candidate_generation += 1
+
+    def candidate_folders(self, para_type: str, depth: int | str | None = None) -> list[Path]:
+        """Every SCORED destination folder under ONE PARA root (spec 21 §2.1)
+        — the sibling of :meth:`para_subfolders`, with a depth knob.
+
+        ``depth`` is levels below the PARA root, an immediate subfolder being
+        depth 1; ``"all"`` is unbounded; ``None`` reads
+        ``suggestions.max_candidate_depth``. Dot-directories are skipped and
+        ``vault.ignore_patterns`` is honored, exactly as
+        :meth:`para_subfolders` does at depth 1 — a walk that silently
+        stopped honoring the ignore list would look like a recall win rather
+        than a bug. ``depth = 1`` therefore returns exactly what
+        :meth:`para_subfolders` returns.
+
+        The ARCHIVES root is never a candidate at any depth (04 §1), so it
+        answers with an empty list rather than its contents.
+
+        THIS IS A SEPARATE ACCESSOR ON PURPOSE (21 §2.3):
+        :meth:`para_subfolders` keeps its depth-1 meaning for ``folder.list``,
+        ``cli``, and ``fileops``; browsing depth (16 §2) and RANKING depth are
+        two knobs and nothing reconciles them.
+
+        The walk is cached (21 §2.4) and copied out, so it runs once per
+        candidate-set build rather than once per capture — and never inside
+        ``suggest()``, which does no I/O at all (04's purity constraint).
+        """
+        key = str(para_type).strip().casefold()
+        key = PARA_TYPE_TO_KEY.get(key, key)
+        folder_name = self.config.vault.para_folders.get(key)
+        if folder_name is None:
+            raise ConfigError(
+                f"unknown PARA type {para_type!r}",
+                hint="valid values: " + ", ".join(sorted(self.config.vault.para_folders)),
+            )
+        if key in _EXCLUDED_CANDIDATE_PARA_KEYS:
+            return []
+        token = _depth_token(
+            depth if depth is not None else self.config.suggestions.max_candidate_depth
+        )
+        cache_key = f"{key}\0{token}"
+        cached = self._folder_cache.get(cache_key)
+        if cached is None:
+            cached = self._walk_candidate_folders(self.root / str(folder_name), _depth_limit(token))
+            self._folder_cache[cache_key] = cached
+        return list(cached)
+
+    def candidate_notes(self) -> list[NoteRecord]:
+        """Every indexed note that may be a NOTE destination (spec 21 §3.1):
+        ``para_type`` is a non-archive PARA type. Captures, archives, and
+        anything outside the PARA roots (``para_type`` ``other``) are never
+        note candidates. Deterministic order: path ascending."""
+        return sorted(
+            (
+                record
+                for record in list(self._records.values())
+                if record.para_type in CANDIDATE_NOTE_PARA_TYPES
+            ),
+            key=lambda record: record.path,
+        )
+
+    def _walk_candidate_folders(self, para_root: Path, limit: int | None) -> list[Path]:
+        if not para_root.is_dir():
+            logger.warning(
+                "index: PARA folder %s does not exist — no candidates from it", para_root
+            )
+            return []
+        patterns = tuple(self.config.vault.ignore_patterns or ())
+        root_str = str(self.root)
+        para_root_str = str(para_root)
+        children: list[Path] = []
+        for dirpath, dirnames, _filenames in os.walk(
+            para_root_str, topdown=True, followlinks=False
+        ):
+            rel_to_para = _relative_posix(para_root_str, dirpath)
+            # Depth is LEVELS BELOW THE PARA ROOT: the root itself is 0 and an
+            # immediate subfolder is 1 (21 §2.1). Off-by-one in that
+            # convention is the likeliest silent bug in this file, and it is
+            # asserted directly at every shipped depth.
+            depth = len(rel_to_para.split("/")) if rel_to_para else 0
+            if depth >= 1:
+                children.append(Path(dirpath))
+            if limit is not None and depth >= limit:
+                dirnames[:] = []
+                continue
+            keep: list[str] = []
+            for name in dirnames:
+                if name.startswith("."):  # .obsidian, .git, .backups …
+                    continue
+                child_rel = _relative_posix(root_str, str(Path(dirpath) / name))
+                if is_ignored(child_rel, patterns):
+                    continue
+                keep.append(name)
+            dirnames[:] = sorted(keep)
+        return children
+
     def folder_children(self, folder: Path) -> tuple[list[Path], list[NoteRecord]]:
         """(subdirs, notes) for directory browsing (03 §3 state 2)."""
         target = self._resolve(folder)
@@ -635,6 +797,50 @@ class VaultIndex:
         self._pending += 1
         if self.flush_threshold and self._pending >= self.flush_threshold:
             self.flush()
+
+    @staticmethod
+    def _candidate_identity(record: NoteRecord | None) -> tuple[Any, ...] | None:
+        """Everything the BALLOT reads about one note (21 §3.1), or ``None``
+        when the note is not a candidate at all.
+
+        This is the whole of a note's contribution to a cached candidate set:
+        its path (the identity and the learning key), its PARA type (the type
+        bonus), and the four §3.1 key fields. Two records with equal
+        identities produce byte-identical candidates, so a mutation that
+        leaves this tuple unchanged CANNOT change the ballot and must not
+        invalidate it.
+        """
+        if record is None or record.para_type not in CANDIDATE_NOTE_PARA_TYPES:
+            return None
+        return (
+            record.path,
+            record.para_type,
+            record.filename,
+            tuple(record.aliases or ()),
+            record.id,
+            record.title,
+            record.capture_id,
+        )
+
+    def _note_candidacy_changed(
+        self, before: NoteRecord | None, after: NoteRecord | None
+    ) -> None:
+        """Bump the candidate generation ONLY when this note's ballot
+        contribution actually changed (21 §2.4).
+
+        Coupling the ballot to every index mutation is what made the real
+        review loop rebuild an 8,104-candidate set once per capture — ~100 ms
+        inside the server's READ lock, per capture, for a mutation (archiving
+        a capture) that changes neither half of the ballot. A capture is never
+        a note candidate, so archiving one leaves both identities ``None``
+        and the cached set stands.
+
+        Note that this is deliberately NOT "did the file change": a note whose
+        BODY was edited is the same candidate, because 21 §3.1 makes body,
+        tags, folder and sources explicitly non-keys.
+        """
+        if self._candidate_identity(before) != self._candidate_identity(after):
+            self._candidate_generation += 1
 
     def _resolve(self, path: Path | str) -> Path:
         candidate = Path(path)  # never .expanduser() — see __init__
@@ -788,6 +994,32 @@ def _para_type_for_rel(rel: str, config: Config) -> ParaType:
             if best is None or len(prefix) > len(best[0]):
                 best = (prefix, para)
     return best[1] if best else "other"
+
+
+def _depth_token(depth: int | str) -> str:
+    """Canonical cache key for a ``max_candidate_depth`` value (spec 21 §2.1):
+    ``"all"`` or the decimal integer. Validation lives in ``config.py``; this
+    is the last line of defence for a hand-built VaultIndex."""
+    if isinstance(depth, str):
+        if depth.strip().casefold() == CANDIDATE_DEPTH_ALL:
+            return CANDIDATE_DEPTH_ALL
+        raise ConfigError(
+            f"suggestions.max_candidate_depth must be an integer >= 1 or {CANDIDATE_DEPTH_ALL!r}, "
+            f"got {depth!r}",
+            hint=f'set it to a number (e.g. 3) or to "{CANDIDATE_DEPTH_ALL}"',
+        )
+    if isinstance(depth, bool) or not isinstance(depth, int) or depth < 1:
+        raise ConfigError(
+            f"suggestions.max_candidate_depth must be an integer >= 1 or {CANDIDATE_DEPTH_ALL!r}, "
+            f"got {depth!r}",
+            hint=f'set it to a number (e.g. 3) or to "{CANDIDATE_DEPTH_ALL}"',
+        )
+    return str(depth)
+
+
+def _depth_limit(token: str) -> int | None:
+    """``None`` means unbounded — the walk descends the whole subtree."""
+    return None if token == CANDIDATE_DEPTH_ALL else int(token)
 
 
 def _clean_rel(value: str | None) -> str:

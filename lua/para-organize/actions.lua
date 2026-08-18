@@ -1899,6 +1899,15 @@ M.CORE_KEYS = {
     local gate = integrate()
     if gate then gate.edit() end
   end },
+  -- Spec 15 §2. ⚠ `panes = { "organize" }` and `navigation = false` are
+  -- ruling R7, and they are load-bearing rather than a preference: with `zi`
+  -- bound in the organize pane ONLY, `z` is not a prefix in the capture pane
+  -- at all, so `zo`/`za` there stay instant and 15 §3's fold-recovery claim
+  -- is true as written. The action itself is pure presentation, so it lives
+  -- in `ui`; this row is only the binding.
+  { name = "cycle_fields", default = "zi", desc = "Cycle capture fields (compact/full/raw)", panes = { "organize" }, navigation = false, fn = function()
+    ui().cycle_fields()
+  end },
 }
 
 --- The resolved keymap table: core rows + one row per configured

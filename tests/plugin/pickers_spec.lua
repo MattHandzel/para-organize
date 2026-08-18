@@ -32,14 +32,27 @@ describe("pickers: rendering", function()
     assert.equals("?", pickers.type_letter("nonsense"))
   end)
 
-  it("renders a folder line, with the score only when asked (ui.display.show_scores)", function()
+  -- Spec 15 §6 closes a defect: `format_folder` read an `opts.show_scores`
+  -- that NO call site ever passed, so the picker's score column was
+  -- unreachable — a key neither honored nor deleted, which 03 §1 forbids.
+  -- `ui.organize.show_scores` is now the SINGLE source, shared with the pane.
+  it("renders a folder line, with the score gated on ui.organize.show_scores", function()
+    local config = require("para-organize.config")
     local entry = { path = "/vault/projects/blog", name = "blog", type = "projects", score = 2.1 }
+
+    config.reset()
+    local scored = pickers.format_folder(entry, { vault_root = "/vault" })
+    assert.equals("[P] blog (projects/blog) 2.10", scored)
+
+    config.setup({ ui = { organize = { show_scores = false } } })
     local plain = pickers.format_folder(entry, { vault_root = "/vault" })
     assert.equals("[P] blog (projects/blog)", plain)
     assert.is_falsy(plain:find("2.10", 1, true))
+    config.reset()
 
-    local scored = pickers.format_folder(entry, { vault_root = "/vault", show_scores = true })
-    assert.is_truthy(scored:find("2.10", 1, true))
+    -- An explicit opts value still wins, for a caller rendering a list where
+    -- scores make no sense.
+    assert.is_falsy(pickers.format_folder(entry, { vault_root = "/vault", show_scores = false }):find("2.10", 1, true))
   end)
 
   it("marks a route-sourced suggestion distinctly (11 §1)", function()

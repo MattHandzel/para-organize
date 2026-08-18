@@ -35,12 +35,29 @@ scores ad-hoc selections, not only indexed capture files.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+import re
+from collections import Counter
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 
 from organize_core import frontmatter
 from organize_core.config import SuggestionsConfig
-from organize_core.index import PARA_KEY_TO_TYPE, NoteRecord
-from organize_core.learn import LearningData, get_association_score
+from organize_core.index import (
+    CANDIDATE_NOTE_PARA_TYPES,
+    EXCLUDED_CANDIDATE_PARA_KEYS,
+    PARA_KEY_TO_TYPE,
+    PARA_TYPE_TO_KEY,
+    NoteRecord,
+)
+from organize_core.learn import (
+    LearningData,
+    create_association_key,
+    extract_features,
+    get_association_score,
+)
+
+logger = logging.getLogger(__name__)
 
 ARCHIVE_SUGGESTION_NAME = "Archive Now"
 ARCHIVE_SUGGESTION_SCORE = 0.1
@@ -57,15 +74,39 @@ ARCHIVE_SUGGESTION_TYPE = "archive"
 _CAPTURE_ALIAS_PREFIX = "capture_"
 _ALIAS_SIMILARITY_GATE = 0.6
 
-# Spec 04 §1: archives are never a scored candidate.
-_EXCLUDED_CANDIDATE_TYPES = frozenset({"archives", "archive"})
+# Spec 04 §1: archives are never a scored candidate. ONE definition, in
+# index.py beside the folder walk that also honors it (21 §2.3).
+_EXCLUDED_CANDIDATE_TYPES = EXCLUDED_CANDIDATE_PARA_KEYS
+
+#: ``Candidate.kind`` / ``Suggestion.destination_kind`` values (spec 21 §3.3).
+#: A note is a MERGE target (doc 19's flow); a folder is a move destination.
+#: The core STATES the kind — no client may infer it from a trailing ".md",
+#: because a folder may legally be named ``foo.md``.
+KIND_FOLDER = "folder"
+KIND_NOTE = "note"
+
+#: Sort rank per kind (spec 21 §3.2): on an exact tie of score AND name the
+#: note wins, because a note is the more specific destination and merge is
+#: backed up and undoable (17 §1).
+_KIND_RANK = {KIND_NOTE: 0, KIND_FOLDER: 1}
+
+#: Values that are timestamps rather than names, and so are never note match
+#: keys (spec 21 §3.1 (b)/(c)): a leading ISO date, however the time part is
+#: punctuated (`2025-08-19T09:47:51.213957+00:00`, `2025-11-07T18-47-09`).
+_TIMESTAMP_SHAPED = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]|$)")
 
 
 @dataclass(frozen=True)
 class Candidate:
-    """One destination candidate: an immediate subfolder of a PARA root,
-    archives excluded (spec 04 §1). ``normalized_name`` via the shared
-    ``frontmatter.normalize_tag`` normalizer."""
+    """One destination candidate (spec 04 §1 as amended by 21 §1.4): a folder
+    under a non-archive PARA root at depth ≤ ``suggestions.max_candidate_depth``,
+    or — when ``suggestions.note_candidates`` — an indexed NOTE under one.
+    ``normalized_name`` and every match key come from the shared
+    ``frontmatter.normalize_tag`` normalizer, never a second one.
+
+    ``name`` is the BASENAME (a note's stem, without ``.md``), never the
+    relative path: signals #1/#2/#4 compare a TAG to it, and a relative path
+    could never equal a tag (21 §2.2)."""
 
     path: str
     name: str
@@ -75,6 +116,29 @@ class Candidate:
     #: that dict and `_type_bonus` is keyed by it. It is converted to the
     #: singular wire vocabulary when a `Suggestion` is built from it.
     type: str
+    #: "folder" | "note" (21 §3.3). Folders keep the historical default so
+    #: every existing construction site — and every existing test — means
+    #: exactly what it meant before.
+    kind: str = KIND_FOLDER
+    #: The keys signal #1 (RAW tag) tests membership in. A folder's set is
+    #: ``{name, normalized_name}``, which is precisely the old
+    #: ``tag == candidate.name or tag == candidate.normalized_name``.
+    match_keys: frozenset[str] = field(default_factory=frozenset)
+    #: The keys signals #2 and #4 (NORMALIZED token) test membership in. A
+    #: folder's set is ``{normalized_name}`` — again exactly the old
+    #: comparison, so folder scoring is byte-identical (21 §3.1).
+    normalized_keys: frozenset[str] = field(default_factory=frozenset)
+
+    def __post_init__(self) -> None:
+        # Derived rather than required, so the folder key sets can never
+        # drift from `name`/`normalized_name` and no caller can build a
+        # folder candidate whose keys say something else.
+        if not self.match_keys:
+            object.__setattr__(
+                self, "match_keys", frozenset({self.name, self.normalized_name}) - {""}
+            )
+        if not self.normalized_keys:
+            object.__setattr__(self, "normalized_keys", frozenset({self.normalized_name}) - {""})
 
 
 @dataclass(frozen=True)
@@ -93,6 +157,11 @@ class Suggestion:
     reasons: tuple[str, ...] = ()
     route: str | None = None  # route name, when route-sourced
     description: str | None = None  # NL description when known (11 §3)
+    #: "folder" | "note" (spec 21 §3.3) — ADDITIVE and orthogonal to `type`:
+    #: a note under `areas/` is type "area", destination_kind "note".
+    #: Selecting a note starts doc 19's MERGE flow instead of a move, and the
+    #: client dispatches on THIS, never on a trailing ".md" in the path.
+    destination_kind: str = KIND_FOLDER
 
 
 @dataclass(frozen=True)
@@ -163,18 +232,58 @@ def string_similarity(a: str, b: str) -> float:
     if max_len == 0:
         return 1.0
     distance = _levenshtein(a, b)
+    assert distance is not None  # no cutoff was requested
     similarity = 1.0 - (distance / max_len)
     # Distance is bounded by max_len, so this is already in [0, 1]; clamp
     # anyway so the alias signal can never exceed its weight (04 §7).
     return min(1.0, max(0.0, similarity))
 
 
-def _levenshtein(a: str, b: str) -> int:
-    """Classic two-row edit distance (stdlib only, O(len(a) * len(b)))."""
+def _max_alias_distance(max_len: int) -> int:
+    """The largest edit distance that can still clear signal #5's gate:
+    ``1 - dist/max_len > 0.6`` ⇔ ``5·dist < 2·max_len``. Integer arithmetic,
+    so no float rounding can move the gate."""
+    return (2 * max_len - 1) // 5
+
+
+def _gated_similarity(a: str, b: str) -> float:
+    """:func:`string_similarity`, abandoned as soon as the distance cannot
+    come in under signal #5's 0.6 gate.
+
+    EXACT WHERE IT MATTERS: whenever the true similarity is above the gate
+    this returns the identical float, so the score is unchanged; below the
+    gate it returns 0.0, which the caller treats the same way it treated any
+    other sub-gate value. That equivalence is asserted, both directions, over
+    a randomized corpus (spec 21 §3.5's "output-preserving" requirement).
+    """
+    if a == b:
+        return 1.0
+    max_len = max(len(a), len(b))
+    if max_len == 0:
+        return 1.0
+    max_distance = _max_alias_distance(max_len)
+    if abs(len(a) - len(b)) > max_distance:
+        return 0.0
+    distance = _levenshtein(a, b, max_distance=max_distance)
+    if distance is None:
+        return 0.0
+    return min(1.0, max(0.0, 1.0 - (distance / max_len)))
+
+
+def _levenshtein(a: str, b: str, *, max_distance: int | None = None) -> int | None:
+    """Classic two-row edit distance (stdlib only, O(len(a) * len(b))).
+
+    ``max_distance`` abandons the table as soon as EVERY cell of the current
+    row exceeds it — the distance can only grow from row to row, so no
+    smaller result can still appear — and answers ``None``. Without a cutoff
+    the answer is always the exact distance, so the historic behaviour is
+    reached by simply not passing one.
+    """
     if len(a) < len(b):
         a, b = b, a
     if not b:
-        return len(a)
+        distance = len(a)
+        return None if max_distance is not None and distance > max_distance else distance
     previous = list(range(len(b) + 1))
     for i, char_a in enumerate(a, start=1):
         current = [i]
@@ -183,7 +292,11 @@ def _levenshtein(a: str, b: str) -> int:
             delete = previous[j] + 1
             substitute = previous[j - 1] + (char_a != char_b)
             current.append(min(insert, delete, substitute))
+        if max_distance is not None and min(current) > max_distance:
+            return None
         previous = current
+    if max_distance is not None and previous[-1] > max_distance:
+        return None
     return previous[-1]
 
 
@@ -200,12 +313,22 @@ def calculate_score(
     learned_association term calls ``learn.get_association_score`` (pure,
     NaN-guarded) with ``now``."""
     weights = config.weights
+    stopwords = _stopwords(config)
     score = 0.0
     reasons: list[str] = []
 
     # 1. exact tag match — 2.0 PER MATCHING TAG (spec 04 §2 #1)
+    #
+    # A signal fires AT MOST ONCE per (capture token, candidate) pair (21
+    # §3.1): the test is MEMBERSHIP in the candidate's key set, never an
+    # iteration over it. Without that rule a note with two aliases that
+    # normalize to its stem would silently outscore an identical note with
+    # none. For a folder the key set is {name, normalized_name}, so this is
+    # the old `or` chain, unchanged.
     for tag in capture.tags:
-        if tag == candidate.name or tag == candidate.normalized_name:
+        if _is_stopword(tag, stopwords):
+            continue
+        if tag in candidate.match_keys:
             score += weights.exact_tag_match
             reasons.append(f"Tag '{tag}' matches folder")
 
@@ -213,7 +336,9 @@ def calculate_score(
     #    (including the tag_normalization map) is applied where the view is
     #    built; scoring is a pure string comparison.
     for tag in capture.normalized_tags:
-        if tag == candidate.normalized_name:
+        if _is_stopword(tag, stopwords):
+            continue
+        if tag in candidate.normalized_keys:
             score += weights.normalized_tag_match
             reasons.append(f"Tag '{tag}' (normalized) matches")
             continue
@@ -231,7 +356,11 @@ def calculate_score(
         # keys, the `<type>/<folder>` tag a move writes, and the frontmatter
         # that lands on disk, so morphing it would corrupt learning and vault
         # data (architect ruling, 2026-08-16).
-        if _tag_variant_matches(tag, candidate.normalized_name, config):
+        #
+        # A note gets the same leniency a folder gets, no more and no less
+        # (21 §4 #5): the variants are matched against the candidate's
+        # normalized KEY SET, which for a folder is {normalized_name}.
+        if _tag_variant_matches_keys(tag, candidate.normalized_keys, config):
             score += weights.normalized_tag_match
             reasons.append(f"Tag '{tag}' ~ folder '{candidate.name}'")
 
@@ -245,7 +374,9 @@ def calculate_score(
 
     # 4. source match — 1.3 per source (spec 04 §2 #4)
     for source in capture.sources:
-        if frontmatter.normalize_tag(source) == candidate.normalized_name:
+        if _is_stopword(source, stopwords):
+            continue
+        if frontmatter.normalize_tag(source) in candidate.normalized_keys:
             score += weights.source_match
             reasons.append(f"Source '{source}' matches")
 
@@ -255,7 +386,13 @@ def calculate_score(
             continue
         if capture.capture_id is not None and alias == capture.capture_id:
             continue
-        similarity = string_similarity(alias.lower(), candidate.name.lower())
+        if _is_stopword(alias, stopwords):
+            continue
+        # `_gated_similarity` is `string_similarity` with the edit-distance
+        # table abandoned once it cannot come in under the gate — identical
+        # wherever the gate is cleared, and the difference between a 5 ms and
+        # a 600 ms `suggest()` on a capture carrying a 60-character alias.
+        similarity = _gated_similarity(alias.lower(), candidate.name.lower())
         if similarity > _ALIAS_SIMILARITY_GATE:
             score += similarity * weights.alias_similarity
             reasons.append(f"Alias '{alias}' similar")
@@ -270,6 +407,44 @@ def calculate_score(
     score += _type_bonus(candidate.type, config)
 
     return score, reasons
+
+
+def _stopwords(config: SuggestionsConfig) -> frozenset[str]:
+    """``suggestions.candidate_stopwords``, normalized through THE shared
+    normalizer so the config may be written in any casing (spec 21 §3.4)."""
+    return frozenset(
+        frontmatter.normalize_tag(word)
+        for word in (config.candidate_stopwords or ())
+        if str(word).strip()
+    )
+
+
+def _is_stopword(token: str, stopwords: frozenset[str]) -> bool:
+    """Spec 21 §3.4: the filter is on the CAPTURE-SIDE token — a tag, a
+    normalized tag, a source, an alias — and it applies UNIFORMLY to both
+    candidate kinds. A stopword is a property of the token, not of the
+    destination kind; a rule that applied only to notes would make the same
+    token mean two things.
+
+    This is a MATCH-TIME filter (the SQ-4 pattern): ``normalize_tag`` is
+    CALLED, never modified — it also builds learning association keys and the
+    ``<type>/<folder>`` tag a move writes to disk (04 §2, architect ruling
+    2026-08-16).
+    """
+    if not stopwords:
+        return False
+    return frontmatter.normalize_tag(token) in stopwords
+
+
+def _tag_variant_matches_keys(
+    tag: str, keys: frozenset[str], config: SuggestionsConfig
+) -> bool:
+    """Signal #2's morphological variants against a candidate KEY SET.
+    Fires at most once per (token, candidate) — membership, not iteration."""
+    if not tag or not keys:
+        return False
+    variants = _tag_variants(tag, config)
+    return any(variants & _tag_variants(key, config) for key in keys if key)
 
 
 def _tag_variant_matches(tag: str, folder: str, config: SuggestionsConfig) -> bool:
@@ -391,14 +566,387 @@ def _basename(path: str) -> str:
     return path.rstrip("/").rpartition("/")[2]
 
 
+def _is_timestamp_shaped(value: str) -> bool:
+    """Spec 21 §3.1 (b)/(c): a capture timestamp is an identifier, not a
+    name, and must never become a match key."""
+    return bool(_TIMESTAMP_SHAPED.match(value.strip()))
+
+
+def note_match_keys(record: NoteRecord) -> frozenset[str]:
+    """The FOUR match keys of a note candidate (spec 21 §3.1), every one of
+    them built by CALLING ``frontmatter.normalize_tag`` — there is no second
+    normalizer:
+
+    a. the stem (filename without ``.md``) — the primary key;
+    b. each alias, excluding ``capture_``-prefixed ones and the note's own
+       ``capture_id`` (the exclusion signal #5 already applies) and excluding
+       timestamp-shaped values;
+    c. ``id`` when set and not timestamp-shaped — Matt's ``id:`` values are
+       what wikilinks resolve against;
+    d. the title (04's rule: first ``# heading`` else stem; 08 §B10 stands —
+       never ``aliases[0]``), which the index has already computed.
+
+    DELIBERATELY NOT KEYS: the note's body, tags, folder, or ``sources``.
+    Matching a capture tag against a note's tags is topical similarity — an
+    EIGHTH signal, which 04 §2 forbids. Keys are NAMES only. This is the line
+    that keeps "notes are candidates" from becoming "notes are search
+    results".
+    """
+    keys: set[str] = {frontmatter.normalize_tag(_note_stem(record))}
+    for alias in record.aliases or ():
+        text = str(alias)
+        if text.startswith(_CAPTURE_ALIAS_PREFIX):
+            continue
+        if record.capture_id is not None and text == record.capture_id:
+            continue
+        if _is_timestamp_shaped(text):
+            continue
+        keys.add(frontmatter.normalize_tag(text))
+    identifier = str(record.id or "")
+    if (
+        identifier
+        and not identifier.startswith(_CAPTURE_ALIAS_PREFIX)
+        and identifier != (record.capture_id or None)
+        and not _is_timestamp_shaped(identifier)
+    ):
+        keys.add(frontmatter.normalize_tag(identifier))
+    if record.title:
+        keys.add(frontmatter.normalize_tag(str(record.title)))
+    return frozenset(keys) - {""}
+
+
+def _note_stem(record: NoteRecord) -> str:
+    name = record.filename or _basename(record.path)
+    return name[:-3] if name.endswith(".md") else name
+
+
+def generate_note_candidates(records: Iterable[NoteRecord]) -> list[Candidate]:
+    """NOTE destinations (spec 21 §3, the amended 04 §1 (b)).
+
+    Pure over data — the caller passes ``VaultIndex.candidate_notes()``, so
+    scoring still does no I/O (04's purity constraint). A capture tagged with
+    a person, a project or a book usually belongs IN an existing note, not
+    next to it in a folder: on the real backlog 1,157 captures (47.3%) name a
+    note and no folder at all.
+
+    ``name`` is the STEM, not the filename: signal #6 tokenizes it and signal
+    #5 measures edit distance against it, and a trailing ``.md`` would put a
+    literal ``md`` token in every candidate name.
+    """
+    candidates: list[Candidate] = []
+    for record in records:
+        if record.para_type not in CANDIDATE_NOTE_PARA_TYPES:
+            continue  # captures, archives and `other` are never candidates
+        para_key = PARA_TYPE_TO_KEY.get(record.para_type)
+        if para_key is None or para_key in _EXCLUDED_CANDIDATE_TYPES:
+            continue
+        stem = _note_stem(record)
+        if not stem:
+            continue
+        keys = note_match_keys(record)
+        if not keys:
+            continue
+        candidates.append(
+            Candidate(
+                path=record.path,
+                name=stem,
+                normalized_name=frontmatter.normalize_tag(stem),
+                type=para_key,
+                kind=KIND_NOTE,
+                # A note's exact-tag and normalized-tag key sets are the SAME
+                # four normalized keys: every one of them is already
+                # normalized, so there is no raw-vs-normalized distinction to
+                # preserve the way there is for a folder basename.
+                match_keys=keys,
+                normalized_keys=keys,
+            )
+        )
+    return candidates
+
+
+class CandidateSet:
+    """The candidate ballot plus the inverted indexes spec 21 §3.5 requires.
+
+    Built ONCE PER CANDIDATE-SET BUILD and cached with the folder walk
+    (§2.4); ``suggest()`` never builds one per capture if it is handed one.
+    Measured motivation: a linear scan over 9,638 candidates costs 88.7 ms
+    per ``suggest()`` (68× the 135-candidate baseline), which is felt on
+    every keystroke of a 1,862-capture backlog.
+
+    Every index here is a PREFILTER, never a re-scoring: it selects the
+    candidates that could possibly fire a signal, and the survivors go
+    through the unmodified :func:`calculate_score`. A candidate this class
+    excludes can only have scored the always-firing type bonus, whose signal
+    score is 0 and which the ``signal_score <= 0.0`` floor already drops —
+    so the output is IDENTICAL, which is what makes the numeric goldens the
+    proof (§3.5, §7.4).
+    """
+
+    __slots__ = (
+        "candidates",
+        "tag_suffix_strip",
+        "_by_match_key",
+        "_by_normalized_key",
+        "_by_variant",
+        "_by_first_token",
+        "_by_token",
+        "_by_name_length",
+        "_by_bigram",
+        "_by_path",
+        "_name_lengths",
+        "_name_characters",
+    )
+
+    def __init__(self, candidates: Sequence[Candidate], config: SuggestionsConfig) -> None:
+        self.candidates: tuple[Candidate, ...] = tuple(candidates)
+        # Signal #2's variants are config-driven, so the set records the
+        # suffix list it was built with and `suggest()` refuses to trust an
+        # index built for a different one.
+        self.tag_suffix_strip: tuple[str, ...] = tuple(config.tag_suffix_strip or ())
+        self._by_match_key: dict[str, list[int]] = {}
+        self._by_normalized_key: dict[str, list[int]] = {}
+        self._by_variant: dict[str, list[int]] = {}
+        self._by_first_token: dict[str, list[int]] = {}
+        self._by_token: dict[str, list[int]] = {}
+        self._by_name_length: dict[int, list[int]] = {}
+        self._by_bigram: dict[str, list[int]] = {}
+        self._by_path: dict[str, list[int]] = {}
+        # Per-candidate scalars signal #5's prefilter reads once per pair;
+        # recomputing `name.lower()` inside that loop was measurable.
+        self._name_lengths: list[int] = []
+        self._name_characters: list[Counter[str]] = []
+        for position, candidate in enumerate(self.candidates):
+            for key in candidate.match_keys:
+                self._by_match_key.setdefault(key, []).append(position)
+            for key in candidate.normalized_keys:
+                self._by_normalized_key.setdefault(key, []).append(position)
+                # The variant rule is SYMMETRIC (`principles-system` ~
+                # `principle`), so the candidate side has to be expanded too;
+                # looking a capture-side variant up in a raw-key index would
+                # quietly lose `growth` → `growth-system`.
+                for variant in _tag_variants(key, config):
+                    self._by_variant.setdefault(variant, []).append(position)
+            tokens = _tokens(candidate.name)
+            if tokens:
+                self._by_first_token.setdefault(tokens[0], []).append(position)
+                for token in set(tokens):
+                    self._by_token.setdefault(token, []).append(position)
+            lowered = candidate.name.lower()
+            self._name_lengths.append(len(lowered))
+            self._name_characters.append(Counter(lowered))
+            self._by_name_length.setdefault(len(lowered), []).append(position)
+            for offset in range(len(lowered) - 1):
+                # One posting PER OCCURRENCE, so the shared-bigram count is
+                # never an under-estimate — see `_alias_shortlist`.
+                self._by_bigram.setdefault(lowered[offset : offset + 2], []).append(position)
+            self._by_path.setdefault(candidate.path, []).append(position)
+
+    def __len__(self) -> int:
+        return len(self.candidates)
+
+    def shortlist(
+        self,
+        capture: CaptureFeaturesView,
+        config: SuggestionsConfig,
+        learning: LearningData,
+    ) -> list[Candidate]:
+        """Every candidate that could score a POSITIVE signal, in ballot
+        order. A superset is always safe; this one is exact."""
+        stopwords = _stopwords(config)
+        picked: set[int] = set()
+
+        # #1 exact tag → the raw tag against the match-key index.
+        for tag in capture.tags:
+            if _is_stopword(tag, stopwords):
+                continue
+            picked.update(self._by_match_key.get(tag, ()))
+
+        # #2 normalized tag, plus its variant set derived ONCE from the
+        #    capture token (§3.5) instead of per candidate.
+        for tag in capture.normalized_tags:
+            if _is_stopword(tag, stopwords):
+                continue
+            picked.update(self._by_normalized_key.get(tag, ()))
+            for variant in _tag_variants(tag, config):
+                picked.update(self._by_variant.get(variant, ()))
+
+        # #4 source → normalized-key index.
+        for source in capture.sources:
+            if _is_stopword(source, stopwords):
+                continue
+            picked.update(self._by_normalized_key.get(frontmatter.normalize_tag(source), ()))
+
+        # #5 alias similarity — the exact prefilters of §3.5.
+        for alias in capture.aliases:
+            if alias.startswith(_CAPTURE_ALIAS_PREFIX):
+                continue
+            if capture.capture_id is not None and alias == capture.capture_id:
+                continue
+            if _is_stopword(alias, stopwords):
+                continue
+            picked.update(self._alias_shortlist(alias.lower()))
+
+        # #6 context — first-token dictionary prefilter. `_contains_token_run`
+        #    needs the needle's FIRST token present in the haystack, in both
+        #    directions, so both directions are indexed.
+        context_tokens = _tokens(" ".join(capture.context))
+        if context_tokens:
+            for token in set(context_tokens):
+                picked.update(self._by_first_token.get(token, ()))
+            picked.update(self._by_token.get(context_tokens[0], ()))
+
+        # #3 learned association — the destinations this capture's own
+        #    association and tag/source patterns already name (04 §3-4).
+        for path in _learned_destinations(capture, learning):
+            picked.update(self._by_path.get(path, ()))
+
+        return [self.candidates[position] for position in sorted(picked)]
+
+    def _alias_shortlist(self, alias: str) -> set[int]:
+        """Signal #5's prefilter: every candidate whose name could still clear
+        the 0.6 similarity gate against ``alias``. TWO exact bounds, both
+        arithmetically incapable of changing a score:
+
+        1. **Length.** Normalized similarity is ``1 - dist/max_len`` and
+           ``dist >= |len(a) - len(b)|``, so a length gap of 0.4 × max_len or
+           more caps similarity at 0.6 (§3.5).
+        2. **Bigrams.** One edit changes at most ``q`` of a string's q-grams,
+           so two strings within edit distance ``d`` share at least
+           ``max_len - q + 1 - q·d`` of them. The length bound alone left
+           7,212 of 8,104 candidates on Matt's vault for a 13-character
+           alias — 660 ms in one ``suggest()``; with the bigram bound the same
+           alias keeps 207, and the true hits are unchanged.
+
+        Counting is deliberately an OVER-estimate (candidate-side
+        multiplicity, uncapped): over-counting can only keep a candidate that
+        would have been dropped, never drop one the scorer would have kept.
+        """
+        lengths = _admissible_name_lengths(len(alias))
+        if len(alias) < _BIGRAM_PREFILTER_MIN_LENGTH:
+            # At max_len 3 the bound degenerates to "share 0 bigrams", and a
+            # single middle substitution ("abc" → "axc", similarity 0.667)
+            # shares none while still clearing the gate. Below that length the
+            # length bucket alone is the exact answer — and it is tiny.
+            picked: set[int] = set()
+            for length in lengths:
+                picked.update(self._by_name_length.get(length, ()))
+            return picked
+        # `Counter.update` over a posting LIST counts in C; the same loop
+        # written in Python was the single most expensive line of the
+        # prefilter on a 60-character alias.
+        shared: Counter[int] = Counter()
+        for bigram in {alias[offset : offset + 2] for offset in range(len(alias) - 1)}:
+            postings = self._by_bigram.get(bigram)
+            if postings:
+                shared.update(postings)
+        alias_characters = Counter(alias)
+        keep: set[int] = set()
+        for position, count in shared.items():
+            name_length = self._name_lengths[position]
+            if name_length not in lengths:
+                continue
+            max_len = max(len(alias), name_length)
+            if count < _min_shared_bigrams(max_len):
+                continue
+            # 3. **Characters.** Every character of the longer string that the
+            #    shorter one cannot supply costs at least one edit, so
+            #    ``dist >= max_len - |multiset intersection|``. Cheap (one
+            #    Counter intersection) next to a 60×60 edit-distance table,
+            #    and on the real backlog it is what removes the long
+            #    free-text aliases' last few hundred candidates.
+            overlap = sum((alias_characters & self._name_characters[position]).values())
+            if max_len - overlap > _max_alias_distance(max_len):
+                continue
+            keep.add(position)
+        return keep
+
+
+#: Shortest alias the bigram bound may be applied to. At ``max_len <= 3`` the
+#: bound allows zero shared bigrams, and a pair that shares none can still
+#: clear the gate, so below this the length bucket is used unfiltered.
+_BIGRAM_PREFILTER_MIN_LENGTH = 4
+
+
+def _min_shared_bigrams(max_len: int) -> int:
+    """How many bigrams two strings MUST share to be within signal #5's gate.
+
+    ``similarity > 0.6`` ⇔ ``5·dist < 2·max_len``, so the largest admissible
+    distance is ``(2·max_len - 1) // 5``. One edit destroys at most 2 of the
+    longer string's ``max_len - 1`` bigrams, hence the bound. Integer
+    arithmetic throughout: a float here could round a real hit away.
+    """
+    max_distance = (2 * max_len - 1) // 5
+    return max(0, max_len - 1 - 2 * max_distance)
+
+
+def _admissible_name_lengths(alias_length: int) -> range:
+    """Candidate-name lengths that can still clear signal #5's 0.6 gate
+    against an alias of ``alias_length`` characters.
+
+    ``1 - |a-b|/max(a,b) > 0.6`` ⇔ ``3·max < 5·min``, done in INTEGERS so no
+    float rounding can drop a pair the scorer would have counted.
+    """
+    if alias_length <= 0:
+        return range(0, 1)  # only the (empty, empty) pair scores 1.0
+    return range(3 * alias_length // 5 + 1, (5 * alias_length - 1) // 3 + 1)
+
+
+def _learned_destinations(capture: CaptureFeaturesView, learning: LearningData) -> set[str]:
+    """Destination paths signal #3 could score above zero for this capture:
+    the destinations of its own association key, plus the destinations named
+    by its tag/source pattern keys (``tag:<t>->dest:<path>``, 04 §3.4)."""
+    paths: set[str] = set()
+    association = learning.associations.get(create_association_key(extract_features(capture)))
+    if association is not None:
+        paths.update(association.destinations)
+    if not learning.patterns:
+        return paths
+    prefixes = {f"tag:{tag}->dest:" for tag in capture.tags}
+    prefixes |= {f"source:{source}->dest:" for source in capture.sources}
+    if not prefixes:
+        return paths
+    for key in learning.patterns:
+        head, separator, destination = key.partition("->dest:")
+        if separator and f"{head}->dest:" in prefixes:
+            paths.add(destination)
+    return paths
+
+
+def build_candidate_set(
+    para_subfolders: dict[str, list[str]],
+    notes: Iterable[NoteRecord] = (),
+    config: SuggestionsConfig | None = None,
+) -> CandidateSet:
+    """The whole ballot, indexed: folders (spec 21 §2) + notes (§3).
+
+    ``notes`` empty reproduces the folders-only ballot exactly, which is what
+    ``suggestions.note_candidates = false`` does (§3.6).
+    """
+    settings = config or SuggestionsConfig()
+    candidates = generate_candidates(para_subfolders)
+    candidates.extend(generate_note_candidates(notes))
+    return CandidateSet(candidates, settings)
+
+
+@dataclass(frozen=True)
+class RankedSuggestions:
+    """:func:`rank`'s full result. ``suggest()`` returns only the list, so
+    every existing caller is untouched; the count of rows dropped by the
+    same-name collapse is reported to ``--json`` (spec 21 §3.2)."""
+
+    suggestions: tuple[Suggestion, ...]
+    suppressed_duplicates: int = 0
+
+
 def suggest(
     capture: CaptureFeaturesView,
-    candidates: list[Candidate],
+    candidates: Sequence[Candidate] | CandidateSet,
     config: SuggestionsConfig,
     learning: LearningData,
     *,
     now: float,
     archive_path: str | None = None,
+    exclude_path: str | None = None,
 ) -> list[Suggestion]:
     """Full ranking (spec 04 §1-2):
 
@@ -431,41 +979,100 @@ def suggest(
     no signal therefore returns the archive entry alone — the honest "no
     confident destination" state — and every non-archive suggestion carries
     at least one reason.
+
+    ``exclude_path`` is the note being suggested FOR: a note is never a
+    candidate for itself (21 §3.1). It is a pure string comparison on the
+    already-resolved path, so scoring still touches no filesystem.
     """
+    return list(
+        rank(
+            capture,
+            candidates,
+            config,
+            learning,
+            now=now,
+            archive_path=archive_path,
+            exclude_path=exclude_path,
+        ).suggestions
+    )
+
+
+def rank(
+    capture: CaptureFeaturesView,
+    candidates: Sequence[Candidate] | CandidateSet,
+    config: SuggestionsConfig,
+    learning: LearningData,
+    *,
+    now: float,
+    archive_path: str | None = None,
+    exclude_path: str | None = None,
+) -> RankedSuggestions:
+    """:func:`suggest` plus the counters the CLI reports. See that docstring
+    for the ranking law; this one documents only what 21 adds:
+
+    - the ballot may be a :class:`CandidateSet` (indexed, cached) or a plain
+      list (built here, which is what every existing caller and test does);
+    - the sort key gains ``kind_rank`` BETWEEN name and path, so it can only
+      reorder candidates that tie on both score and name — for a folders-only
+      list the values are equal and the previous path tiebreak still decides,
+      byte-identically (21 §3.2);
+    - notes that are the same answer written twice collapse (§3.2);
+    - ``max_note_suggestions`` caps note rows AFTER ranking, folders filling
+      the remainder; ``max_suggestions`` (total, archive included) is
+      unchanged (§3.3).
+    """
+    candidate_set = _as_candidate_set(candidates, config)
     min_confidence = config.learning.min_confidence
 
-    scored: list[Suggestion] = []
-    for candidate in candidates:
+    scored: list[tuple[Candidate, float, tuple[str, ...]]] = []
+    for candidate in candidate_set.shortlist(capture, config, learning):
         if candidate.type in _EXCLUDED_CANDIDATE_TYPES:
+            continue
+        if exclude_path is not None and candidate.path == exclude_path:
             continue
         score, reasons = calculate_score(capture, candidate, config, learning, now=now)
         signal_score = score - _type_bonus(candidate.type, config)
         if signal_score <= 0.0 or signal_score < min_confidence:
             continue
-        scored.append(
-            Suggestion(
-                path=candidate.path,
-                name=candidate.name,
-                # `Candidate.type` is the plural config KEY; the wire type is
-                # singular. An unrecognized key (a vault with a custom PARA
-                # root) passes through rather than being blanked.
-                type=PARA_KEY_TO_TYPE.get(candidate.type, candidate.type),
-                score=score,
-                reasons=tuple(reasons),
-            )
-        )
+        scored.append((candidate, score, tuple(reasons)))
 
-    # list.sort is stable; the explicit name/path tiebreak makes the order
-    # total, so identical inputs always produce an identical list (04 §2).
-    scored.sort(key=lambda item: (-item.score, item.name, item.path))
+    # list.sort is stable; the explicit name/kind/path tiebreak makes the
+    # order total, so identical inputs always produce an identical list
+    # (04 §2). kind_rank puts a NOTE above a folder of the same name at the
+    # same score: Matt asked for the file, a note is the more specific
+    # destination, and merge is backed up and undoable (17 §1).
+    scored.sort(
+        key=lambda item: (
+            -item[1],
+            item[0].name,
+            _KIND_RANK.get(item[0].kind, len(_KIND_RANK)),
+            item[0].path,
+        )
+    )
+
+    scored, suppressed = _collapse_same_name_notes(scored)
+    scored = _cap_note_rows(scored, config)
 
     limit = max(0, int(config.max_suggestions))
     if limit == 0:
-        return []
+        return RankedSuggestions(suggestions=(), suppressed_duplicates=suppressed)
     include_archive = bool(config.always_show_archive) and archive_path is not None
     keep = limit - 1 if include_archive else limit
 
-    result = scored[:keep]
+    result = [
+        Suggestion(
+            path=candidate.path,
+            name=candidate.name,
+            # `Candidate.type` is the plural config KEY; the wire type is
+            # singular. An unrecognized key (a vault with a custom PARA
+            # root) passes through rather than being blanked.
+            type=PARA_KEY_TO_TYPE.get(candidate.type, candidate.type),
+            score=score,
+            reasons=reasons,
+            destination_kind=candidate.kind,
+        )
+        for candidate, score, reasons in scored[:keep]
+    ]
     if include_archive:
         result.append(
             Suggestion(
@@ -476,4 +1083,83 @@ def suggest(
                 reasons=(ARCHIVE_SUGGESTION_REASON,),
             )
         )
-    return result
+    return RankedSuggestions(suggestions=tuple(result), suppressed_duplicates=suppressed)
+
+
+def _as_candidate_set(
+    candidates: Sequence[Candidate] | CandidateSet, config: SuggestionsConfig
+) -> CandidateSet:
+    if not isinstance(candidates, CandidateSet):
+        return CandidateSet(candidates, config)
+    if candidates.tag_suffix_strip != tuple(config.tag_suffix_strip or ()):
+        # Signal #2's variants are baked into the index. Re-indexing loudly is
+        # the only safe answer: silently scoring against the old suffix list
+        # would make `suggestions.tag_suffix_strip` a lie for as long as the
+        # cached set lived.
+        logger.warning(
+            "suggest: candidate set was indexed for tag_suffix_strip=%r but the config now says "
+            "%r — rebuilding it for this call",
+            candidates.tag_suffix_strip,
+            tuple(config.tag_suffix_strip or ()),
+        )
+        return CandidateSet(candidates.candidates, config)
+    return candidates
+
+
+def _collapse_same_name_notes(
+    scored: list[tuple[Candidate, float, tuple[str, ...]]],
+) -> tuple[list[tuple[Candidate, float, tuple[str, ...]]], int]:
+    """Spec 21 §3.2: among NOTE candidates sharing a ``normalized_name`` AND
+    an equal score, keep the shallowest path (fewest segments, then path
+    ascending) and drop the rest.
+
+    `eduardo-pontes-reis` resolves to two real files and three spellings of
+    one answer in a ten-row list is the SQ-1 failure mode in miniature.
+    FOLDERS ARE NEVER COLLAPSED (§2.2): two same-named folders are two
+    destinations; two same-named notes at the same score are one answer
+    written twice.
+    """
+    winners: dict[tuple[str, float], Candidate] = {}
+    for candidate, score, _reasons in scored:
+        if candidate.kind != KIND_NOTE:
+            continue
+        key = (candidate.normalized_name, score)
+        current = winners.get(key)
+        if current is None or _depth_key(candidate.path) < _depth_key(current.path):
+            winners[key] = candidate
+    kept: list[tuple[Candidate, float, tuple[str, ...]]] = []
+    suppressed = 0
+    for entry in scored:
+        candidate, score, _reasons = entry
+        if (
+            candidate.kind == KIND_NOTE
+            and winners[(candidate.normalized_name, score)].path != candidate.path
+        ):
+            suppressed += 1
+            continue
+        kept.append(entry)
+    return kept, suppressed
+
+
+def _depth_key(path: str) -> tuple[int, str]:
+    return (len(path.strip("/").split("/")), path)
+
+
+def _cap_note_rows(
+    scored: list[tuple[Candidate, float, tuple[str, ...]]], config: SuggestionsConfig
+) -> list[tuple[Candidate, float, tuple[str, ...]]]:
+    """Spec 21 §3.3: ``suggestions.max_note_suggestions`` caps NOTE rows in
+    the final list, folders filling the remainder. A person or project
+    cluster can otherwise fill the visible list with one answer's
+    neighbourhood — 1,150 of the 1,740 newly covered captures have a note at
+    rank 1. Set it to ``max_suggestions`` to disable the cap."""
+    cap = max(0, int(config.max_note_suggestions))
+    kept: list[tuple[Candidate, float, tuple[str, ...]]] = []
+    notes = 0
+    for entry in scored:
+        if entry[0].kind == KIND_NOTE:
+            if notes >= cap:
+                continue
+            notes += 1
+        kept.append(entry)
+    return kept

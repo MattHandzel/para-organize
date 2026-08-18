@@ -37,10 +37,12 @@ M.SORT_LABELS = {
   intelligent = "Intelligent Suggestions",
 }
 
---- Score → highlight bucket. Spec 03 §3: `score_high/medium/low` at
---- thresholds >= 2.0 / >= 1.0 / else.
-M.SCORE_HIGH = 2.0
-M.SCORE_MEDIUM = 1.0
+--- Score → highlight bucket. The thresholds were `render.SCORE_HIGH` /
+--- `SCORE_MEDIUM` constants; spec 15 §6 promotes them OUT of the source into
+--- `ui.organize.score_thresholds` (ruling R3), because a differently-weighted
+--- vault (04 §1) needs different buckets. These are the fallbacks used when
+--- no config is passed — the spec 03 §3 literals.
+M.SCORE_THRESHOLDS = { high = 2.0, medium = 1.0 }
 
 -- --- small helpers ---------------------------------------------------------
 
@@ -137,48 +139,27 @@ function M.type_marker(kind, cfg)
   return "[" .. (M.TYPE_LETTERS[key] or "?") .. "]"
 end
 
---- Highlight group for a score, per the spec thresholds.
-function M.score_hl(score, highlights)
+--- Highlight group for a score.
+---
+--- ⚠ `ui.highlights.score_high|score_medium|score_low` are HIGHLIGHT-GROUP
+--- NAME strings and are unrelated to the numeric `ui.organize.score_thresholds`
+--- (ruling R3). Both are read here, and neither is the other's spelling.
+---@param thresholds table|nil { high = number, medium = number }
+function M.score_hl(score, highlights, thresholds)
   highlights = highlights or {}
+  thresholds = thresholds or M.SCORE_THRESHOLDS
+  local high = tonumber(thresholds.high) or M.SCORE_THRESHOLDS.high
+  local medium = tonumber(thresholds.medium) or M.SCORE_THRESHOLDS.medium
   if type(score) ~= "number" then
     return highlights.score_low or "ParaOrganizeScoreLow"
   end
-  if score >= M.SCORE_HIGH then
+  if score >= high then
     return highlights.score_high or "ParaOrganizeScoreHigh"
   end
-  if score >= M.SCORE_MEDIUM then
+  if score >= medium then
     return highlights.score_medium or "ParaOrganizeScoreMedium"
   end
   return highlights.score_low or "ParaOrganizeScoreLow"
-end
-
---- ISO-ish timestamp → `ui.display.timestamp_format`. The core keeps
---- timestamps as opaque strings (frontmatter contract), so an unparseable
---- value is shown verbatim rather than dropped.
-function M.format_timestamp(ts, fmt)
-  if type(ts) ~= "string" or ts == "" then
-    return nil
-  end
-  local y, mo, d, h, mi, s = ts:match("^(%d%d%d%d)-(%d%d)-(%d%d)[T ](%d%d):(%d%d):?(%d*)")
-  if not y then
-    return ts
-  end
-  local ok, formatted = pcall(function()
-    local epoch = os.time({
-      year = tonumber(y),
-      month = tonumber(mo),
-      day = tonumber(d),
-      hour = tonumber(h),
-      min = tonumber(mi),
-      sec = tonumber(s) or 0,
-      isdst = false,
-    })
-    return os.date(fmt or "%b %d, %I:%M %p", epoch)
-  end)
-  if ok and type(formatted) == "string" then
-    return formatted
-  end
-  return ts
 end
 
 -- --- the rendered-buffer builder -------------------------------------------
@@ -231,8 +212,59 @@ local function hl_of(cfg)
   return (cfg and cfg.ui and cfg.ui.highlights) or {}
 end
 
-local function display_of(cfg)
-  return (cfg and cfg.ui and cfg.ui.display) or {}
+--- `ui.organize.*` — the right pane's own closed record (spec 15 §6/§7).
+--- `ui.display.*` is DELETED as a section (ruling R1); `config.MOVED_KEYS`
+--- names the replacement for each of its keys.
+local function organize_of(cfg)
+  return (cfg and cfg.ui and cfg.ui.organize) or {}
+end
+
+--- `ui.organize.render_row` — the per-row override (spec 15 §6).
+---
+--- Returns `nil` to fall back to the built-in row for THAT row. The same five
+--- safety rules and the same 3-failure disable as `ui.capture.render`: a
+--- broken user function may not spam its way through a 200-capture backlog,
+--- and row DISPATCH stays keyed on `item.kind`, never on rendered text, so a
+--- custom row can never break `<CR>`.
+---@return string|nil text, string|nil hl
+local function custom_row(cfg, row_ctx)
+  local fn = organize_of(cfg).render_row
+  if type(fn) ~= "function" then
+    return nil
+  end
+  local fields = require("para-organize.ui.fields")
+  if fields._session.row_disabled then
+    return nil
+  end
+  local ok, result = pcall(fn, row_ctx)
+  local text, hl
+  if ok then
+    if result == nil then
+      return nil
+    end
+    if type(result) == "string" then
+      text = result
+    elseif type(result) == "table" and type(result[1]) == "string" then
+      text, hl = result[1], type(result[2]) == "string" and result[2] or nil
+    end
+    if text and text:find("\n", 1, true) then
+      text = nil
+    end
+  end
+  if text then
+    return text, hl
+  end
+  fields._session.row_failures = fields._session.row_failures + 1
+  if fields._session.row_failures == 1 then
+    fields.notify(
+      ("ui.organize.render_row failed (%s) — using the built-in row"):format(ok and "invalid return value" or tostring(result)),
+      vim.log.levels.WARN
+    )
+  end
+  if fields._session.row_failures >= 3 then
+    fields._session.row_disabled = true
+  end
+  return nil
 end
 
 --- State 0: loading. Rendered while an RPC round-trip is in flight so the
@@ -316,7 +348,7 @@ function M.suggestions(state, cfg)
   state = state or {}
   local out = M.new()
   local hl = hl_of(cfg)
-  local display = display_of(cfg)
+  local organize = organize_of(cfg)
   local sort_mode = state.sort or "intelligent"
   out:header(("Suggestions — sort: %s"):format(M.SORT_LABELS[sort_mode] or tostring(sort_mode)), hl.header)
 
@@ -327,6 +359,9 @@ function M.suggestions(state, cfg)
   end
 
   local selected = state.selected or 1
+  -- `0` = all (spec 15 §6): 04 §2 requires every fired signal to contribute a
+  -- reason, and six of them push the next suggestion off a short pane.
+  local max_reasons = tonumber(organize.max_reasons) or 3
   for index, suggestion in ipairs(suggestions) do
     local text = ("%s %s"):format(M.type_marker(suggestion.type, cfg), suggestion.name or suggestion.path or "?")
     if M.present(suggestion.route) then
@@ -335,21 +370,44 @@ function M.suggestions(state, cfg)
       text = text .. ("  → route: %s"):format(suggestion.route)
     end
     local score_col
-    if display.show_scores ~= false and type(suggestion.score) == "number" then
+    if organize.show_scores ~= false and type(suggestion.score) == "number" then
       local score_text = ("%.2f"):format(suggestion.score)
       score_col = { from = #text + 2, text = score_text }
       text = text .. "  " .. score_text
     end
+    local row_hl = index == selected and (hl.selected or "ParaOrganizeSelected") or nil
+    local override, override_hl = custom_row(cfg, {
+      view = "suggestions",
+      index = index,
+      selected = index == selected,
+      item = suggestion,
+      marker = M.type_marker(suggestion.type, cfg),
+      config = cfg,
+      width = state.width,
+    })
+    if override then
+      text, score_col, row_hl = override, nil, override_hl or row_hl
+    end
     local lnum = out:line(
       text,
-      index == selected and (hl.selected or "ParaOrganizeSelected") or nil,
+      row_hl,
       { kind = "suggestion", index = index, item = suggestion, path = suggestion.path }
     )
     if score_col then
-      out:mark(lnum, score_col.from, score_col.from + #score_col.text, M.score_hl(suggestion.score, hl))
+      out:mark(
+        lnum,
+        score_col.from,
+        score_col.from + #score_col.text,
+        M.score_hl(suggestion.score, hl, organize.score_thresholds)
+      )
     end
-    if display.show_reasons ~= false then
+    if organize.show_reasons ~= false then
+      local shown = 0
       for _, reason in ipairs(suggestion.reasons or {}) do
+        if max_reasons > 0 and shown >= max_reasons then
+          break
+        end
+        shown = shown + 1
         out:line("    " .. tostring(reason), hl.reason or "Comment")
       end
     end
@@ -386,10 +444,26 @@ function M.browse(state, cfg)
   for index, entry in ipairs(entries) do
     local kind = entry.kind == "dir" and "dir" or "file"
     local label = entry.display or entry.name or entry.path or "?"
-    local text = ("%s %s"):format(M.type_marker(kind, cfg), label)
+    local marker = M.type_marker(kind, cfg)
+    local text = ("%s %s"):format(marker, label)
+    local row_hl = index == selected and (hl.selected or "ParaOrganizeSelected") or nil
+    local override, override_hl = custom_row(cfg, {
+      view = "browse",
+      index = index,
+      selected = index == selected,
+      item = entry,
+      marker = marker,
+      config = cfg,
+      width = state.width,
+    })
+    if override then
+      text, row_hl = override, override_hl or row_hl
+    end
     out:line(
       text,
-      index == selected and (hl.selected or "ParaOrganizeSelected") or nil,
+      row_hl,
+      -- ⚠ Row DISPATCH stays keyed on `kind`, never on the rendered text, so
+      -- a custom row can never break `<CR>` (spec 15 §6).
       { kind = kind, index = index, item = entry, path = entry.path }
     )
     if state.preview and index == selected and entry.description then
@@ -416,15 +490,25 @@ function M.search(state, cfg)
   local selected = state.selected or 1
   for index, record in ipairs(results) do
     local label = record.title or record.filename or record.path or "?"
-    local text = ("%s %s"):format(M.type_marker("file", cfg), label)
+    local marker = M.type_marker("file", cfg)
+    local text = ("%s %s"):format(marker, label)
     if record.folder and record.folder ~= "" then
       text = text .. ("   (%s)"):format(record.folder)
     end
-    out:line(
-      text,
-      index == selected and (hl.selected or "ParaOrganizeSelected") or nil,
-      { kind = "file", index = index, item = record, path = record.path }
-    )
+    local row_hl = index == selected and (hl.selected or "ParaOrganizeSelected") or nil
+    local override, override_hl = custom_row(cfg, {
+      view = "search",
+      index = index,
+      selected = index == selected,
+      item = record,
+      marker = marker,
+      config = cfg,
+      width = state.width,
+    })
+    if override then
+      text, row_hl = override, override_hl or row_hl
+    end
+    out:line(text, row_hl, { kind = "file", index = index, item = record, path = record.path })
   end
   return out
 end
@@ -457,135 +541,63 @@ function M.merge_hint(state, cfg)
   )
 end
 
---- Dispatch to the right renderer for `state.view`.
-function M.right_pane(state, cfg)
-  state = state or {}
-  local view = state.view or "suggestions"
-  if view == "loading" then
+--- The VIEW REGISTRY (spec 15 §6, ruling R37).
+---
+--- The per-view renderers used to be a dispatch `if`-chain in `right_pane`.
+--- Three documents (15, 16's `mru`, 17's `history`) need a new view, and only
+--- ONE of them may perform the refactor — so doc 15 lands the registry as a
+--- standalone change and 16/17 each add a single table entry with no edit to
+--- the dispatcher. This is 14 §5's declared seam.
+---@type table<string, fun(state: table, cfg: table): table>
+M.VIEWS = {
+  loading = function(state, cfg)
     return M.loading(state, cfg)
-  elseif view == "empty" or view == "done" then
+  end,
+  empty = function(state, cfg)
     return M.empty(state, cfg)
-  elseif view == "browse" then
+  end,
+  done = function(state, cfg)
+    return M.empty(state, cfg)
+  end,
+  browse = function(state, cfg)
     return M.browse(state, cfg)
-  elseif view == "search" then
+  end,
+  search = function(state, cfg)
     return M.search(state, cfg)
-  elseif view == "merge" then
+  end,
+  merge = function(state, cfg)
     return M.merge(state, cfg)
-  end
-  return M.suggestions(state, cfg)
-end
-
--- --- left pane (the real capture buffer's virtual header) ------------------
-
---- Header lines for the capture pane. These are rendered as VIRTUAL LINES
---- above line 1 of the real capture file buffer — the buffer itself is the
---- vault file (spec 10 §4), so nothing here may ever become buffer text.
----@return string[]
-function M.capture_header(state, cfg)
-  state = state or {}
-  local display = display_of(cfg)
-  local lines = {}
-  local captures = state.captures or {}
-  local current = state.current or 1
-  local record = captures[current]
-
-  if display.show_position ~= false and #captures > 0 then
-    table.insert(lines, ("Capture %d of %d"):format(current, #captures))
-  end
-  if not record then
-    if #lines == 0 then
-      table.insert(lines, "No capture loaded")
-    end
-    return lines
-  end
-
-  local ts = M.format_timestamp(record.timestamp, display.timestamp_format)
-  if ts then
-    table.insert(lines, ts)
-  end
-
-  local aliases = {}
-  for _, alias in ipairs(as_list(record.aliases)) do
-    if not (display.hide_capture_id ~= false and record.capture_id and tostring(alias) == tostring(record.capture_id)) then
-      table.insert(aliases, tostring(alias))
-    end
-  end
-  local alias_text = join(aliases)
-  if alias_text then
-    table.insert(lines, "aliases: " .. alias_text)
-  end
-  local tags = join(record.tags)
-  if tags then
-    table.insert(lines, "tags: " .. tags)
-  end
-  local sources = join(record.sources)
-  if sources then
-    table.insert(lines, "sources: " .. sources)
-  end
-  local context = join(record.context)
-  if context then
-    table.insert(lines, "context: " .. context)
-  end
-  if display.hide_modalities == false then
-    local modalities = join(record.modalities)
-    if modalities then
-      table.insert(lines, "modalities: " .. modalities)
-    end
-  end
-  if display.hide_location == false and type(record.location) == "table" then
-    local parts = {}
-    for key, value in pairs(record.location) do
-      table.insert(parts, ("%s=%s"):format(key, tostring(value)))
-    end
-    table.sort(parts)
-    if #parts > 0 then
-      table.insert(lines, "location: " .. table.concat(parts, " "))
-    end
-  end
-  if display.show_metadata_summary ~= false then
-    local summary = M.metadata_summary(state, cfg)
-    if summary then
-      table.insert(lines, summary)
-    end
-  end
-  return lines
-end
-
---- Keys the fixed spec 03 §3 header block already renders on their own line.
---- The default `metadata_fields` served by the core includes `tags`, so
---- without this the header printed `tags: blog` twice, indistinguishably.
-M.HEADER_KEYS = {
-  aliases = true,
-  tags = true,
-  sources = true,
-  context = true,
-  modalities = true,
-  location = true,
+  end,
+  suggestions = function(state, cfg)
+    return M.suggestions(state, cfg)
+  end,
 }
 
---- The spec-07 metadata summary: one line of `key: value` for every
---- configured `metadata_fields` entry that has a value on this capture and is
---- not already on a header line of its own.
-function M.metadata_summary(state, cfg)
+--- The fallback view for an unregistered name — spec 03 §3's state 1.
+M.DEFAULT_VIEW = "suggestions"
+
+--- Dispatch to the registered renderer for `state.view`.
+function M.right_pane(state, cfg)
   state = state or {}
-  local record = (state.captures or {})[state.current or 1]
-  if not record then
-    return nil
-  end
-  local fields = state.meta_fields or {}
-  local parts = {}
-  for _, field in ipairs(fields) do
-    local value = M.display_value(M.field_value(record, field.key))
-    if value and value ~= "" and not M.HEADER_KEYS[field.key] then
-      table.insert(parts, ("%s: %s"):format(field.key, value))
-    end
-  end
-  local _ = cfg
-  if #parts == 0 then
-    return nil
-  end
-  return table.concat(parts, " · ")
+  local fn = M.VIEWS[state.view or M.DEFAULT_VIEW] or M.VIEWS[M.DEFAULT_VIEW]
+  return fn(state, cfg)
 end
+
+-- --- left pane (the real capture buffer's card) ----------------------------
+
+--- ⚠ `capture_header`, `metadata_summary`, `HEADER_KEYS` and
+--- `format_timestamp` are GONE. Spec 15 replaces the fixed 03 §3 header list
+--- with the configurable field policy of `para-organize.ui.fields`:
+---
+---   * which keys show, and in what order   -> `ui.capture.fields.*`
+---   * how one value renders                 -> `ui.capture.formatters.*`
+---   * the whole card                        -> `ui.capture.render`
+---
+--- `format_timestamp` in particular REQUIRED a time component, so the
+--- `calendar` formatter that now ships for `created_date`/`last_edited_date`
+--- (both written date-only by the core) would silently never have applied to
+--- either. `fields.parse_timestamp` is the tolerant, timezone-correct,
+--- date-only-accepting replacement (spec 15 §4).
 
 -- --- help overlay ----------------------------------------------------------
 

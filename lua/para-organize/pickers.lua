@@ -136,8 +136,28 @@ function M.type_letter(para_type)
   return M.TYPE_LETTER[plural] or "?"
 end
 
+--- Is the score column on?
+---
+--- `ui.organize.show_scores` is the SINGLE source (spec 15 §6): this function
+--- used to read an `opts.show_scores` that NO call site ever passed, so the
+--- picker's score column was unreachable — a config key neither honored nor
+--- deleted, which 03 §1 forbids. An explicit `opts.show_scores` still wins,
+--- for a caller rendering a list where scores make no sense.
+local function scores_on(opts)
+  if opts.show_scores ~= nil then
+    return opts.show_scores == true
+  end
+  local ok, cfg = pcall(function()
+    return require("para-organize.config").get()
+  end)
+  if ok and type(cfg) == "table" then
+    return (((cfg.ui or {}).organize) or {}).show_scores ~= false
+  end
+  return true
+end
+
 --- One folder line: `[P] blog  projects/blog  (2.10)` (spec 03 §3; the score
---- is rendered only when `show_scores` is on, per `ui.display.show_scores`).
+--- is rendered when `ui.organize.show_scores` is on — spec 15 §6).
 function M.format_folder(entry, opts)
   opts = opts or {}
   local parts = {
@@ -151,7 +171,7 @@ function M.format_folder(entry, opts)
   if entry.route and entry.route ~= vim.NIL then
     parts[#parts + 1] = ("← route:%s"):format(entry.route)
   end
-  if opts.show_scores and type(entry.score) == "number" then
+  if scores_on(opts) and type(entry.score) == "number" then
     parts[#parts + 1] = ("%.2f"):format(entry.score)
   end
   return table.concat(parts, " ")

@@ -407,10 +407,16 @@ def test_suggest_for_note_ranks_the_matching_folder_first(client: RpcClient) -> 
     # `blog` and `kms` fire NO signal, so the 0.3 folder-type bonus no longer
     # carries them past `min_confidence` (architect ruling 2026-08-16: the
     # floor applies to the signal score) — the list is the folder the tag
-    # actually names, plus the archive entry.
-    assert [(s["name"], s["type"], s["score"]) for s in suggestions] == [
-        ("health", "area", 3.7),
-        ("Archive Now", "archive", 0.1),
+    # actually names, the NOTE whose title is that name (spec 21 §3.1 key
+    # (d): `areas/health/index.md` carries `title: Health`), and the archive
+    # entry. Both score 2.0 + 1.5 + 0.2 = 3.7 — 04 §2's arithmetic unmodified
+    # — and the folder wins the tie on NAME ("health" < "index"), so
+    # kind_rank never gets a vote here (21 §3.2: it can only reorder a tie on
+    # score AND name).
+    assert [(s["name"], s["type"], s["score"], s["destination_kind"]) for s in suggestions] == [
+        ("health", "area", 3.7, "folder"),
+        ("index", "area", 3.7, "note"),
+        ("Archive Now", "archive", 0.1, "folder"),
     ]
     assert suggestions[0]["reasons"] == [
         "Tag 'health' matches folder",

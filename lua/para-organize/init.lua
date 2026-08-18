@@ -360,6 +360,20 @@ function M.debug()
     lines[#lines + 1] = "session: none (state " .. tostring(snapshot.state) .. ")"
   end
 
+  -- Spec 15 §4/§5: a formatter or a `ui.capture.render` override that failed
+  -- degrades silently ON SCREEN (that is the point), so the failure has to be
+  -- reachable HERE or it is unreportable.
+  local ok_ui, ui_mod = pcall(require, "para-organize.ui")
+  if ok_ui and type(ui_mod.render_diagnostics) == "function" then
+    for _, row in ipairs(ui_mod.render_diagnostics()) do
+      lines[#lines + 1] = row
+    end
+    local mode = type(ui_mod.field_mode) == "function" and ui_mod.field_mode() or nil
+    if mode then
+      lines[#lines + 1] = "field_mode: " .. tostring(mode)
+    end
+  end
+
   local client = select(1, M.client())
   if not client then
     lines[#lines + 1] = "core: not reachable — run :checkhealth para-organize"

@@ -864,12 +864,19 @@ def test_suggestions_agree_across_the_two_doors(
     assert cli_suggestions["subject"] == CAPTURE
     assert isinstance(rpc_suggestions, list)
 
-    def shape(entries: list[dict[str, Any]], frontend: Frontend) -> list[tuple[str, str, float]]:
+    def shape(
+        entries: list[dict[str, Any]], frontend: Frontend
+    ) -> list[tuple[str, str, float, str]]:
         return [
             (
                 str(e["path"]).replace(str(frontend.vault), "<VAULT>"),
                 e["type"],
                 round(float(e["score"]), 9),
+                # `destination_kind` is part of the payload both doors must
+                # agree on (21 §3.3): it decides whether an accept MOVES or
+                # MERGES, so a door that omitted it would send the client to
+                # the wrong operation.
+                e["destination_kind"],
             )
             for e in entries
         ]
@@ -879,13 +886,14 @@ def test_suggestions_agree_across_the_two_doors(
 
     # The exact ranking, not just "they match" — otherwise two identically
     # broken doors would pass. This capture's tags (impro, creativity) match
-    # no folder NAME, so NO signal fires at all; the folder-type bonus alone
-    # no longer carries a candidate past `min_confidence` (04 §2, architect
-    # ruling 2026-08-16: the floor applies to the SIGNAL score), so both doors
-    # must report the honest "no confident destination" state — the
-    # unconditional archive entry and nothing else (04 §1).
+    # no FOLDER name at any depth, but `resources/performing/impro.md` is a
+    # note whose stem is `impro`, and spec 21 §3 puts notes on the ballot:
+    # 2.0 (exact tag) + 1.5 (normalized tag) + 0.1 (resources bonus) = 3.6,
+    # spec 04 §2's arithmetic unmodified, marked `note` so the client starts
+    # doc 19's merge flow instead of a move. The archive row still follows.
     assert cli_shape == [
-        ("<VAULT>/archive/capture/raw_capture", "archive", 0.1),
+        ("<VAULT>/resources/performing/impro.md", "resource", 3.6, "note"),
+        ("<VAULT>/archive/capture/raw_capture", "archive", 0.1, "folder"),
     ]
 
 

@@ -262,6 +262,12 @@ FULL_RAW: dict[str, Any] = {
         "max_suggestions": 7,
         "always_show_archive": False,
         "tag_normalization": {"project": "projects"},
+        # spec 21 §3.7 — every one of these differs from its default, which
+        # is what makes `test_every_config_key_is_honored` a real assertion.
+        "max_candidate_depth": "all",
+        "note_candidates": False,
+        "max_note_suggestions": 9,
+        "candidate_stopwords": ["blah"],
         "weights": {
             "exact_tag_match": 9.0,
             "normalized_tag_match": 8.0,
@@ -364,6 +370,11 @@ def test_every_config_key_is_honored() -> None:
     )
     assert config.suggestions.max_suggestions == 7
     assert config.suggestions.always_show_archive is False
+    # spec 21 §3.7's five core keys — parsed as their two legal types.
+    assert config.suggestions.max_candidate_depth == "all"
+    assert config.suggestions.note_candidates is False
+    assert config.suggestions.max_note_suggestions == 9
+    assert config.suggestions.candidate_stopwords == ["blah"]
     assert config.suggestions.tag_normalization == {"project": "projects"}
     assert config.suggestions.weights == SuggestionWeights(
         exact_tag_match=9.0,
@@ -629,6 +640,15 @@ def test_leaf_type_and_enum_violations_name_the_key(
     ("raw", "key"),
     [
         ({"suggestions": {"max_suggestions": 0}}, "suggestions.max_suggestions"),
+        # spec 21 §2.1: depth is levels BELOW the PARA root and an immediate
+        # subfolder is 1, so 0 is not "today's behaviour" — it is nonsense,
+        # and it must not silently empty the ballot.
+        ({"suggestions": {"max_candidate_depth": 0}}, "suggestions.max_candidate_depth"),
+        ({"suggestions": {"max_candidate_depth": -3}}, "suggestions.max_candidate_depth"),
+        ({"suggestions": {"max_candidate_depth": "deep"}}, "suggestions.max_candidate_depth"),
+        ({"suggestions": {"max_candidate_depth": 2.5}}, "suggestions.max_candidate_depth"),
+        ({"suggestions": {"max_candidate_depth": True}}, "suggestions.max_candidate_depth"),
+        ({"suggestions": {"max_note_suggestions": -1}}, "suggestions.max_note_suggestions"),
         ({"suggestions": {"learning": {"recency_decay": 0.0}}}, "suggestions.learning.recency_decay"),
         ({"suggestions": {"learning": {"recency_decay": 1.5}}}, "suggestions.learning.recency_decay"),
         ({"suggestions": {"learning": {"min_confidence": 1.5}}}, "suggestions.learning.min_confidence"),

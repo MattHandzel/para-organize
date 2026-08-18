@@ -50,7 +50,12 @@ from organize_core.fileops import (
     update_frontmatter,
 )
 from organize_core.index import PARA_KEY_TO_TYPE, NoteRecord, VaultIndex
-from organize_core.suggest import ARCHIVE_SUGGESTION_TYPE, Suggestion
+from organize_core.suggest import (
+    ARCHIVE_SUGGESTION_TYPE,
+    KIND_FOLDER,
+    KIND_NOTE,
+    Suggestion,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; no new runtime import edge
     from organize_core.actions import ActionRecord, ActionRecorder, TargetState
@@ -114,7 +119,16 @@ class RouteMatch:
     def as_suggestion(self) -> Suggestion:
         """Rendered distinctly above scored suggestions:
         ``[→] training-log.md (route: workout)`` with the description
-        attached (spec 11 §1 "Where routes act")."""
+        attached (spec 11 §1 "Where routes act").
+
+        ``destination_kind`` comes from :attr:`is_folder` — the value
+        ``resolve`` already computed from the trailing ``/`` the route
+        AUTHOR wrote — never from a trailing ``.md`` on the resolved path
+        (21 §3.3: "the core states the kind; the client reads it"). A route
+        whose destination is a FILE is an append/integrate target, and a
+        client dispatching on ``destination_kind`` would otherwise perform a
+        folder MOVE onto it.
+        """
         description = (self.route.description or "").strip()
         return Suggestion(
             path=str(self.destination),
@@ -124,6 +138,7 @@ class RouteMatch:
             reasons=(f"Route '{self.route_name}' ({self.route.mode})",),
             route=self.route_name,
             description=description or None,
+            destination_kind=KIND_FOLDER if self.is_folder else KIND_NOTE,
         )
 
 

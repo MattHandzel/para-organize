@@ -529,6 +529,222 @@ def test_para_subfolders_rejects_an_unknown_type(index: VaultIndex) -> None:
         index.para_subfolders("nonsense")
 
 
+# ---------------------------------------------------------------------------
+# candidate folders / candidate notes (spec 21 §2, §3.1)
+# ---------------------------------------------------------------------------
+
+
+def _deep_vault(fixture_vault: Path) -> Path:
+    """A PARA tree with known depths, so every count below is hand-counted.
+
+    ``areas``: a1(1) a1/b1(2) a1/b1/c1(3) a1/b1/c1/d1(4) plus the fixture's
+    health(1) and relationships(1); one dot-directory and one ignorable
+    directory, both at depth 1.
+    """
+    for rel in (
+        "areas/a1/b1/c1/d1",
+        "areas/.hidden/deep",
+        "areas/node_modules/deep",
+        "projects/p1/q1",
+        "archive/old/deeper",
+    ):
+        (fixture_vault / rel).mkdir(parents=True, exist_ok=True)
+    return fixture_vault
+
+
+def test_candidate_folders_depth_is_levels_below_the_para_root(
+    fixture_vault: Path, tmp_path: Path
+) -> None:
+    """Spec 21 §7.7: the off-by-one in "levels below the PARA root, immediate
+    child = 1" is the likeliest silent bug here, so it is asserted directly at
+    every shipped setting against hand-counted literals."""
+    vault = _deep_vault(fixture_vault)
+    index = make_index(vault, tmp_path, ignore_patterns=["node_modules"])
+
+    def offered(depth: object) -> list[str]:
+        return sorted(
+            str(p.relative_to(vault))
+            for p in index.candidate_folders("areas", depth)  # type: ignore[arg-type]
+        )
+
+    assert offered(1) == ["areas/a1", "areas/health", "areas/relationships"]
+    assert offered(2) == ["areas/a1", "areas/a1/b1", "areas/health", "areas/relationships"]
+    assert offered(3) == [
+        "areas/a1",
+        "areas/a1/b1",
+        "areas/a1/b1/c1",
+        "areas/health",
+        "areas/relationships",
+    ]
+    assert offered("all") == [
+        "areas/a1",
+        "areas/a1/b1",
+        "areas/a1/b1/c1",
+        "areas/a1/b1/c1/d1",
+        "areas/health",
+        "areas/relationships",
+    ]
+
+
+def test_candidate_folders_at_depth_1_is_exactly_para_subfolders(
+    fixture_vault: Path, tmp_path: Path
+) -> None:
+    """Depth 1 reproduces today's ballot exactly (21 §3.6's parity half) —
+    the same paths, not merely a similar count."""
+    vault = _deep_vault(fixture_vault)
+    index = make_index(vault, tmp_path)
+    for key in ("projects", "areas", "resources"):
+        assert sorted(index.candidate_folders(key, 1)) == sorted(index.para_subfolders(key))
+
+
+def test_candidate_folders_gap_from_a_direct_walk_is_ignore_patterns_alone(
+    fixture_vault: Path, tmp_path: Path
+) -> None:
+    """Spec 21 §7.7's attribution clause: a walk that silently stopped
+    honoring ``ignore_patterns`` would look like a recall win, so the
+    difference between the raw filesystem and the accessor is asserted to be
+    EXACTLY the ignored directories, by name."""
+    vault = _deep_vault(fixture_vault)
+    index = make_index(vault, tmp_path, ignore_patterns=["node_modules"])
+
+    on_disk = {
+        str(p.relative_to(vault))
+        for p in (vault / "areas").rglob("*")
+        if p.is_dir() and not any(part.startswith(".") for part in p.relative_to(vault).parts)
+    }
+    offered = {str(p.relative_to(vault)) for p in index.candidate_folders("areas", "all")}
+    assert on_disk - offered == {"areas/node_modules", "areas/node_modules/deep"}
+    assert offered - on_disk == set()
+
+    # Firing control: without the pattern the same walk offers them.
+    unfiltered = make_index(vault, tmp_path, ignore_patterns=[])
+    assert (
+        on_disk - {str(p.relative_to(vault)) for p in unfiltered.candidate_folders("areas", "all")}
+        == set()
+    )
+
+
+def test_candidate_folders_never_offers_the_archives_root_at_any_depth(
+    fixture_vault: Path, tmp_path: Path
+) -> None:
+    vault = _deep_vault(fixture_vault)
+    index = make_index(vault, tmp_path)
+    for depth in (1, 2, 3, "all"):
+        assert index.candidate_folders("archives", depth) == []
+        assert index.candidate_folders("archive", depth) == []
+    # …while `para_subfolders` — the BROWSING accessor — still lists them.
+    assert index.para_subfolders("archives") == [vault / "archive/capture", vault / "archive/old"]
+
+
+def test_candidate_folders_reads_the_configured_depth_when_none_is_passed(
+    fixture_vault: Path, tmp_path: Path
+) -> None:
+    """``suggestions.max_candidate_depth`` is honored (14 §4.3): the same call
+    answers differently at 1 and at 3, and the shipped default is 3."""
+    from organize_core.config import SuggestionsConfig
+
+    vault = _deep_vault(fixture_vault)
+
+    def index_at(depth: object) -> VaultIndex:
+        config = Config(
+            vault=VaultConfig(root=vault),
+            suggestions=SuggestionsConfig(max_candidate_depth=depth),  # type: ignore[arg-type]
+        )
+        idx = VaultIndex(config, tmp_path / f"state-{depth}" / "index.json")
+        idx.load()
+        return idx
+
+    # No ignore_patterns here, so `node_modules` (and at depth 3 its child)
+    # are on the ballot too: 1 → {a1, health, relationships, node_modules};
+    # 3 → those plus {a1/b1, a1/b1/c1, node_modules/deep}.
+    assert len(index_at(1).candidate_folders("areas")) == 4
+    assert len(index_at(3).candidate_folders("areas")) == 7
+    assert SuggestionsConfig().max_candidate_depth == 3
+    assert len(make_index(vault, tmp_path).candidate_folders("areas")) == 7
+
+
+def test_candidate_folders_rejects_a_depth_that_is_not_a_depth(
+    fixture_vault: Path, tmp_path: Path
+) -> None:
+    index = make_index(fixture_vault, tmp_path)
+    for bad in (0, -1, "deep", "3.5", True):
+        with pytest.raises(ConfigError):
+            index.candidate_folders("areas", bad)  # type: ignore[arg-type]
+    # Firing control: the legal values do not raise.
+    assert index.candidate_folders("areas", 1) == [
+        fixture_vault / "areas/health",
+        fixture_vault / "areas/relationships",
+    ]
+    assert index.candidate_folders("areas", "all") is not None
+
+
+def test_candidate_folders_rejects_an_unknown_para_type(index: VaultIndex) -> None:
+    with pytest.raises(ConfigError):
+        index.candidate_folders("nonsense")
+
+
+def test_candidate_folder_walk_is_cached_and_invalidated(
+    fixture_vault: Path, tmp_path: Path
+) -> None:
+    """Spec 21 §2.4: the walk happens once per candidate-set build, and
+    ``folder.create`` invalidates it. A cache with no invalidation would keep
+    a freshly created folder off the ballot for the life of the server."""
+    vault = _deep_vault(fixture_vault)
+    index = make_index(vault, tmp_path)
+    first = index.candidate_folders("areas", 1)
+    (vault / "areas/brand-new").mkdir()
+
+    # Still cached — the accessor did NOT re-walk.
+    assert index.candidate_folders("areas", 1) == first
+    assert vault / "areas/brand-new" not in first
+
+    generation = index.candidate_generation
+    index.invalidate_folder_cache()
+    assert index.candidate_generation > generation
+    assert vault / "areas/brand-new" in index.candidate_folders("areas", 1)
+
+
+def test_candidate_folders_hands_out_a_copy(fixture_vault: Path, tmp_path: Path) -> None:
+    """A caller that mutates the returned list must not corrupt the cache."""
+    index = make_index(fixture_vault, tmp_path)
+    first = index.candidate_folders("areas", 1)
+    first.clear()
+    assert index.candidate_folders("areas", 1) == [
+        fixture_vault / "areas/health",
+        fixture_vault / "areas/relationships",
+    ]
+
+
+def test_candidate_generation_moves_when_a_note_changes(
+    fixture_vault: Path, tmp_path: Path
+) -> None:
+    """The NOTE half of the ballot rides the same counter — a generation that
+    tracked only directories would serve a cached candidate set still holding
+    a deleted note."""
+    index = make_index(fixture_vault, tmp_path)
+    index.scan()
+    generation = index.candidate_generation
+    note = write_note(fixture_vault, "areas/health/new-note.md", "---\ntags: [x]\n---\nbody\n")
+    index.update_file(note)
+    assert index.candidate_generation > generation
+    after_add = index.candidate_generation
+    index.remove_file(note)
+    assert index.candidate_generation > after_add
+
+
+def test_candidate_notes_are_the_non_archive_para_notes(index: VaultIndex) -> None:
+    """Spec 21 §3.1: captures, archives and ``other`` are never note
+    candidates — an exact set, not a count."""
+    records = index.candidate_notes()
+    assert {record.para_type for record in records} == {"project", "area", "resource"}
+    assert sorted(Path(record.path).name for record in records) == [
+        "ideas.md",
+        "impro.md",
+        "index.md",
+    ]
+    assert [r.path for r in records] == sorted(r.path for r in records)
+
+
 def test_folder_children_returns_subdirs_and_direct_notes(
     index: VaultIndex, fixture_vault: Path
 ) -> None:

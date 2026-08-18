@@ -121,8 +121,13 @@ from organize_core.frontmatter import load_file
 from organize_core.index import NoteRecord, QueryCriteria, VaultIndex
 from organize_core.paths import CorePaths, default_env, expand
 from organize_core.session import start_session
-from organize_core.suggest import CaptureFeaturesView, Suggestion, generate_candidates
-from organize_core.suggest import suggest as rank_suggestions
+from organize_core.suggest import (
+    CandidateSet,
+    CaptureFeaturesView,
+    Suggestion,
+    build_candidate_set,
+)
+from organize_core.suggest import rank as rank_suggestions
 
 logger = logging.getLogger(__name__)
 
@@ -717,9 +722,21 @@ def _split_list(raw: str | None) -> list[str]:
 
 
 def _candidate_folders(index: VaultIndex, config: Config) -> dict[str, list[str]]:
-    """``{para_type: [folder path]}`` for suggest.generate_candidates. The
-    strings here ARE the learning keys — see the module docstring."""
-    return {key: [str(p) for p in index.para_subfolders(key)] for key in config.vault.para_folders}
+    """``{para_type: [folder path]}`` for suggest.build_candidate_set — every
+    folder down to ``suggestions.max_candidate_depth`` levels below a
+    non-archive PARA root (spec 21 §2). The strings here ARE the learning
+    keys — see the module docstring."""
+    return {
+        key: [str(p) for p in index.candidate_folders(key)] for key in config.vault.para_folders
+    }
+
+
+def _candidates(index: VaultIndex, config: Config) -> CandidateSet:
+    """The whole ballot for one CLI invocation: folders (21 §2) plus, when
+    ``suggestions.note_candidates``, the indexed notes (21 §3). Built once —
+    the process scores at most a handful of captures before exiting."""
+    notes = index.candidate_notes() if config.suggestions.note_candidates else []
+    return build_candidate_set(_candidate_folders(index, config), notes, config.suggestions)
 
 
 def _archive_folder(config: Config) -> Path:
@@ -744,6 +761,10 @@ def _suggestion_json(suggestion: Suggestion, config: Config, rank: int | None = 
         "reasons": list(suggestion.reasons),
         "route": suggestion.route,
         "description": suggestion.description,
+        # "folder" | "note" (21 §3.3): accepting a note MERGES, accepting a
+        # folder MOVES. The core states the kind — a client may never infer
+        # it from a trailing ".md", because a folder may be named `foo.md`.
+        "destination_kind": suggestion.destination_kind,
     }
     if rank is not None:
         payload["rank"] = rank
@@ -902,6 +923,7 @@ def cmd_suggest(args: argparse.Namespace) -> int:
     index = _open_index(paths, config)
     learning = learn_mod.load_learning(paths.learning_path)
 
+    exclude_path: str | None = None
     if args.text is not None:
         tags = _split_list(args.tags)
         capture = CaptureFeaturesView.from_text(args.text, tags=tags or None)
@@ -912,19 +934,23 @@ def cmd_suggest(args: argparse.Namespace) -> int:
         capture = CaptureFeaturesView.from_record(record)
         note_tags = list(record.tags)
         subject = _rel(record.path, config)
+        # A note is never a candidate for itself (21 §3.1).
+        exclude_path = record.path
         if args.tags:
             _warn("suggest: --tags is only used with --text; ignoring it for an indexed note")
 
-    candidates = generate_candidates(_candidate_folders(index, config))
-    ranked = rank_suggestions(
+    result = rank_suggestions(
         capture,
-        candidates,
+        _candidates(index, config),
         config.suggestions,
         learning,
         now=time.time(),
         archive_path=str(_archive_folder(config)),
+        exclude_path=exclude_path,
     )
-    ranked = routes_mod.merge_route_suggestions(routes_mod.resolve(note_tags, config), ranked)
+    ranked = routes_mod.merge_route_suggestions(
+        routes_mod.resolve(note_tags, config), list(result.suggestions)
+    )
     ranked = [_with_description(item, index, config) for item in ranked]
 
     if args.json:
@@ -935,6 +961,9 @@ def cmd_suggest(args: argparse.Namespace) -> int:
                     _suggestion_json(s, config, rank)
                     for rank, s in enumerate(ranked, start=1)
                 ],
+                # Note rows dropped as the same answer written twice
+                # (21 §3.2) — reported so a silent drop is never invisible.
+                "suppressed_duplicates": result.suppressed_duplicates,
             }
         )
         return 0

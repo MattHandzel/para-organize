@@ -279,6 +279,100 @@ describe("E2E: a real organize session in headless Neovim (spec 09 §3)", functi
     assert.are.equal(next_record.path, vim.api.nvim_buf_get_name(ui.current_bufs().capture))
   end)
 
+  -- Spec 15 §10.10, the 09 §3 gate for the presentation layer: a REAL vault
+  -- session, cycled through the field modes, with a REAL edit written by
+  -- `:w` — asserted against BYTES ON DISK. If any part of the card, the
+  -- foldtext or the mode hint were buffer text rather than virtual text,
+  -- this is where it would reach the vault.
+  it("cycles field modes, `:w`s a real edit, accepts — and only the edit reaches disk", function()
+    local session = start_session()
+    local record = session.captures[session.current]
+    local source = record.path
+    local top = session.suggestions[1]
+    local before = read(source)
+
+    -- Cycle compact → full → raw → compact against the live core's payload.
+    local ui_mod = require("para-organize.ui")
+    assert.are.equal("full", ui_mod.cycle_fields())
+    assert.are.equal("raw", ui_mod.cycle_fields())
+    assert.are.equal("compact", ui_mod.cycle_fields())
+    -- Nothing the plugin drew is in the buffer, and nothing was written yet.
+    assert.are.equal(before, read(source))
+
+    -- Matt appends a body line and writes the file himself (spec 10 §4).
+    local capture_buf = ui_mod.current_bufs().capture
+    local line_count = vim.api.nvim_buf_line_count(capture_buf)
+    vim.api.nvim_buf_set_lines(capture_buf, line_count, line_count, false, { "E2E EDIT MARKER" })
+    vim.api.nvim_win_call(ui_mod.current_wins().capture, function()
+      vim.cmd("silent write")
+    end)
+
+    local after_write = read(source)
+    assert.are.equal(before .. "E2E EDIT MARKER\n", after_write)
+    for _, artifact in ipairs({ "Capture 1 of", "▸ frontmatter", "more: ", "cycles, zo opens", "-- raw --" }) do
+      assert.is_nil(after_write:find(artifact, 1, true), artifact .. " leaked into the vault file")
+    end
+
+    -- …and it survives the accept: the destination carries the edit, and its
+    -- frontmatter differs from the source's only by 05 §2's tag and the
+    -- organized status.
+    local dest_file = top.path .. "/" .. basename(source)
+    -- `:w` re-issues `note.get` (spec 15 §3), so wait for the pane to settle
+    -- back onto suggestions before dispatching <CR>.
+    until_true(function()
+      return session.view == "suggestions" and #(session.suggestions or {}) > 0
+    end, 30000, "the suggestions to return after the write")
+    actions.accept()
+    until_true(function()
+      return exists(dest_file)
+    end, 30000, "the moved copy to appear at " .. dest_file)
+
+    local moved = read(dest_file)
+    assert.is_truthy(moved:find("E2E EDIT MARKER", 1, true), moved)
+
+    local function split(text)
+      local fm, body = text:match("^%-%-%-\n(.-)\n%-%-%-\n(.*)$")
+      return fm, body
+    end
+    local src_fm, src_body = split(after_write)
+    local dst_fm, dst_body = split(moved)
+    assert.is_truthy(src_fm, "the source has frontmatter")
+    -- BODY: byte-identical, Matt's edit included.
+    assert.are.equal(src_body, dst_body)
+
+    -- FRONTMATTER: every source line survives verbatim except the status,
+    -- and every added line is the tag 05 §2 writes.
+    local src_lines = vim.split(src_fm, "\n", { plain = true })
+    local dst_set = {}
+    for _, line in ipairs(vim.split(dst_fm, "\n", { plain = true })) do
+      dst_set[line] = (dst_set[line] or 0) + 1
+    end
+    -- The core rewrites exactly three things on a move: the status, the
+    -- edit date, and 05 §2's destination tag. Everything else must survive
+    -- the round trip byte-for-byte.
+    local function rewritten(line)
+      return line:match("^processing_status:") or line:match("^last_edited_date:")
+    end
+    for _, line in ipairs(src_lines) do
+      if not rewritten(line) then
+        assert.is_truthy(dst_set[line], ("frontmatter line %q did not survive the move"):format(line))
+        dst_set[line] = dst_set[line] - 1
+        if dst_set[line] == 0 then
+          dst_set[line] = nil
+        end
+      end
+    end
+    local folder = basename(top.path)
+    for line, count in pairs(dst_set) do
+      if count > 0 and line ~= "" then
+        assert.is_truthy(
+          rewritten(line) or line:find(folder, 1, true) or line:match("^tags:") or line:match("^%s*%-%s"),
+          ("unexpected frontmatter line in the destination: %q"):format(line)
+        )
+      end
+    end
+  end)
+
   it("`:ParaOrganize stop` leaves zero orphan state (spec 09 §2)", function()
     start_session()
     local bufs = ui.current_bufs()

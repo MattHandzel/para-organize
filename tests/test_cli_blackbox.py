@@ -281,6 +281,84 @@ def test_suggest_json_entries_carry_the_rank_move_documents(core: Core) -> None:
         assert {"path", "score", "rank", "reasons"} <= set(entry)
 
 
+def test_suggest_json_marks_a_note_destination_as_a_merge_target(core: Core) -> None:
+    """Spec 21 §3.3: ``destination_kind`` is ADDITIVE and typed, and it
+    decides whether accepting the row MOVES or MERGES. This capture's `health`
+    tag names both the FOLDER `areas/health` and the NOTE
+    `areas/health/index.md` (whose `title: Health` is match key (d)) — the
+    note was unreachable before 21 at any setting."""
+    core.index()
+    proc = core.run("suggest", QUIRK_FILES["iso_filename"], "--json")
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    kinds = {e["relative_path"]: e["destination_kind"] for e in payload["suggestions"]}
+    assert kinds["areas/health/index.md"] == "note"
+    assert kinds["areas/health"] == "folder"
+    assert kinds["archive/capture/raw_capture"] == "folder"
+    # §3.2's counter, reported so a silent drop is never invisible.
+    assert payload["suppressed_duplicates"] == 0
+
+
+def test_suggest_honors_note_candidates_false(core: Core) -> None:
+    """§3.6's off switch, through the real config file: `false` restores the
+    folders-only ballot. The honored-key test doc 14 §4.3 requires."""
+    core.index()
+    note_path = QUIRK_FILES["iso_filename"]
+    with_notes = json.loads(core.run("suggest", note_path, "--json").stdout)["suggestions"]
+    assert "areas/health/index.md" in [e["relative_path"] for e in with_notes]
+
+    (core.config_dir / "config.toml").write_text(
+        _config_text(core.vault, extra="\n[suggestions]\nnote_candidates = false\n"),
+        encoding="utf-8",
+    )
+    without = json.loads(core.run("suggest", note_path, "--json").stdout)["suggestions"]
+    assert "areas/health/index.md" not in [e["relative_path"] for e in without]
+    assert {e["destination_kind"] for e in without} == {"folder"}
+
+
+def test_suggest_honors_max_candidate_depth(core: Core) -> None:
+    """§2.1, as a number: a folder two levels below a PARA root is on the
+    ballot at the default 3 and off it at 1 — the setting that reproduces the
+    pre-21 behaviour exactly."""
+    (core.vault / "areas/health/training/rehab").mkdir(parents=True)
+    core.index()
+
+    def offered(extra: str) -> set[str]:
+        (core.config_dir / "config.toml").write_text(
+            _config_text(core.vault, extra=extra), encoding="utf-8"
+        )
+        proc = core.run("suggest", "--text", "rehab notes", "--tags", "rehab", "--json")
+        assert proc.returncode == 0, proc.stderr
+        return {e["relative_path"] for e in json.loads(proc.stdout)["suggestions"]}
+
+    assert "areas/health/training/rehab" in offered("\n[suggestions]\nmax_candidate_depth = 3\n")
+    assert "areas/health/training/rehab" not in offered(
+        "\n[suggestions]\nmax_candidate_depth = 1\n"
+    )
+    assert "areas/health/training/rehab" in offered(
+        '\n[suggestions]\nmax_candidate_depth = "all"\n'
+    )
+
+
+def test_suggest_honors_candidate_stopwords(core: Core) -> None:
+    """§3.4, through the real config file: the shipped default keeps a
+    capture whose only token is `voice` off `areas/voice`, and emptying the
+    list puts it back. Both directions, so neither is vacuous."""
+    (core.vault / "areas/voice").mkdir(parents=True)
+    core.index()
+
+    def offered(extra: str) -> set[str]:
+        (core.config_dir / "config.toml").write_text(
+            _config_text(core.vault, extra=extra), encoding="utf-8"
+        )
+        proc = core.run("suggest", "--text", "", "--tags", "voice", "--json")
+        assert proc.returncode == 0, proc.stderr
+        return {e["relative_path"] for e in json.loads(proc.stdout)["suggestions"]}
+
+    assert "areas/voice" not in offered("")
+    assert "areas/voice" in offered("\n[suggestions]\ncandidate_stopwords = []\n")
+
+
 def test_suggest_without_note_or_text_is_a_usage_error(core: Core) -> None:
     proc = core.run("suggest")
     assert proc.returncode == 2

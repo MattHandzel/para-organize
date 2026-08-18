@@ -4,7 +4,9 @@ Reference implementation: `d753672~1` (`suggest.lua`, `learn.lua`); recovered co
 
 ## 1. Candidate generation
 
-For the current capture, candidates are **every immediate subfolder** of each PARA root except archives (`projects/*`, `areas/*`, `resources/*`). Each candidate carries `{path, name, normalized_name, type}` where `normalized_name` = lowercased, trimmed, spaces/underscores→hyphens (same normalizer used for tags — one shared `normalize_tag()`).
+For the current capture, candidates are: (a) **every folder** under each non-archive PARA root, from depth 1 down to `suggestions.max_candidate_depth` levels below that root, honoring `vault.ignore_patterns` and skipping dot-directories; **and** (b) when `suggestions.note_candidates` is true, **every indexed note** whose `para_type` is a non-archive PARA type. Each candidate carries `{path, name, normalized_name, type, kind}` where `kind ∈ {"folder", "note"}` and `normalized_name` comes from the one shared `normalize_tag()` (lowercased, trimmed, spaces/underscores→hyphens — the same normalizer used for tags). Scoring (§2) is identical for both kinds.
+
+*(Amended by spec 21 §1.4, landed with the code that implements it. The pre-amendment sentence read "candidates are **every immediate subfolder** of each PARA root except archives", which `index.py` and `suggest.py` implemented faithfully — spec 21 §1 measures what that cost: 1,426 of 1,562 folders and all 7,834 notes structurally unreachable. `note_candidates = false` with `max_candidate_depth = 1` restores the pre-amendment ballot exactly, which is what spec 21 §7.4's parity golden asserts.)*
 
 If `suggestions.always_show_archive` (default true), append a synthetic suggestion `{name="Archive Now", type="archives", score=0.1, reasons={"Safe default option"}, path=<archive capture dir>}`.
 

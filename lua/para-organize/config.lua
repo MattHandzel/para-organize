@@ -137,16 +137,58 @@ local SCHEMA = {
         capture_pane_keymaps = { type = "string", enum = { "core", "navigation", "none" } },
         auto_move_to_new_folder = { type = "boolean" },
         close_on_complete = { type = "boolean" },
-        display = {
+        -- ⚠ `ui.display` DOES NOT EXIST (spec 15 §2, ruling R1). The section
+        -- is deleted, every key has a new home, and `moved_section` makes the
+        -- validator report the replacement for each CHILD key rather than a
+        -- bare "unknown key `ui.display`". No document may add a key here.
+        display = { moved_section = true },
+
+        -- Spec 15 §7 — the two CLOSED records this document lands FIRST
+        -- (ruling R2), so docs 16 and 17 append leaves to records that
+        -- already exist instead of inventing a second spelling.
+        capture = {
           fields = {
             show_position = { type = "boolean" },
+            mode = { type = "string", enum = { "compact", "full", "raw" } },
+            frontmatter = { type = "string", enum = { "fold", "none" } },
+            foldtext = { type = "string_or_function" },
+            max_card_lines = { type = "number", min = 0 },
+            render_budget_ms = { type = "number", min = 0 },
+            render = { type = "function" },
+            fields = {
+              fields = {
+                -- LIST LEAVES: replaced wholesale, never index-merged.
+                pinned = { type = "string_list" },
+                hidden = { type = "string_list" },
+                pin_metadata_fields = { type = "boolean" },
+                show_empty_pinned = { type = "boolean" },
+                show_rest_keys = { type = "boolean" },
+                -- One of the three deliberate free maps: the user's own
+                -- frontmatter keys are the key space.
+                labels = { free = true, value = { type = "string" } },
+              },
+            },
+            formatters = { free = true, value = { type = "formatter" } },
+          },
+        },
+        organize = {
+          fields = {
             show_scores = { type = "boolean" },
             show_reasons = { type = "boolean" },
-            show_metadata_summary = { type = "boolean" },
-            timestamp_format = { type = "string" },
-            hide_capture_id = { type = "boolean" },
-            hide_modalities = { type = "boolean" },
-            hide_location = { type = "boolean" },
+            max_reasons = { type = "number", min = 0 },
+            score_thresholds = {
+              fields = {
+                high = { type = "number" },
+                medium = { type = "number" },
+              },
+            },
+            render_row = { type = "function" },
+            -- Leaves owned by doc 16 §3.x; declared here because 15 lands
+            -- the record (ruling R2). 16 fills in the behaviour.
+            show_progress = { type = "boolean" },
+            numeric_accept = { type = "boolean" },
+            preview_notes = { type = "number", min = 0 },
+            preview_debounce_ms = { type = "number", min = 0 },
           },
         },
         highlights = {
@@ -222,8 +264,21 @@ M.MOVED_KEYS = {
   ["ui.icons.enabled"] = "deleted: an EMPTY ui.icons table (the default) renders spec 03's literal [P]/[A]/[R]/[🗑]; set the per-type keys to opt in",
   ["ui.icons.folder"] = "renamed: use ui.icons.dir (spec 03 §3 renders `[D] name` for directories)",
   ["ui.icons.tag"] = "deleted: tags are rendered in the capture header, not iconified (spec 03 §3)",
-  ["ui.display.show_counts"] = "renamed: use ui.display.show_position (\"Capture i of n\", spec 03 §3)",
-  ["ui.display.show_timestamps"] = "deleted: the header timestamp is always rendered; format it with ui.display.timestamp_format",
+  ["ui.display.show_counts"] = "renamed: use ui.capture.show_position (\"Capture i of n\", spec 15 §7)",
+  ["ui.display.show_timestamps"] = "deleted: the timestamp is a pinned field — configure it with ui.capture.formatters.timestamp (spec 15 §4)",
+  -- Spec 15 §2's relocation table, in full. `ui.display` is DELETED as a
+  -- section (ruling R1) and every key names where it went.
+  ["ui.display.show_position"] = "moved: use ui.capture.show_position (spec 15 §7)",
+  ["ui.display.timestamp_format"] = "moved: use ui.capture.formatters.timestamp = { name = \"datetime\", format = … } — the default is now \"calendar\" (spec 15 §4)",
+  ["ui.display.show_metadata_summary"] = "moved: use ui.capture.fields.pin_metadata_fields (spec 15 §2)",
+  ["ui.display.hide_capture_id"] = "moved: use ui.capture.fields.hidden, which ships with capture_id, id and aliases (spec 15 §2)",
+  ["ui.display.hide_modalities"] = "moved: use ui.capture.fields.hidden, which ships with modalities (spec 15 §2)",
+  ["ui.display.hide_location"] = "moved: use ui.capture.fields.hidden, which ships with location (spec 15 §2)",
+  ["ui.display.show_scores"] = "moved: use ui.organize.show_scores (spec 15 §6)",
+  ["ui.display.show_reasons"] = "moved: use ui.organize.show_reasons (spec 15 §6)",
+  ["ui.display.show_progress"] = "moved: use ui.organize.show_progress (spec 15 §2; never shipped under the old name)",
+  ["ui.display.score_high"] = "moved: use ui.organize.score_thresholds.high — a NUMBER; ui.highlights.score_high is the highlight-GROUP name and is unchanged (ruling R3)",
+  ["ui.display.score_medium"] = "moved: use ui.organize.score_thresholds.medium — a NUMBER; ui.highlights.score_medium is the highlight-GROUP name and is unchanged (ruling R3)",
   ["ui.highlights.project"] = "deleted: per-PARA-type highlight groups were dead keys (08 §A35); scores use score_high/medium/low",
   ["ui.highlights.area"] = "deleted: per-PARA-type highlight groups were dead keys (08 §A35)",
   ["ui.highlights.resource"] = "deleted: per-PARA-type highlight groups were dead keys (08 §A35)",
@@ -317,6 +372,42 @@ local function check_leaf(path, rule, value, errors)
     errors[#errors + 1] = ("`%s` must be a string or a list of strings (got %s)"):format(path, actual)
     return
   end
+  if kind == "string_list" then
+    -- ⚠ A LIST LEAF (spec 15 §2). The validator only types it; the
+    -- wholesale-replacement half is `fields.apply_list_leaves`, run after the
+    -- deep-extend in both `config.setup` and `ui.setup`.
+    if not is_list(value) then
+      errors[#errors + 1] = ("`%s` must be a list of strings (got %s)"):format(path, actual)
+      return
+    end
+    for i, item in ipairs(value) do
+      if type(item) ~= "string" then
+        errors[#errors + 1] = ("`%s[%d]` must be a string (got %s)"):format(path, i, type(item))
+      end
+    end
+    return
+  end
+  if kind == "string_or_function" then
+    if actual ~= "string" and actual ~= "function" then
+      errors[#errors + 1] = ("`%s` must be a string or a function (got %s)"):format(path, actual)
+    end
+    return
+  end
+  if kind == "formatter" then
+    -- `"calendar"` | `{ name = "datetime", format = … }` | function (§4).
+    if actual == "string" or actual == "function" then
+      return
+    end
+    if actual == "table" then
+      if type(value.name) ~= "string" then
+        errors[#errors + 1] = ("`%s.name` must be a string naming a formatter (got %s)"):format(path, type(value.name))
+      end
+      return
+    end
+    errors[#errors + 1] =
+      ("`%s` must be a formatter name, a { name = … } table, or a function (got %s)"):format(path, actual)
+    return
+  end
   if kind == "keymap" then
     -- `false` / `""` disable a binding — spec 03 §3 "all rebindable".
     if value == false or value == nil then
@@ -354,6 +445,34 @@ local function check_node(prefix, node, value, errors)
     return
   end
 
+  -- A section that no longer exists. Every CHILD key is reported with its
+  -- replacement, so `ui.display.show_scores = false` names
+  -- `ui.organize.show_scores` instead of a bare "unknown key `ui.display`" —
+  -- and a key no doc ever shipped still fails, because the section is gone
+  -- (spec 15 §10.5(c)+(d)).
+  if node.moved_section then
+    for key in pairs(value) do
+      local path = dotted(prefix, key)
+      local moved = M.MOVED_KEYS[path]
+      if moved then
+        errors[#errors + 1] = ("`%s` is no longer a plugin setting — %s"):format(path, moved)
+      else
+        errors[#errors + 1] = ("unknown key `%s` — the `%s` section was deleted by spec 15; %s"):format(
+          path,
+          prefix,
+          "per-pane display keys live under `ui.capture.*` and `ui.organize.*`"
+        )
+      end
+    end
+    if next(value) == nil then
+      errors[#errors + 1] = ("unknown key `%s` — the section was deleted by spec 15; %s"):format(
+        prefix,
+        "use `ui.capture.*` / `ui.organize.*`"
+      )
+    end
+    return
+  end
+
   if node.free then
     for key, item in pairs(value) do
       local path = dotted(prefix, key)
@@ -373,7 +492,9 @@ local function check_node(prefix, node, value, errors)
   for key, item in pairs(value) do
     local path = dotted(prefix, key)
     local rule = node.fields[key]
-    if rule == nil then
+    if rule ~= nil and rule.moved_section then
+      check_node(path, rule, item, errors)
+    elseif rule == nil then
       local moved = M.MOVED_KEYS[path] or M.MOVED_KEYS[tostring(key)]
       if moved then
         errors[#errors + 1] = ("`%s` is no longer a plugin setting — %s"):format(path, moved)
@@ -409,6 +530,27 @@ function M.validate(opts)
 
   local errors = {}
   check_node("", SCHEMA, opts, errors)
+
+  -- A key in BOTH `pinned` and `hidden` is always a mistake, and 09 §1.5
+  -- forbids guessing — so there is no precedence rule to remember, only an
+  -- error naming the dotted key and the field (spec 15 §2).
+  local capture_fields = (((opts.ui or {}).capture or {}).fields) or {}
+  if type(capture_fields.pinned) == "table" and type(capture_fields.hidden) == "table" then
+    local pinned = {}
+    for _, key in ipairs(capture_fields.pinned) do
+      pinned[key] = true
+    end
+    local both = {}
+    for _, key in ipairs(capture_fields.hidden) do
+      if pinned[key] then
+        both[#both + 1] = tostring(key)
+      end
+    end
+    table.sort(both)
+    for _, key in ipairs(both) do
+      errors[#errors + 1] = ("`ui.capture.fields` lists `%s` in BOTH `pinned` and `hidden` — pick one"):format(key)
+    end
+  end
 
   -- The one non-UI value the plugin still owns has a hard OS limit.
   local socket = opts.socket_path or (type(opts.core) == "table" and opts.core.socket_path)
@@ -449,6 +591,12 @@ function M.setup(opts)
   end
   M._user = vim.deepcopy(opts or {})
   local merged = vim.tbl_deep_extend("force", base_defaults(), M._user)
+  -- ⚠ `ui.capture.fields.pinned` / `.hidden` are LIST LEAVES. Without this,
+  -- `pinned = { "tags" }` over the six-entry default index-merges into
+  -- `{ "tags", "summary", "timestamp", "context", "tags", "sources" }`: the
+  -- user asked for one row and got six, with `tags` in it twice (spec 15 §2,
+  -- pinned by §10.4).
+  require("para-organize.ui.fields").apply_list_leaves(merged, M._user)
 
   -- NORMALISE AT THE BOUNDARY. `socket_path` and `core_cmd` are accepted both
   -- at the top level and inside `core` (core.lua reads either). Both spellings
