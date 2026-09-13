@@ -162,7 +162,29 @@ class SuggestionsConfig:
     #: Whether indexed NOTES are destinations too (spec 21 §3). `false`
     #: restores the folders-only ballot; `false` + `max_candidate_depth = 1`
     #: reproduces the pre-21 output byte for byte, which is the parity golden.
-    note_candidates: bool = True
+    #:
+    #: DEFAULT FALSE — opt-in until the §5.3 quality gates pass. Measured on
+    #: 400 real captures (`tools/recall_sweep.py --limit 400 --seed 1`), with
+    #: everything else at its shipped default:
+    #:
+    #:   depth 3, notes OFF -> rank-1 is a note/folder for   6 / 182 captures
+    #:   depth 3, notes ON  -> rank-1 is a note/folder for 255 /   2 captures
+    #:
+    #: i.e. the note ballot did not ADD destinations, it DISPLACED the folder
+    #: ranking almost entirely, and its single biggest rank-1 destination was
+    #: `projects/inactive-projects/san-franciso-travel/reflection.md` — a dead
+    #: project's reflection note — taking 15.6% of the backlog. Two
+    #: independent adversarial verifiers found the same thing. The accept path
+    #: is also unfinished: `<CR>` on a note row issues `op.move` at a FILE
+    #: path, which `move` refuses (`dest_folder.is_dir()`), so the row cannot
+    #: be acted on at all. A suggestion that outranks the working ones and
+    #: then cannot be accepted is worse than no suggestion.
+    #:
+    #: The DEPTH half of spec 21 ships ON: at depth 3 with notes off, captures
+    #: with a rank-1 answer went 103 -> 188 of 400, at p95 0.14 ms.
+    #: Flip this back to `true` when 21 §5.3's gates pass AND selecting a note
+    #: merges (doc 19's multi-target merge) instead of moving.
+    note_candidates: bool = False
     #: Cap on NOTE rows in the final list, applied after ranking; folders
     #: fill the remainder and `max_suggestions` is unchanged (21 §3.3).
     max_note_suggestions: int = 3
@@ -1927,9 +1949,13 @@ tag_suffix_strip = ["-system", "-systems"]
 # destination picker's browse depth is a separate knob.
 max_candidate_depth = 3
 
-# Whether existing NOTES are offered as destinations too. Accepting a note
-# MERGES the capture into it (spec 05 §4) instead of moving the file.
-note_candidates = true
+# Whether existing NOTES are offered as destinations too. OFF by default: on
+# 400 real captures the note ballot did not add destinations, it DISPLACED the
+# folder ranking (rank-1 was a note for 255 of 257 covered captures), led with
+# a dead project's reflection note, and its accept path still issues a move at
+# a file path instead of a merge. Turn it on once you have measured it on YOUR
+# vault with `tools/recall_sweep.py`.
+note_candidates = false
 
 # At most this many note rows in one suggestion list; folders fill the rest,
 # and `max_suggestions` (the total) is unchanged. Set it to `max_suggestions`

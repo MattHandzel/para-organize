@@ -413,9 +413,16 @@ def test_suggest_for_note_ranks_the_matching_folder_first(client: RpcClient) -> 
     # — and the folder wins the tie on NAME ("health" < "index"), so
     # kind_rank never gets a vote here (21 §3.2: it can only reorder a tie on
     # score AND name).
+    #
+    # The note row (`areas/health/index.md`, tying at 3.7 and losing the name
+    # tie-break) is absent HERE because `suggestions.note_candidates` ships
+    # OFF — the ballot is opt-in until spec 21 §5.3's quality gates pass. The
+    # note ranking and its tie-breaks are covered directly in
+    # `tests/test_destination_recall.py`, which opts in explicitly rather than
+    # inheriting a default; this test is about the wire shape of the folder
+    # answer, which is what a default install actually receives.
     assert [(s["name"], s["type"], s["score"], s["destination_kind"]) for s in suggestions] == [
         ("health", "area", 3.7, "folder"),
-        ("index", "area", 3.7, "note"),
         ("Archive Now", "archive", 0.1, "folder"),
     ]
     assert suggestions[0]["reasons"] == [

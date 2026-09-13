@@ -615,20 +615,25 @@ describe("spec 15 — config law", function()
       {
         key = "ui.organize.score_thresholds",
         cfg = { ui = { organize = { score_thresholds = { high = 3.0, medium = 1.5 } } } },
+        -- ⚠ The score buckets emit the plugin's OWN groups now, not the stock
+        -- `Diagnostic*` ones — `ui.HL_GROUPS` `default`-links each to the
+        -- stock group it used to name, so the rendered COLOR is unchanged
+        -- while `ParaOrganizeScoreHigh` becomes a real hook a colorscheme can
+        -- take over (spec 14 §5).
         probe = function()
           local groups = {}
           for _, mark in ipairs(
             vim.api.nvim_buf_get_extmarks(ui.current_bufs().organize, -1, 0, -1, { details = true })
           ) do
             local group = (mark[4] or {}).hl_group
-            if group and group:match("Diagnostic") then
+            if group and group:match("^ParaOrganizeScore") then
               groups[#groups + 1] = group
             end
           end
           table.sort(groups)
           return table.concat(groups, ",")
         end,
-        default_is = "DiagnosticOk",
+        default_is = "ParaOrganizeScoreHigh",
       },
       {
         key = "ui.organize.render_row",

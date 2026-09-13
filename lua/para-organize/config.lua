@@ -69,6 +69,10 @@ local function base_defaults()
     core_log = nil,
     spawn = true,
     spawn_timeout_ms = 2000,
+    -- How long ONE dial may wait for the core's hello line. Separate from
+    -- `timeout_ms` (the per-request budget) because a cold core indexes the
+    -- vault before it answers — slow on a large vault, but not a failure.
+    handshake_timeout_ms = 5000,
     timeout_ms = 5000,
     reconnect = true,
   }
@@ -118,6 +122,7 @@ local SCHEMA = {
         core_log = { type = "string" },
         spawn = { type = "boolean" },
         spawn_timeout_ms = { type = "number", min = 1 },
+        handshake_timeout_ms = { type = "number", min = 1 },
         timeout_ms = { type = "number", min = 1 },
         reconnect = { type = "boolean" },
         on_event = { type = "function" },

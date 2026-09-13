@@ -91,6 +91,14 @@ local function fold_closed(win, line)
   end)
 end
 
+--- Last line of the closed fold containing `line`, or -1. The card must be
+--- anchored at or past this, never inside it — see the hang regression guard.
+local function fold_closed_end(win, line)
+  return vim.api.nvim_win_call(win, function()
+    return vim.fn.foldclosedend(line)
+  end)
+end
+
 local function buf_binds(buf, lhs)
   for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
     if map.lhs == lhs then
@@ -515,6 +523,28 @@ describe("spec 15 — capture presentation", function()
       -- ⚠ and the FOLD is NOT recomputed on TextChanged: re-closing a fold
       -- mid-insert is a hostile edit experience (§3's failure table).
       assert.are.equal(1, fold_closed(ui.current_wins().capture, 1))
+    end)
+
+    --- ⚠ REGRESSION GUARD (2026-08-21). This whole spec file used to HANG
+    --- here — `vim.wait` never returned, not even past its own timeout, and
+    --- `:redraw` hung too. Root cause was NOT the timer: `render_card` had a
+    --- hardcoded `if true then close_line = nil end` that pinned the card's
+    --- extmark to row 0 with `virt_lines_above`, i.e. INSIDE the closed
+    --- frontmatter fold. Neovim forces `topfill = 0` over a closed fold, and
+    --- the redraw spun on it forever. The card was also invisible on screen,
+    --- which is the defect §10.12 exists to catch. Keep this assertion: it
+    --- fails fast and loudly if the anchor ever regresses to row 0.
+    it("never anchors the card inside the closed fold (the hang regression)", function()
+      mount()
+      local marks = vim.api.nvim_buf_get_extmarks(ui.current_bufs().capture, NS_CAPTURE, 0, -1, { details = true })
+      assert.are.equal(1, #marks)
+      local row, above = marks[1][2], marks[1][4].virt_lines_above
+      local closed_through = fold_closed_end(ui.current_wins().capture, 1)
+      assert.are.equal(CLOSE_LINE, closed_through)
+      -- Anchored at or past the fold's last line, so the card is never drawn
+      -- into a region Neovim refuses to give fill lines to.
+      assert.is_true(row >= closed_through, ("row %d is inside the fold (1..%d)"):format(row, closed_through))
+      assert.is_true(above)
     end)
   end)
 

@@ -98,14 +98,19 @@ M.DEFAULTS = {
       preview_notes = 5,
       preview_debounce_ms = 120,
     },
+    -- ⚠ These name the plugin's OWN groups, not the stock ones, so that the
+    -- `ParaOrganize*` hook spec 14 §5 advertises is what actually renders.
+    -- Each is `default`-linked to a stock group in `M.HL_GROUPS`, so the
+    -- out-of-the-box colors are unchanged — but a colorscheme (or the user,
+    -- via `ui.highlights.selected = "IncSearch"`) can now take them over.
     highlights = {
-      selected = "Visual",
-      header = "Title",
-      reason = "Comment",
-      score_high = "DiagnosticOk",
-      score_medium = "DiagnosticWarn",
-      score_low = "Comment",
-      hint = "Comment",
+      selected = "ParaOrganizeSelected",
+      header = "ParaOrganizeHeader",
+      reason = "ParaOrganizeReason",
+      score_high = "ParaOrganizeScoreHigh",
+      score_medium = "ParaOrganizeScoreMedium",
+      score_low = "ParaOrganizeScoreLow",
+      hint = "ParaOrganizeHint",
     },
     -- Empty by default so spec 03's literal `[P]`/`[A]`/`[R]`/`[🗑]` markers
     -- are what render; set e.g. `icons.project = " "` to override.
@@ -185,7 +190,56 @@ end
 --- `hidden` are lists, and `vim.tbl_deep_extend` merges array-like tables BY
 --- INDEX — `pinned = { "tags" }` over the six-entry default would otherwise
 --- yield six rows with `tags` in twice (spec 15 §2, pinned by §10.4).
+--- Every `ParaOrganize*` group the plugin can emit, and the stock group each
+--- one falls back to. Spec 14 §5 lists these as a STABLE public hook for
+--- colorscheme authors; before this table they were NAMED in `render.lua`'s
+--- fallbacks and defined nowhere, so styling `ParaOrganizeScoreHigh` in a
+--- colorscheme changed nothing (measured: `nvim_get_hl` returned an empty
+--- dict, indistinguishable from a group that does not exist).
+---
+--- ⚠ `default = true` is load-bearing: a colorscheme that defines any of
+--- these WINS, and we only fill in the ones it left alone.
+M.HL_GROUPS = {
+  ParaOrganizeSelected = "Visual",
+  ParaOrganizeHeader = "Title",
+  ParaOrganizeReason = "Comment",
+  ParaOrganizeHint = "Comment",
+  ParaOrganizeScoreHigh = "DiagnosticOk",
+  ParaOrganizeScoreMedium = "DiagnosticWarn",
+  ParaOrganizeScoreLow = "Comment",
+}
+
+--- Define the fallback groups. Idempotent, so `setup()` may call it freely.
+--- Re-run on `ColorScheme` because `:colorscheme` issues `:hi clear`, which
+--- wipes even `default` links — without the autocmd the panes would lose
+--- their colors the first time the user switched theme mid-session.
+function M.apply_highlights()
+  for name, link in pairs(M.HL_GROUPS) do
+    pcall(vim.api.nvim_set_hl, 0, name, { default = true, link = link })
+  end
+end
+
+local function install_highlight_autocmd()
+  if M._hl_autocmd then
+    return
+  end
+  local ok, group = pcall(vim.api.nvim_create_augroup, "ParaOrganizeHighlights", { clear = true })
+  if not ok then
+    return
+  end
+  local ok_au, id = pcall(vim.api.nvim_create_autocmd, "ColorScheme", {
+    group = group,
+    pattern = "*",
+    callback = function()
+      M.apply_highlights()
+    end,
+  })
+  M._hl_autocmd = ok_au and id or nil
+end
+
 function M.setup(user_config)
+  M.apply_highlights()
+  install_highlight_autocmd()
   local base = vim.deepcopy(M.DEFAULTS)
   local merged = base
   local from_integrator = integrator_config()
@@ -592,20 +646,49 @@ function M._install_capture_autocmds(buf)
   --- them, and re-closing a fold mid-insert is a hostile edit experience that
   --- would contradict the never-re-close-a-user-opened-fold rule. Only the
   --- CARD re-renders here, debounced.
-  local timer
-  local function debounce()
-    local delay = 150
-    if timer then
+  --- The pending debounce timer lives on the UI handle rather than in a
+  --- closure upvalue for two reasons: `unmount` must CLOSE it (a live libuv
+  --- handle keeps the loop alive and leaks across specs), and
+  --- `_flush_capture_debounce` must be able to fire it synchronously.
+  local function stop_timer()
+    local t = ui._capture_timer
+    ui._capture_timer = nil
+    if t then
       pcall(function()
-        timer:stop()
-        timer:close()
+        t:stop()
+        t:close()
       end)
     end
-    timer = (vim.uv or vim.loop).new_timer()
+  end
+
+  local function debounce()
+    local delay = 150
+    stop_timer()
+    local timer = (vim.uv or vim.loop).new_timer()
     if not timer then
       return redraw()
     end
-    timer:start(delay, 0, vim.schedule_wrap(redraw))
+    ui._capture_timer = timer
+    timer:start(
+      delay,
+      0,
+      vim.schedule_wrap(function()
+        stop_timer()
+        redraw()
+      end)
+    )
+  end
+
+  --- TEST SEAM — run a pending debounced re-render NOW, skipping the timer.
+  --- Lets a spec assert the post-debounce state without spending the 150ms
+  --- of wall clock, and without depending on timer scheduling at all.
+  ui.flush_capture_debounce = function()
+    if ui._capture_timer then
+      stop_timer()
+      redraw()
+      return true
+    end
+    return false
   end
 
   local ids = ui._capture_autocmds
@@ -988,7 +1071,6 @@ local function draw_capture(state, cfg)
 
   local line_count = vim.api.nvim_buf_line_count(buf)
   local row, above = 0, true
-  if true then close_line = nil end
   if close_line and ctx.mode ~= "raw" then
     if close_line >= line_count then
       -- The only case where the card renders BELOW its anchor: there is no
@@ -1343,10 +1425,31 @@ end
 --- Leaves zero para-organize buffers, windows or autocmds behind
 --- (spec 09 §2). A real capture buffer is only deleted when this plugin
 --- created it AND it has no unsaved changes — never lose Matt's edits.
+--- TEST SEAM — fire a pending debounced capture re-render synchronously.
+--- Returns true if one was pending. See the comment on
+--- `ui.flush_capture_debounce` for why specs must not `vim.wait` this out.
+function M._flush_capture_debounce()
+  local ui = M._ui
+  if ui and ui.flush_capture_debounce then
+    return ui.flush_capture_debounce()
+  end
+  return false
+end
+
 function M.unmount()
   local ui = M._ui
   M._ui = nil
   pcall(vim.api.nvim_del_augroup_by_name, AUGROUP)
+  -- A live libuv timer keeps the event loop alive and leaks into the next
+  -- spec; the augroup delete above stops new ones being armed.
+  if ui and ui._capture_timer then
+    local t = ui._capture_timer
+    ui._capture_timer = nil
+    pcall(function()
+      t:stop()
+      t:close()
+    end)
+  end
   if not ui then
     if M._help_orphan then
       M._ui = nil

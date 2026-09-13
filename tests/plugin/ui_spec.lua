@@ -551,4 +551,93 @@ describe("para-organize.ui", function()
       assert.is_false(ui.unmount())
     end)
   end)
+
+  -------------------------------------------------------------------------
+  -- spec 14 §5 — the ParaOrganize* groups are a REAL public hook
+  -------------------------------------------------------------------------
+
+  describe("highlight groups (spec 14 §5)", function()
+    --- Number of attributes a group resolves to. ZERO is the failure this
+    --- whole block exists to catch: `nvim_get_hl` returns an empty dict both
+    --- for an undefined group and for a group that is merely NAMED somewhere,
+    --- so a group with no attributes renders with no color at all.
+    local function attrs(name)
+      local ok, def = pcall(vim.api.nvim_get_hl, 0, { name = name, link = true })
+      local n = 0
+      if ok and def then
+        for _ in pairs(def) do
+          n = n + 1
+        end
+      end
+      return n
+    end
+
+    it("resolves every group in the enumeration, unlike an invented name", function()
+      ui.setup({ ui = { close_on_complete = false } })
+      -- Calibration: an undefined group is indistinguishable from a defined
+      -- one unless `attrs` actually discriminates. This pins that it does.
+      assert.are.equal(0, attrs("ZzParaOrganizeDefinitelyNotAGroup"))
+      assert.is_true(vim.tbl_count(ui.HL_GROUPS) > 0)
+      for name, link in pairs(ui.HL_GROUPS) do
+        assert.is_true(attrs(name) > 0, name .. " resolves to nothing — a colorscheme has nothing to hook")
+        assert.is_true(attrs(link) > 0, link .. " (the fallback target of " .. name .. ") does not exist")
+      end
+    end)
+
+    it("defines them with `default`, so a colorscheme author wins", function()
+      ui.setup({ ui = { close_on_complete = false } })
+      vim.api.nvim_set_hl(0, "ParaOrganizeScoreHigh", { fg = "#ff00ff", bold = true })
+      ui.apply_highlights() -- must NOT clobber the author's definition
+      local def = vim.api.nvim_get_hl(0, { name = "ParaOrganizeScoreHigh" })
+      assert.is_true(def.bold)
+      assert.are.equal(0xff00ff, def.fg)
+      assert.is_nil(def.link)
+    end)
+
+    it("re-applies after a `:colorscheme`, which issues `:hi clear`", function()
+      ui.setup({ ui = { close_on_complete = false } })
+      vim.cmd("colorscheme blue")
+      assert.is_true(attrs("ParaOrganizeSelected") > 0)
+    end)
+
+    it("emits ONLY groups that resolve, and the hook is among them", function()
+      ui.setup({ ui = { close_on_complete = false } })
+      ui.mount(state, { bind = false })
+      ui.refresh(state)
+      local bufs, seen = ui.current_bufs(), {}
+      for _, pane in ipairs({ "organize", "capture" }) do
+        local buf = bufs[pane]
+        if buf and vim.api.nvim_buf_is_valid(buf) then
+          for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, -1, 0, -1, { details = true })) do
+            local details = mark[4] or {}
+            if details.hl_group then
+              seen[details.hl_group] = true
+            end
+            for _, chunks in ipairs(details.virt_lines or {}) do
+              for _, chunk in ipairs(chunks) do
+                if chunk[2] then
+                  seen[chunk[2]] = true
+                end
+              end
+            end
+            for _, chunk in ipairs(details.virt_text or {}) do
+              if chunk[2] then
+                seen[chunk[2]] = true
+              end
+            end
+          end
+        end
+      end
+      local para = 0
+      for group in pairs(seen) do
+        assert.is_true(attrs(group) > 0, "rendered with an undefined group: " .. group)
+        if group:match("^ParaOrganize") then
+          para = para + 1
+        end
+      end
+      -- The hook is DEAD unless the plugin actually emits it; before this was
+      -- fixed the panes emitted the stock groups and nothing else.
+      assert.is_true(para > 0, "no ParaOrganize* group was emitted — the documented hook is dead")
+    end)
+  end)
 end)

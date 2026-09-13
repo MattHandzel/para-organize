@@ -28,6 +28,18 @@ M.DEFAULT_CORE_CMD = { 'organize', 'serve' }
 --- must not hang on a core that will never come up).
 M.DEFAULT_SPAWN_TIMEOUT_MS = 2000
 
+--- How long a single dial may wait for the core's handshake line.
+---
+--- Distinct from `timeout_ms`, which is the per-REQUEST budget once the
+--- connection is up. This one covers only "socket accepted, now say hello",
+--- and it is the number that matters on a COLD start: the core builds its
+--- index before it answers, so on a large vault the first handshake is slow
+--- (13k notes ≈ 2.3s here) even though the process is perfectly healthy.
+--- This used to be hardcoded to 750ms at both dial sites, which ignored the
+--- user's configured timeouts entirely and reported a busy-but-fine core as
+--- a handshake Timeout. Configurable via `core.handshake_timeout_ms`.
+M.DEFAULT_HANDSHAKE_TIMEOUT_MS = 5000
+
 -- Module-local process/client state. One core per Neovim instance.
 M._client = nil
 M._proc = nil -- { handle, pid, cmd, exited, code, signal, log }
@@ -255,6 +267,8 @@ function M.ensure_running(config)
 
   -- 3. Poll until it answers, or until it dies / we run out of time.
   local budget = tonumber(cfg(config, 'spawn_timeout_ms', M.DEFAULT_SPAWN_TIMEOUT_MS)) or M.DEFAULT_SPAWN_TIMEOUT_MS
+  local handshake_ms = tonumber(cfg(config, 'handshake_timeout_ms', M.DEFAULT_HANDSHAKE_TIMEOUT_MS))
+    or M.DEFAULT_HANDSHAKE_TIMEOUT_MS
   -- hrtime, not uv.now(): the loop clock is cached and would not advance
   -- across our polling sleeps, turning the budget into an infinite loop.
   local deadline = uv.hrtime() + budget * 1e6
@@ -270,7 +284,7 @@ function M.ensure_running(config)
         )
     end
     if M.socket_exists(socket_path) then
-      local client, err = rpc.connect(socket_path, vim.tbl_extend('force', connect_opts, { timeout_ms = 750 }))
+      local client, err = rpc.connect(socket_path, vim.tbl_extend('force', connect_opts, { timeout_ms = handshake_ms }))
       if client then
         M._client = client
         return client
@@ -309,7 +323,9 @@ function M.is_running(config)
   if not socket_path or not M.socket_exists(socket_path) then
     return false
   end
-  local client = rpc.connect(socket_path, { timeout_ms = 750, reconnect = false })
+  local handshake_ms = tonumber(cfg(config or M._config or {}, 'handshake_timeout_ms', M.DEFAULT_HANDSHAKE_TIMEOUT_MS))
+    or M.DEFAULT_HANDSHAKE_TIMEOUT_MS
+  local client = rpc.connect(socket_path, { timeout_ms = handshake_ms, reconnect = false })
   if client then
     client:close()
     return true

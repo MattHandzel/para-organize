@@ -287,6 +287,12 @@ def test_suggest_json_marks_a_note_destination_as_a_merge_target(core: Core) -> 
     tag names both the FOLDER `areas/health` and the NOTE
     `areas/health/index.md` (whose `title: Health` is match key (d)) — the
     note was unreachable before 21 at any setting."""
+    # The note ballot is OPT-IN (see `SuggestionsConfig.note_candidates`), so
+    # a test of note rows must ASK for them rather than inherit a default.
+    (core.config_dir / "config.toml").write_text(
+        _config_text(core.vault, extra="\n[suggestions]\nnote_candidates = true\n"),
+        encoding="utf-8",
+    )
     core.index()
     proc = core.run("suggest", QUIRK_FILES["iso_filename"], "--json")
     assert proc.returncode == 0, proc.stderr
@@ -299,21 +305,30 @@ def test_suggest_json_marks_a_note_destination_as_a_merge_target(core: Core) -> 
     assert payload["suppressed_duplicates"] == 0
 
 
-def test_suggest_honors_note_candidates_false(core: Core) -> None:
-    """§3.6's off switch, through the real config file: `false` restores the
-    folders-only ballot. The honored-key test doc 14 §4.3 requires."""
+def test_suggest_honors_note_candidates_in_both_directions(core: Core) -> None:
+    """§3.6's switch, through the real config file, plus the DEFAULT.
+
+    The default is `false` — the note ballot is opt-in until §5.3's quality
+    gates pass, because measured on 400 real captures it displaced the folder
+    ranking (rank-1 was a note for 255 of 257 covered captures) and its accept
+    path still moves instead of merging. Both directions are pinned here so a
+    flip of that default cannot pass silently: it is a user-visible change of
+    what the tool suggests, and it must break a test that names it.
+    """
     core.index()
     note_path = QUIRK_FILES["iso_filename"]
-    with_notes = json.loads(core.run("suggest", note_path, "--json").stdout)["suggestions"]
-    assert "areas/health/index.md" in [e["relative_path"] for e in with_notes]
+
+    shipped = json.loads(core.run("suggest", note_path, "--json").stdout)["suggestions"]
+    assert "areas/health/index.md" not in [e["relative_path"] for e in shipped]
+    assert {e["destination_kind"] for e in shipped} == {"folder"}
 
     (core.config_dir / "config.toml").write_text(
-        _config_text(core.vault, extra="\n[suggestions]\nnote_candidates = false\n"),
+        _config_text(core.vault, extra="\n[suggestions]\nnote_candidates = true\n"),
         encoding="utf-8",
     )
-    without = json.loads(core.run("suggest", note_path, "--json").stdout)["suggestions"]
-    assert "areas/health/index.md" not in [e["relative_path"] for e in without]
-    assert {e["destination_kind"] for e in without} == {"folder"}
+    opted_in = json.loads(core.run("suggest", note_path, "--json").stdout)["suggestions"]
+    assert "areas/health/index.md" in [e["relative_path"] for e in opted_in]
+    assert "note" in {e["destination_kind"] for e in opted_in}
 
 
 def test_suggest_honors_max_candidate_depth(core: Core) -> None:

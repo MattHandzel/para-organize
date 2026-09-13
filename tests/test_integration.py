@@ -886,13 +886,17 @@ def test_suggestions_agree_across_the_two_doors(
 
     # The exact ranking, not just "they match" — otherwise two identically
     # broken doors would pass. This capture's tags (impro, creativity) match
-    # no FOLDER name at any depth, but `resources/performing/impro.md` is a
-    # note whose stem is `impro`, and spec 21 §3 puts notes on the ballot:
-    # 2.0 (exact tag) + 1.5 (normalized tag) + 0.1 (resources bonus) = 3.6,
-    # spec 04 §2's arithmetic unmodified, marked `note` so the client starts
-    # doc 19's merge flow instead of a move. The archive row still follows.
+    # no FOLDER name at any depth, so on a DEFAULT install the honest answer
+    # is the archive row alone (the SQ-1 ruling: a zero-signal capture gets
+    # "Archive Now", not nine unexplained rows).
+    #
+    # `resources/performing/impro.md` is a note whose stem is `impro` and
+    # would score 2.0 + 1.5 + 0.1 = 3.6 with `suggestions.note_candidates`
+    # on — that is the value the note ballot will add once spec 21 §5.3's
+    # quality gates pass and selecting a note MERGES (doc 19) instead of
+    # moving. It ships off, so it is not in a default answer, and
+    # `tests/test_destination_recall.py` covers it opted-in.
     assert cli_shape == [
-        ("<VAULT>/resources/performing/impro.md", "resource", 3.6, "note"),
         ("<VAULT>/archive/capture/raw_capture", "archive", 0.1, "folder"),
     ]
 

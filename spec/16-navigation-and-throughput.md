@@ -220,7 +220,7 @@ seen_scan_months = 2              # how far back the op.skip scan reads for "uns
 
 ⚠ `preview_notes` is **not** here — it is `ui.organize.preview_notes` (§3.8). There is no CLI destination preview, so no CLI can disagree with it and no core reader would exist for it.
 
-**Every fallback highlight group the plugin names must be defined.** ⚠ `ParaOrganizeSelected` and `ParaOrganizeScore{High,Medium,Low}` are named in the current tree and defined nowhere, which is why `integrate.lua` had to hardcode `DiffAdd`/`DiffDelete`. The new groups above ship with real defaults, and `setup()` calls `nvim_set_hl(0, name, { default = true, link = … })` for every `ParaOrganize*` name the plugin can emit.
+**Every fallback highlight group the plugin names must be defined.** ✅ *Base obligation discharged 2026-08-21, ahead of this document's build* — see 14 §5. `ui.HL_GROUPS` holds the closed set, `ui.apply_highlights()` defines each with `nvim_set_hl(0, name, { default = true, link = … })` from `setup()` and re-applies on `ColorScheme`, and the `ui.highlights` DEFAULTS now name the `ParaOrganize*` groups so they are what actually renders. Any group THIS document adds must be added to `ui.HL_GROUPS` in the same commit that first emits it — that table is the enumeration, so a name emitted but absent from it is the exact defect that was just fixed. (`integrate.lua`'s `DiffAdd`/`DiffDelete` stay stock on purpose: its own §-note explains that every colorscheme defines them, so a diff reads correctly with no configuration.)
 
 ### Wire deltas (the complete blast radius)
 
