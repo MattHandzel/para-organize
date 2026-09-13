@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import string
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -132,10 +133,6 @@ class CorePaths:
                 return base / xdg_subdir if xdg_subdir else base
             return expand(fallback, env)
 
-        # Runtime fallback when no XDG_RUNTIME_DIR: a per-uid tmp dir —
-        # sockets don't belong under $HOME (spec 10 §1 names XDG_RUNTIME_DIR).
-        runtime_fallback = str(Path(tempfile.gettempdir()) / f"organize-core-{os.getuid()}")
-
         return cls(
             config_dir=pick(
                 config_dir, ENV_CONFIG_DIR, "XDG_CONFIG_HOME", "organize-core", "~/.config/organize-core"
@@ -144,7 +141,7 @@ class CorePaths:
                 state_dir, ENV_STATE_DIR, "XDG_DATA_HOME", "organize-core", "~/.local/share/organize-core"
             ),
             runtime_dir=pick(
-                runtime_dir, ENV_RUNTIME_DIR, "XDG_RUNTIME_DIR", None, runtime_fallback
+                runtime_dir, ENV_RUNTIME_DIR, "XDG_RUNTIME_DIR", None, runtime_fallback()
             ),
         )
 
@@ -156,6 +153,18 @@ class CorePaths:
             d.mkdir(parents=True, exist_ok=True)
 
 
+def runtime_fallback() -> str:
+    """The runtime dir when ``XDG_RUNTIME_DIR`` is unset: a per-uid tmp dir —
+    sockets don't belong under $HOME (spec 10 §1 names XDG_RUNTIME_DIR).
+
+    On macOS the per-user ``$TMPDIR`` is ``/var/folders/xx/…/T/`` (~50 bytes)
+    and AF_UNIX caps ``sun_path`` at 104, so the fallback there is ``/tmp`` —
+    the same base the Neovim client's default socket uses.
+    """
+    base = "/tmp" if sys.platform == "darwin" else tempfile.gettempdir()
+    return str(Path(base) / f"organize-core-{os.getuid()}")
+
+
 def expand(path: Path | str, env: dict[str, str] | None = None) -> Path:
     """Expand ``~`` and ``$VARS`` against ``env`` (default ``os.environ``)
     and resolve symlinks. Used for every path read from config (spec 06 §2:
@@ -164,6 +173,12 @@ def expand(path: Path | str, env: dict[str, str] | None = None) -> Path:
     if env is None:
         env = default_env()
     s = str(path)
+    # $XDG_RUNTIME_DIR is the one variable the shipped config names that a
+    # whole platform never sets (macOS). Left intact it became a RELATIVE
+    # socket path under the cwd, so `organize serve` failed with "AF_UNIX path
+    # too long". Give it the same fallback CorePaths uses for runtime_dir.
+    if not env.get("XDG_RUNTIME_DIR"):
+        env = {**env, "XDG_RUNTIME_DIR": runtime_fallback()}
     # $VAR / ${VAR} against the provided env only; unknown vars left intact
     # (loud downstream, never silently substituted from the real process env).
     s = string.Template(s).safe_substitute(env)

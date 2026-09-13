@@ -14,11 +14,21 @@ SHARED FILE — only the architect/integrator edits this module.
 
 from __future__ import annotations
 
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from organize_core.paths import CorePaths
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    # macOS: the default basetemp lives under /private/var/folders/…/T/, and a
+    # server test's `<tmp_path>/runtime/organize-core.sock` then overruns the
+    # 104-byte AF_UNIX limit — every socket test failed with "path too long".
+    if sys.platform == "darwin" and not config.option.basetemp:
+        config.option.basetemp = tempfile.mkdtemp(prefix="oc-", dir="/tmp")
 
 # vault-relative path of each quirk exemplar (spec 02 "quirks" list)
 QUIRK_FILES: dict[str, str] = {

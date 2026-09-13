@@ -114,3 +114,18 @@ def test_expand_vars_tilde_and_symlinks(tmp_path: Path) -> None:
 
 def test_expand_accepts_path_objects(tmp_path: Path) -> None:
     assert expand(tmp_path / "x", {}) == (tmp_path / "x").resolve()
+
+
+def test_unset_xdg_runtime_dir_expands_to_the_runtime_fallback(tmp_path: Path) -> None:
+    # macOS never sets XDG_RUNTIME_DIR. The shipped config's
+    # `socket_path = "$XDG_RUNTIME_DIR/organize-core.sock"` used to stay a
+    # literal RELATIVE path there, and `organize serve` could not bind it.
+    env = {"HOME": str(tmp_path)}
+    sock = expand("$XDG_RUNTIME_DIR/organize-core.sock", env)
+    assert sock.is_absolute()
+    assert "$" not in str(sock)
+    assert sock == CorePaths.resolve(env=env).socket_path
+    assert len(str(sock).encode()) < 104  # AF_UNIX sun_path on macOS
+    # a set XDG_RUNTIME_DIR still wins
+    env["XDG_RUNTIME_DIR"] = str(tmp_path / "run")
+    assert expand("$XDG_RUNTIME_DIR/x.sock", env) == (tmp_path / "run").resolve() / "x.sock"

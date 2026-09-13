@@ -96,6 +96,9 @@ function M.sandbox()
   local base = ("%s/po%d-%d"):format(temp_root(), uv.os_getpid(), counter)
   vim.fn.delete(base, "rf")
   vim.fn.mkdir(base, "p")
+  -- Symlink-free, because the core resolves every path it returns: on macOS
+  -- /tmp -> /private/tmp, and `sb.vault .. "/…"` never matched a record path.
+  base = uv.fs_realpath(base) or base
   local sb = {
     dir = base,
     vault = base .. "/v",

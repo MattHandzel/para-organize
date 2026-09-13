@@ -17,11 +17,16 @@ test:
 # tests/plugin/minimal_init.lua (verified in plenary's test_harness.lua:84).
 # A process per spec also keeps the seats' module injections — and the real
 # `organize serve` children they spawn — isolated from one another.
+#
+# TMPDIR is handed to nvim symlink-free: on macOS it is /var/folders/…, and
+# /var -> /private/var, so fixture paths built from `vim.fn.tempname()` never
+# equalled the resolved paths the core returns.
 test-plugin:
 	@fail=0; \
+	tmp=$$(cd "$${TMPDIR:-/tmp}" && pwd -P); \
 	for spec in tests/plugin/*_spec.lua; do \
 		echo "=== $$spec"; \
-		$(NVIM) --headless --noplugin -u tests/plugin/minimal_init.lua \
+		TMPDIR="$$tmp" $(NVIM) --headless --noplugin -u tests/plugin/minimal_init.lua \
 			-c "lua require('plenary.busted').run('$(CURDIR)/$$spec')" || fail=1; \
 	done; \
 	if [ $$fail -ne 0 ]; then echo "PLUGIN SUITE FAILED"; exit 1; fi; \
